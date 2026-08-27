@@ -219,6 +219,10 @@ svg{display:block; flex:none;}
   vertical-align:-3px; margin-left:2px; animation:blink 1s steps(2) infinite;
 }
 @keyframes blink{50%{opacity:0;}}
+/* 等第一個字的時候畫的那一行。只有一個游標閃在空白畫面上看起來就是當掉了：
+   num_ctx 大的時候光 prefill 就要幾十秒，思考模式又把字全吐在 think 裡。 */
+.wait{color:var(--ink2); font-size:13px; animation:breathe 1.6s ease-in-out infinite;}
+@media (prefers-reduced-motion:reduce){.wait{animation:none;}}
 
 /* 程式碼區塊 */
 .code{border-radius:12px; border:1px solid var(--line); overflow:hidden; background:var(--code-bg); margin:.2em 0;}
@@ -817,3 +821,29 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
   font-size:11px; color:var(--ink3); font-family:var(--mono);
   border-left:1px solid var(--line2); padding-left:10px;
 }
+
+/* ── topbar 的系統用量 ─────────────────────────────────────────────
+   模型跑起來的時候，唯一會先撞到的是 VRAM —— 12G 的卡塞 14B 的模型
+   會靜靜地把層數搬回 CPU，速度掉一個數量級而且不報錯。所以 VRAM 排第一，
+   窄畫面留下來的也是它。 */
+#sysBar{
+  display:flex; gap:8px; align-items:center; background:none; border:0;
+  padding:3px 8px; border-radius:8px; color:var(--ink2);
+  font-size:11.5px; font-family:var(--mono); white-space:nowrap;
+}
+#sysBar:hover{background:var(--ground);}
+#sysBar .m{display:flex; gap:4px; align-items:center;}
+#sysBar .m b{font-weight:600; color:var(--ink);}
+#sysBar .m.hot b{color:var(--warn);}
+#sysBar .m.full b{color:var(--err);}
+@media (max-width:1180px){#sysBar .m:not(:first-child){display:none;}}
+@media (max-width:760px){#sysBar{display:none;}}
+.sys-full{display:grid; gap:10px; margin-bottom:14px;}
+.sys-full .row{display:flex; justify-content:space-between; gap:12px; font-size:12.5px;}
+.sys-full .row .k{color:var(--ink2);}
+.sys-full .row .v{font-family:var(--mono);}
+.sys-full .bar{height:5px; border-radius:999px; background:var(--ground); overflow:hidden;}
+.sys-full .bar i{display:block; height:100%; background:var(--accent);}
+.sys-full .bar.hot i{background:var(--warn);}
+.sys-full .bar.full i{background:var(--err);}
+.sys-pick{display:flex; flex-wrap:wrap; gap:14px; margin:8px 0 4px;}

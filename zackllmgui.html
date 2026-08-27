@@ -228,6 +228,10 @@ svg{display:block; flex:none;}
   vertical-align:-3px; margin-left:2px; animation:blink 1s steps(2) infinite;
 }
 @keyframes blink{50%{opacity:0;}}
+/* 等第一個字的時候畫的那一行。只有一個游標閃在空白畫面上看起來就是當掉了：
+   num_ctx 大的時候光 prefill 就要幾十秒，思考模式又把字全吐在 think 裡。 */
+.wait{color:var(--ink2); font-size:13px; animation:breathe 1.6s ease-in-out infinite;}
+@media (prefers-reduced-motion:reduce){.wait{animation:none;}}
 
 /* 程式碼區塊 */
 .code{border-radius:12px; border:1px solid var(--line); overflow:hidden; background:var(--code-bg); margin:.2em 0;}
@@ -826,6 +830,32 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
   font-size:11px; color:var(--ink3); font-family:var(--mono);
   border-left:1px solid var(--line2); padding-left:10px;
 }
+
+/* ── topbar 的系統用量 ─────────────────────────────────────────────
+   模型跑起來的時候，唯一會先撞到的是 VRAM —— 12G 的卡塞 14B 的模型
+   會靜靜地把層數搬回 CPU，速度掉一個數量級而且不報錯。所以 VRAM 排第一，
+   窄畫面留下來的也是它。 */
+#sysBar{
+  display:flex; gap:8px; align-items:center; background:none; border:0;
+  padding:3px 8px; border-radius:8px; color:var(--ink2);
+  font-size:11.5px; font-family:var(--mono); white-space:nowrap;
+}
+#sysBar:hover{background:var(--ground);}
+#sysBar .m{display:flex; gap:4px; align-items:center;}
+#sysBar .m b{font-weight:600; color:var(--ink);}
+#sysBar .m.hot b{color:var(--warn);}
+#sysBar .m.full b{color:var(--err);}
+@media (max-width:1180px){#sysBar .m:not(:first-child){display:none;}}
+@media (max-width:760px){#sysBar{display:none;}}
+.sys-full{display:grid; gap:10px; margin-bottom:14px;}
+.sys-full .row{display:flex; justify-content:space-between; gap:12px; font-size:12.5px;}
+.sys-full .row .k{color:var(--ink2);}
+.sys-full .row .v{font-family:var(--mono);}
+.sys-full .bar{height:5px; border-radius:999px; background:var(--ground); overflow:hidden;}
+.sys-full .bar i{display:block; height:100%; background:var(--accent);}
+.sys-full .bar.hot i{background:var(--warn);}
+.sys-full .bar.full i{background:var(--err);}
+.sys-pick{display:flex; flex-wrap:wrap; gap:14px; margin:8px 0 4px;}
 </style>
 </head>
 <body>
@@ -869,6 +899,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
       <span class="cap cap-tools" id="capTools" hidden>tools</span>
       <span class="cap cap-vision" id="capVision" hidden>vision</span>
       <div class="spacer"></div>
+      <button id="sysBar" hidden title="系統使用量（點開看全部）"></button>
       <div id="statusPill" role="button" tabindex="0" title="點擊設定主機">
         <span class="dot idle" id="statusDot"></span>
         <span id="statusText">尚未連線</span>
@@ -963,6 +994,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
       <div class="f-head ws-head">
         <span class="p" id="wsName">（未選資料夾）</span>
         <button class="mini" id="wsPick" title="選一個資料夾當工作區">選資料夾…</button>
+        <button class="mini" id="treeReload" title="重新讀取檔案樹（工具動過檔案會自己重讀）">↻</button>
         <button class="help-btn" id="wsHelp" title="工作區是什麼、限制有哪些">!</button>
       </div>
       <div id="treeWrap">
@@ -1004,6 +1036,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
     <div id="provOpenai" hidden>
       <input id="oaBase" placeholder="https://api.openai.com/v1" spellcheck="false">
       <input id="oaKey" type="password" placeholder="API 金鑰" spellcheck="false" style="margin-top:8px;">
+      <label class="check" style="margin-top:8px;"><input type="checkbox" id="oaTools">送出工具定義（讀檔、跑指令…）</label>
     </div>
     <div class="dialog-row">
       <button class="primary" id="hostTest">測試連線</button>
@@ -1039,6 +1072,19 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
 </div>
 
 <!-- 允許規則 -->
+<div class="overlay hidden" id="sysOverlay">
+  <div class="dialog">
+    <h2>系統使用量</h2>
+    <div id="sysFull" class="sys-full"></div>
+    <div class="note">要放到上面那一條的：空間不夠時只會留最前面那一項。</div>
+    <div id="sysPick" class="sys-pick"></div>
+    <div class="note" id="sysWhere"></div>
+    <div class="dialog-actions">
+      <button class="primary" id="sysClose">關閉</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay hidden" id="rlOverlay">
   <div class="dialog wide">
     <h2>允許規則<button class="help-btn" id="rlHelp" title="規則怎麼比對">!</button></h2>
@@ -1424,6 +1470,54 @@ function fmtElapsed(ms) {
                 : Math.floor(m / 60) + ' 小時 ' + (m % 60) + ' 分';
 }
 
+// topbar 的系統用量。順序＝顯示順序＝窄畫面時誰活下來，
+// VRAM 排第一是因為它是唯一一個「爆了不會報錯、只會慢十倍」的東西：
+// 塞不下的層會被 Ollama 搬回 CPU，畫面上什麼都看不出來。
+const SYS_METRICS = [
+  ['vram', 'VRAM', '顯示卡記憶體。模型塞不下就會被搬回 CPU 跑'],
+  ['ram', 'RAM', '系統記憶體'],
+  ['cpu', 'CPU', '這台機器的 CPU 忙碌程度'],
+  ['gpu', 'GPU', '顯示卡的運算使用率']
+];
+
+// 一格用量要顯示的字，外加 0～1 的滿載程度（畫顏色與長條用）。
+// 拿不到資料就回 null —— 那一格整個不畫，而不是畫一個「—」讓人以為是 0。
+function sysCell(id, d) {
+  if (!d) return null;
+  const card = (d.gpu || [])[0];
+  if (id === 'vram') {
+    if (!card || !card.vram || !card.vram.total) return null;
+    return { text: card.vram.used.toFixed(1) + '/' + card.vram.total.toFixed(0) + ' G',
+             at: card.vram.used / card.vram.total };
+  }
+  if (id === 'ram') {
+    if (!d.ram || !d.ram.total) return null;
+    return { text: d.ram.used.toFixed(1) + '/' + d.ram.total.toFixed(0) + ' G',
+             at: d.ram.used / d.ram.total };
+  }
+  if (id === 'cpu') {
+    if (typeof d.cpu !== 'number' || d.cpu < 0) return null;
+    return { text: d.cpu.toFixed(0) + '%', at: d.cpu / 100 };
+  }
+  if (id === 'gpu') {
+    if (!card || typeof card.util !== 'number') return null;
+    return { text: card.util + '%', at: card.util / 100 };
+  }
+  return null;
+}
+
+// 顏色只有三段：夠用、快滿了、滿了。再細分沒有人看得出差別。
+function sysLevel(at) { return at >= 0.92 ? 'full' : (at >= 0.75 ? 'hot' : ''); }
+
+// 等第一個字時，訊息裡要畫的那一行。回空字串＝不用畫
+// （思考內容自己在動，看得到就不必再講一次）。
+function waitText(ms, thinking, showThink) {
+  if (!thinking) return '等模型回應… ' + fmtElapsed(ms);
+  if (showThink) return '';
+  return '思考中… ' + fmtElapsed(ms) + '（已寫 ' + thinking.length +
+    ' 字，「顯示思考」關著所以看不到內容）';
+}
+
 // 現在正在做的那一項：第一個還沒完成的待辦。
 // 對照 Claude Code 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
 // 說明「跑了多少」，這一句說明「在幹嘛」，兩者缺一不可。
@@ -1463,7 +1557,15 @@ function finishCheck(run) {
     + '用 run_tests 跑一次；沒過就修到過，然後再說做完了。';
 }
 
-function toolDefs() { return S.toolDefs || []; }
+function toolDefs() {
+  const all = S.toolDefs || [];
+  // ponytail: 子代理（task）走的是 Ollama 的 /api/chat，外部 API 模式下沒有
+  //           對應的路徑，所以那邊乾脆不給這一支 —— 給了只會在呼叫時才爆。
+  //           要支援就把 runSubagent 改成走 chatStream。
+  return S.provider === 'openai'
+    ? all.filter(function (d) { return ((d.function || {}).name) !== 'task'; })
+    : all;
+}
 
 const MAX_TOOL_ROUNDS = 25;     // 「改一個檔 → 跑測試 → 再改」通常要十幾輪
 const ROUNDS_WARN = 5;          // 剩這麼多輪才提醒。太早講只是每輪多燒一句話
@@ -1503,7 +1605,10 @@ const AUTO_MODES = [
   ['off', '每一次都問', '每個工具呼叫都要你按執行'],
   ['read', '唯讀自動', '讀檔、搜尋、列目錄自動放行；改檔案、跑指令仍要你點頭'],
   ['edit', '改檔案自動', '連改檔案也自動放行；run_shell、run_tests 仍要你點頭'],
-  ['full', '全自動', '除了危險指令，其他一律自動放行 —— 放著讓它自己跑']
+  ['full', '跑指令自動', 'run_shell／run_tests／setup_env 也自動放行；'
+    + 'rm、sudo、pip install 這種風險指令仍要你點頭'],
+  ['ws', '工作區內全自動', '連 rm、mv、chmod 也自動放行 —— 但只限路徑全都在工作區裡的；'
+    + '動到工作區外、sudo、裝套件仍要你點頭。沙盒開著時全部不問（沙盒本身就出不去）']
 ];
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
   'todo_write', 'load_skill'];   // load_skill 只是讀 serve.py 旁邊的一份說明
@@ -1518,20 +1623,27 @@ function autoLabel() {
 //   deny 規則 > 風險指令一律問 > allow 規則 > 自動模式
 // allow **不能**蓋過風險指令 —— 那條保證是寫在文件上的，
 // 不能被一個設定檔悄悄拿掉。deny 由伺服器真的擋，這裡只是不要白問一次。
-function autoApprove(name, risk, rule) {
+function autoApprove(name, risk, rule, scope) {
   if (rule && rule.action === 'deny') return false;
-  if (risk && risk !== 'ok') return false;        // 危險指令永遠要人看過
+  if (risk === 'block') return false;             // 這一級 serve.py 直接拒絕，本來就跑不了
+  // 危險指令要人看過。唯一的例外是「工作區內全自動」加上後端算出這行指令
+  // 動到的路徑全都在工作區裡（scope === 'ws'，ws_scoped() 判的；沙盒開著時
+  // 每一行指令都算，因為沙盒外面是唯讀的）——
+  // 那一類改壞了還有 git 與 .zackllmgui-backup/ 救得回來，而且它是
+  // 「放著跑測試」最常撞到的一格（rm 掉 __pycache__、mv 檔案）。
+  if (risk && risk !== 'ok' && !(S.auto === 'ws' && scope === 'ws')) return false;
   if (rule && rule.action === 'allow') return true;
   if (rule && rule.action === 'ask') return false;
   if (S.auto === 'read') return READ_ONLY_TOOLS.indexOf(name) >= 0;
   // 改檔案自動、跑指令要問。這一格是平常該待的地方：改檔案佔了工具呼叫
   // 一半以上，而且**改檔案有還原點**（journal + backup），點錯了倒得回來；
-  // run_shell 沒有。少了這一格，人的實際反應是「改十個檔要點十次，乾脆開全自動」
+  // run_shell 沒有。少了這一格，人的實際反應是「改十個檔要點十次，乾脆整個放開」
   // —— 那才是真正的風險。setup_env 不算：它要連網裝套件，那是指令不是改檔案。
   if (S.auto === 'edit') {
     return READ_ONLY_TOOLS.indexOf(name) >= 0 || WRITE_TOOLS.indexOf(name) >= 0;
   }
-  if (S.auto === 'full') return name !== 'submit_plan';   // 計畫還是要人核准
+  // 計畫還是要人核准
+  if (S.auto === 'full' || S.auto === 'ws') return name !== 'submit_plan';
   return false;
 }
 
@@ -1621,9 +1733,10 @@ const S = {
   jobs: [],                                // 背景指令，活在 serve.py 那個行程裡
   pre: null,                               // 背景先算好的壓縮摘要
   streamTools: ['run_shell', 'run_tests'], mcp: null, cpus: 0, layers: {},
+  sysChips: ['vram'], sys: null,        // topbar 要顯示哪幾格用量
   browse: null, treeReady: false, skills: null, slash: { items: [], at: 0 },
   run: { rounds: 0, calls: 0, tokens: 0 }, queued: [], runTicker: null,
-  auto: 'off',                             // off | read | full，見 AUTO_MODES
+  auto: 'off',                             // off|read|edit|full|ws，見 AUTO_MODES
   files: [], presets: [], tools: false, ctxRatio: 1, lastEst: 0, ctxLabel: ''
 };
 
@@ -1807,7 +1920,7 @@ function renderMarkdown(src) {
 // S.host 是「Ollama 在哪」—— 照 README 的建議把它指到 GPU 主機之後，
 // /tool、/ls、/workspace 這些還是要問**端出這個頁面的那一台**，
 // 不然檔案分頁會說「這個頁面不是本機開的」，而且工具全部打到 Ollama 去。
-const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp)$/;
+const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp|sys)$/;
 
 function apiUrl(path) {
   if (SAME_ORIGIN && SRV_PATHS.test(path)) return location.origin + path;
@@ -1946,13 +2059,50 @@ async function streamSse(path, body, signal, onObj) {
   }
 }
 
-// OpenAI 的訊息格式沒有 thinking / images / tool_calls，能對應的就對應，
-// 對不上的（工具往返）轉成純文字，歷史才不會斷掉。
-function oaMsg(m) {
-  if (m.role === 'tool') {
-    return { role: 'user', content: '（工具 ' + (m.tool_name || '') + ' 的執行結果）\n' + (m.content || '') };
-  }
-  return { role: m.role, content: m.content || '' };
+// Ollama 的 tool call 沒有 id，arguments 是物件；OpenAI 要 id，arguments 要字串。
+function oaToolCall(t, id) {
+  const fn = (t && t.function) || {};
+  const a = fn.arguments;
+  return {
+    id: (t && t.id) || id,
+    type: 'function',
+    function: {
+      name: fn.name || '',
+      arguments: typeof a === 'string' ? a : JSON.stringify(a || {})
+    }
+  };
+}
+
+// OpenAI 的訊息格式沒有 thinking / images，能對應的就對應。
+//
+// 工具往返要整串一起看，不能一則一則轉：OpenAI 規定每一則 tool 訊息都要帶
+// tool_call_id 指回去，而我們存的格式（照 Ollama 的）沒有這個欄位。
+// 順序是固定的 —— assistant 的 tool_calls 後面就是同樣數量、同樣順序的 tool
+// 訊息 —— 所以按順序配回去。配不到的（舊對話、或中間被壓縮過）退回純文字，
+// 寧可少一點結構也不要讓整串歷史被對方退回。
+function oaMsgs(list) {
+  const out = [];
+  let ids = [];                     // 上一則 assistant 還沒被認領的 tool_call_id
+  (list || []).forEach(function (m) {
+    if (m.role === 'tool') {
+      const id = ids.shift();
+      out.push(id
+        ? { role: 'tool', tool_call_id: id, content: String(m.content || '') }
+        : { role: 'user',
+            content: '（工具 ' + (m.tool_name || '') + ' 的執行結果）\n' + (m.content || '') });
+      return;
+    }
+    const item = { role: m.role, content: m.content || '' };
+    ids = [];
+    if (m.tool_calls && m.tool_calls.length) {
+      item.tool_calls = m.tool_calls.map(function (t, i) {
+        return oaToolCall(t, 'call_' + out.length + '_' + i);
+      });
+      ids = item.tool_calls.map(function (t) { return t.id; });
+    }
+    out.push(item);
+  });
+  return out;
 }
 
 /* ══════════════════════ 連線狀態 ══════════════════════ */
@@ -2433,14 +2583,25 @@ function saveChats() { lsSet(LS_CHATS, S.chats.slice(0, 100)); }
 function finishTurn() {
   const r = S.run || {};
   if (!r.calls) return;
-  notifyDone('跑完了：' + r.rounds + ' 輪 · ' + r.calls + ' 次工具 · '
+  notifyBg('跑完了：' + r.rounds + ' 輪 · ' + r.calls + ' 次工具 · '
     + fmtTokens(r.tokens) + ' tokens');
+}
+
+// 有東西在等人回答（確認卡、ask_user_question）就把分頁標題改掉。
+// 通知有可能被瀏覽器擋掉或使用者沒給權限，**標題一定看得到** ——
+// 而且切回來之前，分頁列上那個 ● 就是「這裡卡住了」唯一的線索。
+const BASE_TITLE = (typeof document !== 'undefined' && document.title) || 'ZackLLMGUI';
+let waitingN = 0;
+
+function waitBadge(on) {
+  waitingN = Math.max(0, waitingN + (on ? 1 : -1));
+  document.title = (waitingN ? '● 等你回應 · ' : '') + BASE_TITLE;
 }
 
 // 工具跑起來動輒好幾分鐘，人早就切到別的分頁去了。回來才發現它十分鐘前
 // 就停在一張確認卡上，那段時間是白等的。
 // 只在**看不到這個分頁**的時候發 —— 人在看的話通知只是吵。
-function notifyDone(text) {
+function notifyBg(text) {
   try {
     if (!document.hidden || typeof Notification === 'undefined') return;
     if (Notification.permission === 'granted') {
@@ -2459,11 +2620,12 @@ function saveConfig() {
     userName: S.userName,
     showThink: S.showThink, params: S.params, tools: S.tools,
     provider: S.provider, oa: S.oa, paramsVersion: 3, tab: S.tab, auto: S.auto,
+    sysChips: S.sysChips,
     hideSidebar: document.body.classList.contains('hide-sidebar'),
     hideParams: document.body.classList.contains('hide-params'),
     sideW: savedSideWidth('--side-w'), paramsW: savedSideWidth('--params-w'),
     // 工作區與這四個開關都是 serve.py 的**行程全域**，重啟就沒了。
-    // 自動模式卻存在瀏覽器裡，所以不存這些的話會出現「全自動但改不動檔案」。
+    // 自動模式卻存在瀏覽器裡，所以不存這些的話會出現「全放開了但改不動檔案」。
     wsPath: S.ws.path || '',
     srv: { tools: !!S.srv.tools, write: !!S.ws.write,
            browser: !!S.srv.browser, sandbox: !!S.srv.sandbox }
@@ -3073,7 +3235,6 @@ async function runStream(c, depth) {
   const thinkEl = el.querySelector('.think');
   const thinkBody = el.querySelector('.think-body');
   const bodyEl = el.querySelector('.msg-body');
-  bodyEl.innerHTML = '<span class="caret"></span>';
 
   const payload = { model: S.model, messages: apiMessages(c), stream: true };
   const note = roundsNote(depth || 0);
@@ -3091,8 +3252,21 @@ async function runStream(c, depth) {
   let toolCalls = [], images = [];
   const t0 = performance.now();
   let firstToken = null;
+  let retrying = false;              // 重試倒數自己在畫 bodyEl，這時不要跟它搶
+
+  // 第一個字還沒到、或思考的字都吐在 think 裡（「顯示思考」關著時一個字都看不見）
+  // 的那段時間，畫面上要看得到「還在跑，跑了多久」。
+  // 之前是一個游標閃在空白畫面上 —— 分不出「在想」跟「當掉」。
+  const waitLine = function () {
+    const st = waitText(performance.now() - t0, thinking, S.showThink);
+    if (!st) { bodyEl.innerHTML = '<span class="caret"></span>'; return; }
+    bodyEl.innerHTML = '<span class="wait"></span>';
+    bodyEl.firstChild.textContent = st;
+  };
+  waitLine();
 
   const flush = function () {
+    if (!content && !retrying) waitLine();   // 秒數要自己走，不能只在收到字時更新
     if (!dirty) return;
     dirty = false;
     if (thinking && S.showThink) {
@@ -3136,7 +3310,9 @@ async function runStream(c, depth) {
       } catch (err) {
         const got = !!(content || thinking || toolCalls.length || done);
         if (attempt >= RETRY_MAX || !isRetryable(err, got)) throw err;
-        await countdown(bodyEl, RETRY_BASE_MS * attempt, attempt, friendlyError(err).msg);
+        retrying = true;
+        try { await countdown(bodyEl, RETRY_BASE_MS * attempt, attempt, friendlyError(err).msg); }
+        finally { retrying = false; }
       }
     }
   } catch (err) {
@@ -3286,10 +3462,11 @@ async function chatStream(payload, signal, on) {
   const o = payload.options || {};
   const body = {
     model: payload.model,
-    messages: payload.messages.map(oaMsg),
+    messages: oaMsgs(payload.messages),
     stream: true,
     stream_options: { include_usage: true }
   };
+  if (payload.tools && payload.tools.length) body.tools = payload.tools;
   if (o.temperature !== undefined) body.temperature = o.temperature;
   if (o.top_p !== undefined) body.top_p = o.top_p;
   if (o.seed !== undefined) body.seed = o.seed;
@@ -3297,12 +3474,26 @@ async function chatStream(payload, signal, on) {
   if (o.num_predict !== undefined) body.max_tokens = o.num_predict;
 
   let info = null;
+  // Ollama 的 NDJSON 一次給完整的 tool_calls，SSE 不是：一支工具的 arguments
+  // 會被切成十幾片分批送過來，只能按 delta.tool_calls[].index 自己拼回去。
+  // 拼不回去的症狀是模型「呼叫了工具但參數是半截 JSON」。
+  const parts = [];
   await streamSse('/chat/completions', body, signal, function (obj) {
     const ch = (obj.choices || [])[0] || {};
     const d = ch.delta || {};
     // DeepSeek 與部分 vLLM 會把思考內容放在 reasoning_content
     if (d.reasoning_content || d.reasoning) on.think(d.reasoning_content || d.reasoning);
     if (d.content) on.content(d.content);
+    (d.tool_calls || []).forEach(function (t) {
+      const i = t.index || 0;
+      const cur = parts[i] || (parts[i] =
+        { id: '', type: 'function', function: { name: '', arguments: '' } });
+      if (t.id) cur.id = t.id;
+      const fn = t.function || {};
+      // 都用累加：name 通常第一片就給完，但也有服務會拆開送
+      if (fn.name) cur.function.name += fn.name;
+      if (fn.arguments) cur.function.arguments += fn.arguments;
+    });
     if (obj.usage) {
       info = {
         prompt_eval_count: obj.usage.prompt_tokens || 0,
@@ -3310,6 +3501,8 @@ async function chatStream(payload, signal, on) {
       };
     }
   });
+  const calls = parts.filter(function (t) { return t && t.function.name; });
+  if (calls.length) on.tools(calls);
   on.done(info || {});
 }
 
@@ -3441,8 +3634,11 @@ function renderCompactBtns() {
 
 /* ══════════════════════ 工具呼叫 ══════════════════════ */
 function toolsReady() {
-  return !!(S.provider !== 'openai' && S.srv.tools &&
-    (S.caps[S.model] || []).indexOf('tools') >= 0);
+  if (!S.srv.tools) return false;
+  // 外部 API 沒有辦法問「這個模型支不支援 tools」——/v1/models 只回 id，
+  // 沒有 capabilities 這種東西。所以這一邊改成手動開關（連線設定裡）。
+  if (S.provider === 'openai') return !!S.oa.tools;
+  return (S.caps[S.model] || []).indexOf('tools') >= 0;
 }
 
 // 為什麼不能開工具；空字串代表可以開
@@ -3454,7 +3650,10 @@ function toolsReason() {
         + '在自己的機器上跑一份 serve.py，或那台加 --trust-remote'
       : '直接開 HTML 檔沒有 serve.py，工具不會出現';
   }
-  if (S.provider === 'openai') return '外部 API 模式不送出工具定義';
+  if (S.provider === 'openai') {
+    return S.oa.tools ? ''
+      : '外部 API 模式要自己勾「送出工具定義」（連線設定裡）—— 那邊問不到模型支不支援';
+  }
   if ((S.caps[S.model] || []).indexOf('tools') < 0) return (S.model || '這個模型') + ' 沒有 tools 能力';
   return '';
 }
@@ -3515,10 +3714,10 @@ function autoMenuItem() {
           action: async function () {
             S.auto = m[0];
             saveConfig();
-            // 全自動＝不再一個一個問，但「能不能改檔案」是另一道開關。
+            // 放開之後就不再一個一個問，但「能不能改檔案」是另一道開關。
             // 兩個不連動的話，使用者以為放著讓它自己跑，結果模型連檔案都動不了。
             let extra = '';
-            if (m[0] === 'full' && !S.ws.write) {
+            if ((m[0] === 'full' || m[0] === 'ws') && !S.ws.write) {
               const why = writeReason();
               if (why) extra = '（' + why + '，目前只能讀）';
               else {
@@ -3530,7 +3729,8 @@ function autoMenuItem() {
             renderWriteBtn();
             toast(m[0] === 'off' ? '每個工具呼叫都會問你'
               : (m[0] === 'read' ? '唯讀工具自動放行'
-                : '全自動：危險指令仍會問你' + extra));
+                : (m[0] === 'ws' ? '工作區內全自動：只動工作區檔案的指令不再問你' + extra
+                  : '跑指令自動：rm、sudo 這種風險指令仍會問你' + extra)));
           }
         };
       }));
@@ -3706,7 +3906,7 @@ function renderTodos() {
     }).join('');
 }
 
-// 工具跑幾輪、花多少 token，全自動模式時這是唯一看得出「它還在做事」的地方。
+// 工具跑幾輪、花多少 token。自動模式開著時這是唯一看得出「它還在做事」的地方。
 function renderRunBar() {
   const bar = $('runBar');
   const r = S.run;
@@ -3715,6 +3915,7 @@ function renderRunBar() {
   const bits = ['第 ' + r.rounds + '/' + MAX_TOOL_ROUNDS + ' 輪',
                 r.calls + ' 次工具',
                 '累計 ' + fmtTokens(r.tokens) + ' tokens'];
+  if (r.now) bits.push('執行中 ' + r.now);
   if (r.t0) bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
   // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
   const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
@@ -3792,8 +3993,11 @@ function askUser(args) {
     S.stick = true;
     pin();
     input.focus();
+    waitBadge(true);
+    notifyBg('模型在問你：' + String(args.question || '').slice(0, 80));
 
     const done = function (text) {
+      waitBadge(false);
       el.querySelector('.ta:last-child').innerHTML = '';
       opts.innerHTML = '';
       opts.hidden = true;
@@ -4084,8 +4288,14 @@ function treeRow(entry, depth) {
   return row;
 }
 
-async function expandInto(box, rel, depth) {
-  box.innerHTML = '<div class="fv-empty" style="padding:4px 14px;">讀取中…</div>';
+// open：refreshTree() 傳下來的「重畫前哪些資料夾是開的」，重建之後照樣打開。
+// 沒有它的話，模型每寫一個檔就把整棵樹縮回根目錄，沒有人會想開著它。
+async function expandInto(box, rel, depth, open) {
+  open = open || {};
+  // 已經有內容就別閃「讀取中…」：自動重讀時那一下閃爍比不更新還煩
+  if (!box.querySelector('.it')) {
+    box.innerHTML = '<div class="fv-empty" style="padding:4px 14px;">讀取中…</div>';
+  }
   try {
     const entries = await lsDir(rel);
     box.innerHTML = '';
@@ -4097,13 +4307,20 @@ async function expandInto(box, rel, depth) {
       const row = treeRow(e, depth);
       const kids = document.createElement('div');
       kids.className = 'kids';
+      kids.dataset.rel = e.path;          // refreshTree() 靠這個認出哪一格是開的
       box.appendChild(row);
       box.appendChild(kids);
+      if (e.dir && open[e.path]) {
+        kids.classList.add('open');
+        row.querySelector('.tw').classList.add('open');
+        kids.dataset.loaded = '1';
+        expandInto(kids, e.path, depth + 1, open);
+      }
       row.addEventListener('click', function () {
         if (e.dir) {
-          const open = kids.classList.toggle('open');
-          row.querySelector('.tw').classList.toggle('open', open);
-          if (open && !kids.dataset.loaded) {
+          const on = kids.classList.toggle('open');
+          row.querySelector('.tw').classList.toggle('open', on);
+          if (on && !kids.dataset.loaded) {
             kids.dataset.loaded = '1';
             expandInto(kids, e.path, depth + 1);
           }
@@ -4124,7 +4341,33 @@ async function expandInto(box, rel, depth) {
 
 function renderTree() {
   showTreeView();
-  expandInto($('fvTree'), '', 0);
+  redrawTree();
+}
+
+// 展開狀態不能在重畫時掉。收集現在開著的資料夾，重建時原樣打開。
+function openDirs() {
+  const out = {};
+  Array.prototype.forEach.call($('fvTree').querySelectorAll('.kids.open'),
+    function (k) { if (k.dataset.rel) out[k.dataset.rel] = 1; });
+  return out;
+}
+
+function redrawTree() {
+  expandInto($('fvTree'), '', 0, openDirs());
+}
+
+// 手動的 ↻，以及工具動過檔案之後的自動重讀。
+// 檔案樹本來只在切到這個分頁時讀一次 —— 模型寫了新檔、rm 掉一個資料夾，
+// 樹上完全看不出來，只能自己去點別的分頁再切回來。
+let treeTimer = null;
+
+function touchTree() {
+  S.treeReady = false;      // 沒開著檔案分頁的話，等切過去時自然會重讀
+  S.atFiles = null;         // @檔名 的自動完成也是同一份清單，一起作廢
+  if (S.tab !== 'file' || !S.ws.path || !S.srv.toolsLocal) return;
+  // 一輪常常連改五六個檔，每一個都重畫一次是白做工。收斂成最後一次。
+  clearTimeout(treeTimer);
+  treeTimer = setTimeout(function () { S.treeReady = true; redrawTree(); }, 400);
 }
 
 function showTreeView() {
@@ -4348,7 +4591,7 @@ async function toggleWrite() {
 //
 // 為什麼需要這個：工作區與四個開關都是 serve.py 的**行程全域**，重啟 serve.py
 // 就回到預設；自動模式與其他偏好卻存在瀏覽器的 localStorage 裡。兩邊不對齊的
-// 症狀是「自動模式顯示全自動，但模型改不動檔案」—— 看起來像壞掉，其實是
+// 症狀是「自動模式已經放到最開，但模型改不動檔案」—— 看起來像壞掉，其實是
 // 伺服器那邊的「修改檔案」根本沒開。
 //
 // 順序有意義：**工作區一定要先設**，因為 serve.py 的 ALLOW_WRITE 有
@@ -4432,9 +4675,9 @@ async function toolPreview(name, args) {
     });
     const data = await res.json();
     return { diff: data.diff || data.error || '', risk: data.risk || 'ok',
-             rule: data.rule || null };
+             rule: data.rule || null, scope: data.scope || '' };
   } catch (e) {
-    return { diff: '', risk: 'ok', rule: null };
+    return { diff: '', risk: 'ok', rule: null, scope: '' };
   }
 }
 
@@ -4560,6 +4803,10 @@ function confirmTool(name, args, pre) {
     $('thread').appendChild(el);
     S.stick = true;
     pin();
+    waitBadge(true);
+    notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
+      + (write && args.path ? ' · ' + args.path : '')
+      + (risky ? ' · ' + risky : ''));
 
     // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
     if (write && pre && pre.diff) {
@@ -4584,7 +4831,7 @@ function confirmTool(name, args, pre) {
       });
     }
 
-    const done = function (ok) { el.remove(); resolve(ok); };
+    const done = function (ok) { waitBadge(false); el.remove(); resolve(ok); };
     el.querySelector('[data-go]').addEventListener('click', function () { done(true); });
     el.querySelector('[data-no]').addEventListener('click', function () { done(false); });
   });
@@ -4626,7 +4873,7 @@ async function execTool(name, args, msg) {
     msg.blocked = true;
     return msg;
   }
-  const auto = autoApprove(name, pre.risk, pre.rule);
+  const auto = autoApprove(name, pre.risk, pre.rule, pre.scope);
   if (!auto && !await confirmTool(name, args, pre)) {
     msg.content = '（使用者拒絕執行這個工具）';
     msg.denied = true;
@@ -4634,6 +4881,9 @@ async function execTool(name, args, msg) {
   }
   msg.auto = auto;
   S.run.calls += 1;
+  // 不串流的工具，結果卡是**跑完之後**才貼上來的 —— setup_env 裝套件裝兩分鐘，
+  // 這中間畫面上一個字都不會多。把正在跑的那一支寫進進度條，秒數本來就在走。
+  S.run.now = name;
   renderRunBar();
   try {
     // 會跑很久的那兩支邊跑邊顯示；其他工具一次回來就好
@@ -4641,6 +4891,8 @@ async function execTool(name, args, msg) {
       msg.content = await runStreamed(name, args);
       msg.failed = msg.content.indexOf('錯誤：') === 0;
       msg.streamed = true;
+      S.run.now = '';
+      touchTree();                         // run_shell／run_tests 最常動到檔案
       if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
       else delete S.run.fails[key];
       return msg;
@@ -4665,8 +4917,12 @@ async function execTool(name, args, msg) {
     msg.content = '錯誤：' + e.message;
     msg.failed = true;
   }
+  S.run.now = '';
+  renderRunBar();
   if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
   else delete S.run.fails[key];            // 成功過就重新計算
+  // 失敗的也要重讀：run_shell 跑到一半掛掉，前半段的檔案已經寫下去了
+  if (READ_ONLY_TOOLS.indexOf(name) < 0) touchTree();
   if (!msg.failed) noteFinishSignals(name, args);
   return msg;
 }
@@ -5757,7 +6013,14 @@ function openHostHelp() {
      + (S.srv.ext ? '請求經由 serve.py 轉送，不會有 CORS 問題，金鑰只在本機之間傳遞。'
                   : '直接開 HTML 檔時瀏覽器會直接連過去，對方沒給 CORS 標頭就會失敗，'
                     + '建議改用 serve.py 啟動。')],
-    ['這個模式少了什麼', '沒有 thinking、工具、圖片，模型能力也無法自動偵測。']
+    ['工具能不能用', '可以，但要自己勾上面那個「送出工具定義」——'
+     + '外部 API 問不到模型支不支援（/v1/models 只回 id，沒有 capabilities），'
+     + '所以這裡沒辦法像 Ollama 那樣自動判斷。勾了之後讀檔、跑指令、'
+     + '改檔案跟本機模式完全一樣。不支援工具的模型會直接回錯誤。'],
+    ['這個模式還少了什麼',
+     '思考過程只有部分服務給得出來（DeepSeek、vLLM 的 reasoning_content，'
+     + 'OpenRouter 的 reasoning）—— 那不是規格裡的欄位，給了就顯示，沒給就沒有。'
+     + '另外圖片還沒接，子代理（task）也不會出現在工具清單裡。']
   ] : [
     ['現在連到哪', S.upstream ? '經由代理連到 ' + S.upstream + '。' : '還沒連上。'],
     ['CORS 會不會出問題', SAME_ORIGIN
@@ -5811,6 +6074,7 @@ function openHostDialog(pick) {
   $('hostInput').value = S.host;
   $('oaBase').value = S.oa.base;
   $('oaKey').value = S.oa.key;
+  $('oaTools').checked = !!S.oa.tools;
   $('hostResult').textContent = '';
   renderProvSeg(mode);
   $('hostOverlay').classList.remove('hidden');
@@ -5828,10 +6092,11 @@ async function testHost() {
   const res = $('hostResult');
   res.style.color = 'var(--ink3)';
   res.textContent = '測試中…';
-  const keep = { provider: S.provider, host: S.host, base: S.oa.base, key: S.oa.key };
+  const keep = { provider: S.provider, host: S.host, oa: S.oa };
   S.provider = dialogMode();
   S.host = normalizeHost($('hostInput').value);
-  S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim() };
+  S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
+           tools: $('oaTools').checked };
   try {
     if (S.provider === 'openai') {
       const data = await oaJson('/models', null, 20000);
@@ -5851,7 +6116,7 @@ async function testHost() {
   } finally {
     S.provider = keep.provider;
     S.host = keep.host;
-    S.oa = { base: keep.base, key: keep.key };
+    S.oa = keep.oa;
   }
 }
 
@@ -5905,6 +6170,113 @@ function openSettingsMenu(anchor) {
   ]);
 }
 
+
+
+/* ══════════════════════ 系統用量 ══════════════════════ */
+// 這是 **serve.py 那一台** 的數字。Ollama 指到別台時，GPU 那幾格講的不是
+// 真正在跑模型的那張卡 —— 面板上會標出來，不然會看到「模型在跑但 GPU 0%」
+// 然後以為是壞了。VRAM 排第一：它是唯一一個爆掉不報錯、只會慢十倍的東西。
+
+async function refreshSys() {
+  if (document.hidden) return;              // 分頁在背景就不要一直問
+  try {
+    const res = await fetch(apiUrl('/sys'));
+    S.sys = res.ok ? await res.json() : null;
+  } catch (e) { S.sys = null; }
+  renderSysBar();
+  if (!$('sysOverlay').classList.contains('hidden')) renderSysFull();
+}
+
+function sysShown() {
+  return SYS_METRICS.filter(function (m) {
+    return S.sysChips.indexOf(m[0]) >= 0 && sysCell(m[0], S.sys);
+  });
+}
+
+function renderSysBar() {
+  const bar = $('sysBar');
+  const shown = S.sys ? sysShown() : [];
+  bar.hidden = !shown.length;
+  if (!shown.length) return;
+  bar.innerHTML = shown.map(function (m) {
+    const c = sysCell(m[0], S.sys);
+    return '<span class="m ' + sysLevel(c.at) + '"><span>' + m[1] +
+      '</span><b>' + esc(c.text) + '</b></span>';
+  }).join('');
+}
+
+function sysRow(k, v, at) {
+  return '<div><div class="row"><span class="k">' + esc(k) + '</span>' +
+    '<span class="v">' + esc(v) + '</span></div>' +
+    (typeof at === 'number'
+      ? '<div class="bar ' + sysLevel(at) + '"><i style="width:' +
+        Math.min(100, Math.max(0, at * 100)).toFixed(0) + '%"></i></div>'
+      : '') + '</div>';
+}
+
+function renderSysFull() {
+  const d = S.sys, box = $('sysFull');
+  if (!d) { box.textContent = '拿不到系統用量（只有本機開的頁面看得到）。'; return; }
+  const rows = [];
+  (d.gpu || []).forEach(function (g, i) {
+    const tag = (d.gpu.length > 1 ? '#' + i + ' ' : '') + g.name;
+    if (g.vram && g.vram.total) {
+      rows.push(sysRow(tag + '　VRAM',
+        g.vram.used.toFixed(1) + ' / ' + g.vram.total.toFixed(1) + ' GB',
+        g.vram.used / g.vram.total));
+    }
+    rows.push(sysRow(tag + '　使用率', g.util + '%　' + g.temp + '°C', g.util / 100));
+  });
+  if (d.ram && d.ram.total) {
+    rows.push(sysRow('RAM', d.ram.used.toFixed(1) + ' / ' + d.ram.total.toFixed(1) + ' GB',
+      d.ram.used / d.ram.total));
+  }
+  if (typeof d.cpu === 'number' && d.cpu >= 0) {
+    rows.push(sysRow('CPU（' + d.cores + ' 核）', d.cpu.toFixed(0) + '%', d.cpu / 100));
+  }
+  if (!d.gpu || !d.gpu.length) {
+    rows.push('<div class="note">找不到 nvidia-smi，所以沒有 GPU 與 VRAM 那幾格。</div>');
+  }
+  (S.sysModels || []).forEach(function (m) {
+    rows.push(sysRow('載入中：' + m.name,
+      (m.size_vram ? (m.size_vram / 1073741824).toFixed(1) + ' GB 在 VRAM' : '在 CPU')));
+  });
+  box.innerHTML = rows.join('');
+  $('sysWhere').textContent = d.ollama_local
+    ? '這些是 serve.py 這台機器的數字，Ollama 也在同一台。'
+    : 'Ollama 不在這台機器上 —— GPU 與 VRAM 講的是 serve.py 這台的卡，不是跑模型的那張。';
+}
+
+function renderSysPick() {
+  $('sysPick').innerHTML = SYS_METRICS.map(function (m) {
+    const has = !!sysCell(m[0], S.sys);
+    return '<label class="check" title="' + esc(m[2]) + '">' +
+      '<input type="checkbox" data-sys="' + m[0] + '"' +
+      (S.sysChips.indexOf(m[0]) >= 0 ? ' checked' : '') +
+      (has ? '' : ' disabled') + '>' + m[1] + (has ? '' : '（這台拿不到）') + '</label>';
+  }).join('');
+  $('sysPick').querySelectorAll('input[data-sys]').forEach(function (el) {
+    el.addEventListener('change', function () {
+      const id = el.getAttribute('data-sys');
+      S.sysChips = SYS_METRICS.map(function (m) { return m[0]; }).filter(function (x) {
+        return x === id ? el.checked : S.sysChips.indexOf(x) >= 0;
+      });
+      saveConfig();
+      renderSysBar();
+    });
+  });
+}
+
+async function openSys() {
+  $('sysOverlay').classList.remove('hidden');
+  renderSysFull();
+  renderSysPick();
+  try {                                     // 哪個模型正佔著 VRAM，Ollama 自己知道
+    const res = await fetch(apiUrl('/api/ps'));
+    S.sysModels = res.ok ? ((await res.json()).models || []) : [];
+  } catch (e) { S.sysModels = []; }
+  renderSysFull();
+}
 /* ══════════════════════ 啟動 ══════════════════════ */
 function init() {
   // 靜態圖示
@@ -5943,7 +6315,11 @@ function init() {
   S.presets = lsGet(LS_PRESETS) || [];
   S.provider = conf.provider === 'openai' ? 'openai' : 'ollama';
   S.tab = TABS.indexOf(conf.tab) >= 0 ? conf.tab : 'params';
-  S.auto = ['off', 'read', 'edit', 'full'].indexOf(conf.auto) >= 0 ? conf.auto : 'off';
+  S.auto = ['off', 'read', 'edit', 'full', 'ws'].indexOf(conf.auto) >= 0 ? conf.auto : 'off';
+  if (Array.isArray(conf.sysChips)) {
+    const ids = SYS_METRICS.map(function (m) { return m[0]; });
+    S.sysChips = conf.sysChips.filter(function (x) { return ids.indexOf(x) >= 0; });
+  }
   S.fontScale = +conf.fontScale > 0 ? +conf.fontScale : 1;
   S.userName = conf.userName || '';
   renderUser();
@@ -5954,7 +6330,8 @@ function init() {
   applySideWidth('--params-w', $('params'), conf.paramsW);
   wireResizer($('sideResize'), $('sidebar'), '--side-w', 'right');
   wireResizer($('paramResize'), $('params'), '--params-w', 'left');
-  S.oa = Object.assign({ base: 'https://api.openai.com/v1', key: '' }, conf.oa || {});
+  S.oa = Object.assign({ base: 'https://api.openai.com/v1', key: '', tools: false },
+                       conf.oa || {});
   applyTheme();
   paramsToUi();
   renderFeatBtn();
@@ -6069,7 +6446,13 @@ function init() {
   });
 
   $('wsPick').addEventListener('click', openBrowser);
-  $('fvBack').addEventListener('click', showTreeView);
+  $('treeReload').addEventListener('click', function () {
+    if (!S.ws.path) { toast('還沒選工作區資料夾'); return; }
+    showTreeView();
+    redrawTree();
+  });
+  // 從檢視器回到樹的時候順便重讀：離開的那段時間模型可能又動過檔案
+  $('fvBack').addEventListener('click', function () { showTreeView(); redrawTree(); });
   $('writeBtn').addEventListener('click', toggleWrite);
 
   $('brCancel').addEventListener('click', function () {
@@ -6226,7 +6609,8 @@ function init() {
   $('hostSave').addEventListener('click', function () {
     S.provider = dialogMode();
     S.host = normalizeHost($('hostInput').value);
-    S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim() };
+    S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
+             tools: $('oaTools').checked };
     S.caps = {};
     S.model = '';                       // 換了後端，舊模型名多半不存在
     $('hostOverlay').classList.add('hidden');
@@ -6246,7 +6630,7 @@ function init() {
     if (e.key === 'Escape') {
       closeMenu();
       ['hostOverlay', 'modelsOverlay', 'cmpOverlay', 'fileOverlay',
-       'phOverlay', 'fsOverlay', 'brOverlay', 'rlOverlay'].forEach(function (id) {
+       'phOverlay', 'fsOverlay', 'brOverlay', 'rlOverlay', 'sysOverlay'].forEach(function (id) {
         $(id).classList.add('hidden');
       });
     }
@@ -6261,6 +6645,12 @@ function init() {
   updateCtx();
   setInterval(function () { if (!S.streaming) refreshModels(true); }, 30000);
   setInterval(checkSourceChanged, 30000);   // serve.py 改過就自己重開＋重整
+  $('sysBar').addEventListener('click', openSys);
+  $('sysClose').addEventListener('click', function () {
+    $('sysOverlay').classList.add('hidden');
+  });
+  refreshSys();
+  setInterval(refreshSys, 3000);            // 背景分頁不會問，refreshSys 自己擋掉
   $('resumeBtn').addEventListener('click', resumeRun);
   $('queueDrop').addEventListener('click', function () {
     S.queued = []; renderQueue(); toast('排隊的話取消了');

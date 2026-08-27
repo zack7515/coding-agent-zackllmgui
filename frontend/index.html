@@ -51,6 +51,7 @@
       <span class="cap cap-tools" id="capTools" hidden>tools</span>
       <span class="cap cap-vision" id="capVision" hidden>vision</span>
       <div class="spacer"></div>
+      <button id="sysBar" hidden title="系統使用量（點開看全部）"></button>
       <div id="statusPill" role="button" tabindex="0" title="點擊設定主機">
         <span class="dot idle" id="statusDot"></span>
         <span id="statusText">尚未連線</span>
@@ -145,6 +146,7 @@
       <div class="f-head ws-head">
         <span class="p" id="wsName">（未選資料夾）</span>
         <button class="mini" id="wsPick" title="選一個資料夾當工作區">選資料夾…</button>
+        <button class="mini" id="treeReload" title="重新讀取檔案樹（工具動過檔案會自己重讀）">↻</button>
         <button class="help-btn" id="wsHelp" title="工作區是什麼、限制有哪些">!</button>
       </div>
       <div id="treeWrap">
@@ -186,6 +188,7 @@
     <div id="provOpenai" hidden>
       <input id="oaBase" placeholder="https://api.openai.com/v1" spellcheck="false">
       <input id="oaKey" type="password" placeholder="API 金鑰" spellcheck="false" style="margin-top:8px;">
+      <label class="check" style="margin-top:8px;"><input type="checkbox" id="oaTools">送出工具定義（讀檔、跑指令…）</label>
     </div>
     <div class="dialog-row">
       <button class="primary" id="hostTest">測試連線</button>
@@ -221,6 +224,19 @@
 </div>
 
 <!-- 允許規則 -->
+<div class="overlay hidden" id="sysOverlay">
+  <div class="dialog">
+    <h2>系統使用量</h2>
+    <div id="sysFull" class="sys-full"></div>
+    <div class="note">要放到上面那一條的：空間不夠時只會留最前面那一項。</div>
+    <div id="sysPick" class="sys-pick"></div>
+    <div class="note" id="sysWhere"></div>
+    <div class="dialog-actions">
+      <button class="primary" id="sysClose">關閉</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay hidden" id="rlOverlay">
   <div class="dialog wide">
     <h2>允許規則<button class="help-btn" id="rlHelp" title="規則怎麼比對">!</button></h2>

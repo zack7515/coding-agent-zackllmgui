@@ -3,7 +3,7 @@
 // S.host 是「Ollama 在哪」—— 照 README 的建議把它指到 GPU 主機之後，
 // /tool、/ls、/workspace 這些還是要問**端出這個頁面的那一台**，
 // 不然檔案分頁會說「這個頁面不是本機開的」，而且工具全部打到 Ollama 去。
-const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp)$/;
+const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp|sys)$/;
 
 function apiUrl(path) {
   if (SAME_ORIGIN && SRV_PATHS.test(path)) return location.origin + path;
@@ -142,13 +142,50 @@ async function streamSse(path, body, signal, onObj) {
   }
 }
 
-// OpenAI 的訊息格式沒有 thinking / images / tool_calls，能對應的就對應，
-// 對不上的（工具往返）轉成純文字，歷史才不會斷掉。
-function oaMsg(m) {
-  if (m.role === 'tool') {
-    return { role: 'user', content: '（工具 ' + (m.tool_name || '') + ' 的執行結果）\n' + (m.content || '') };
-  }
-  return { role: m.role, content: m.content || '' };
+// Ollama 的 tool call 沒有 id，arguments 是物件；OpenAI 要 id，arguments 要字串。
+function oaToolCall(t, id) {
+  const fn = (t && t.function) || {};
+  const a = fn.arguments;
+  return {
+    id: (t && t.id) || id,
+    type: 'function',
+    function: {
+      name: fn.name || '',
+      arguments: typeof a === 'string' ? a : JSON.stringify(a || {})
+    }
+  };
+}
+
+// OpenAI 的訊息格式沒有 thinking / images，能對應的就對應。
+//
+// 工具往返要整串一起看，不能一則一則轉：OpenAI 規定每一則 tool 訊息都要帶
+// tool_call_id 指回去，而我們存的格式（照 Ollama 的）沒有這個欄位。
+// 順序是固定的 —— assistant 的 tool_calls 後面就是同樣數量、同樣順序的 tool
+// 訊息 —— 所以按順序配回去。配不到的（舊對話、或中間被壓縮過）退回純文字，
+// 寧可少一點結構也不要讓整串歷史被對方退回。
+function oaMsgs(list) {
+  const out = [];
+  let ids = [];                     // 上一則 assistant 還沒被認領的 tool_call_id
+  (list || []).forEach(function (m) {
+    if (m.role === 'tool') {
+      const id = ids.shift();
+      out.push(id
+        ? { role: 'tool', tool_call_id: id, content: String(m.content || '') }
+        : { role: 'user',
+            content: '（工具 ' + (m.tool_name || '') + ' 的執行結果）\n' + (m.content || '') });
+      return;
+    }
+    const item = { role: m.role, content: m.content || '' };
+    ids = [];
+    if (m.tool_calls && m.tool_calls.length) {
+      item.tool_calls = m.tool_calls.map(function (t, i) {
+        return oaToolCall(t, 'call_' + out.length + '_' + i);
+      });
+      ids = item.tool_calls.map(function (t) { return t.id; });
+    }
+    out.push(item);
+  });
+  return out;
 }
 
 /* ══════════════════════ 連線狀態 ══════════════════════ */

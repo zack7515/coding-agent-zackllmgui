@@ -215,6 +215,54 @@ function fmtElapsed(ms) {
                 : Math.floor(m / 60) + ' 小時 ' + (m % 60) + ' 分';
 }
 
+// topbar 的系統用量。順序＝顯示順序＝窄畫面時誰活下來，
+// VRAM 排第一是因為它是唯一一個「爆了不會報錯、只會慢十倍」的東西：
+// 塞不下的層會被 Ollama 搬回 CPU，畫面上什麼都看不出來。
+const SYS_METRICS = [
+  ['vram', 'VRAM', '顯示卡記憶體。模型塞不下就會被搬回 CPU 跑'],
+  ['ram', 'RAM', '系統記憶體'],
+  ['cpu', 'CPU', '這台機器的 CPU 忙碌程度'],
+  ['gpu', 'GPU', '顯示卡的運算使用率']
+];
+
+// 一格用量要顯示的字，外加 0～1 的滿載程度（畫顏色與長條用）。
+// 拿不到資料就回 null —— 那一格整個不畫，而不是畫一個「—」讓人以為是 0。
+function sysCell(id, d) {
+  if (!d) return null;
+  const card = (d.gpu || [])[0];
+  if (id === 'vram') {
+    if (!card || !card.vram || !card.vram.total) return null;
+    return { text: card.vram.used.toFixed(1) + '/' + card.vram.total.toFixed(0) + ' G',
+             at: card.vram.used / card.vram.total };
+  }
+  if (id === 'ram') {
+    if (!d.ram || !d.ram.total) return null;
+    return { text: d.ram.used.toFixed(1) + '/' + d.ram.total.toFixed(0) + ' G',
+             at: d.ram.used / d.ram.total };
+  }
+  if (id === 'cpu') {
+    if (typeof d.cpu !== 'number' || d.cpu < 0) return null;
+    return { text: d.cpu.toFixed(0) + '%', at: d.cpu / 100 };
+  }
+  if (id === 'gpu') {
+    if (!card || typeof card.util !== 'number') return null;
+    return { text: card.util + '%', at: card.util / 100 };
+  }
+  return null;
+}
+
+// 顏色只有三段：夠用、快滿了、滿了。再細分沒有人看得出差別。
+function sysLevel(at) { return at >= 0.92 ? 'full' : (at >= 0.75 ? 'hot' : ''); }
+
+// 等第一個字時，訊息裡要畫的那一行。回空字串＝不用畫
+// （思考內容自己在動，看得到就不必再講一次）。
+function waitText(ms, thinking, showThink) {
+  if (!thinking) return '等模型回應… ' + fmtElapsed(ms);
+  if (showThink) return '';
+  return '思考中… ' + fmtElapsed(ms) + '（已寫 ' + thinking.length +
+    ' 字，「顯示思考」關著所以看不到內容）';
+}
+
 // 現在正在做的那一項：第一個還沒完成的待辦。
 // 對照 Claude Code 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
 // 說明「跑了多少」，這一句說明「在幹嘛」，兩者缺一不可。
@@ -254,7 +302,15 @@ function finishCheck(run) {
     + '用 run_tests 跑一次；沒過就修到過，然後再說做完了。';
 }
 
-function toolDefs() { return S.toolDefs || []; }
+function toolDefs() {
+  const all = S.toolDefs || [];
+  // ponytail: 子代理（task）走的是 Ollama 的 /api/chat，外部 API 模式下沒有
+  //           對應的路徑，所以那邊乾脆不給這一支 —— 給了只會在呼叫時才爆。
+  //           要支援就把 runSubagent 改成走 chatStream。
+  return S.provider === 'openai'
+    ? all.filter(function (d) { return ((d.function || {}).name) !== 'task'; })
+    : all;
+}
 
 const MAX_TOOL_ROUNDS = 25;     // 「改一個檔 → 跑測試 → 再改」通常要十幾輪
 const ROUNDS_WARN = 5;          // 剩這麼多輪才提醒。太早講只是每輪多燒一句話
@@ -294,7 +350,10 @@ const AUTO_MODES = [
   ['off', '每一次都問', '每個工具呼叫都要你按執行'],
   ['read', '唯讀自動', '讀檔、搜尋、列目錄自動放行；改檔案、跑指令仍要你點頭'],
   ['edit', '改檔案自動', '連改檔案也自動放行；run_shell、run_tests 仍要你點頭'],
-  ['full', '全自動', '除了危險指令，其他一律自動放行 —— 放著讓它自己跑']
+  ['full', '跑指令自動', 'run_shell／run_tests／setup_env 也自動放行；'
+    + 'rm、sudo、pip install 這種風險指令仍要你點頭'],
+  ['ws', '工作區內全自動', '連 rm、mv、chmod 也自動放行 —— 但只限路徑全都在工作區裡的；'
+    + '動到工作區外、sudo、裝套件仍要你點頭。沙盒開著時全部不問（沙盒本身就出不去）']
 ];
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
   'todo_write', 'load_skill'];   // load_skill 只是讀 serve.py 旁邊的一份說明
@@ -309,20 +368,27 @@ function autoLabel() {
 //   deny 規則 > 風險指令一律問 > allow 規則 > 自動模式
 // allow **不能**蓋過風險指令 —— 那條保證是寫在文件上的，
 // 不能被一個設定檔悄悄拿掉。deny 由伺服器真的擋，這裡只是不要白問一次。
-function autoApprove(name, risk, rule) {
+function autoApprove(name, risk, rule, scope) {
   if (rule && rule.action === 'deny') return false;
-  if (risk && risk !== 'ok') return false;        // 危險指令永遠要人看過
+  if (risk === 'block') return false;             // 這一級 serve.py 直接拒絕，本來就跑不了
+  // 危險指令要人看過。唯一的例外是「工作區內全自動」加上後端算出這行指令
+  // 動到的路徑全都在工作區裡（scope === 'ws'，ws_scoped() 判的；沙盒開著時
+  // 每一行指令都算，因為沙盒外面是唯讀的）——
+  // 那一類改壞了還有 git 與 .zackllmgui-backup/ 救得回來，而且它是
+  // 「放著跑測試」最常撞到的一格（rm 掉 __pycache__、mv 檔案）。
+  if (risk && risk !== 'ok' && !(S.auto === 'ws' && scope === 'ws')) return false;
   if (rule && rule.action === 'allow') return true;
   if (rule && rule.action === 'ask') return false;
   if (S.auto === 'read') return READ_ONLY_TOOLS.indexOf(name) >= 0;
   // 改檔案自動、跑指令要問。這一格是平常該待的地方：改檔案佔了工具呼叫
   // 一半以上，而且**改檔案有還原點**（journal + backup），點錯了倒得回來；
-  // run_shell 沒有。少了這一格，人的實際反應是「改十個檔要點十次，乾脆開全自動」
+  // run_shell 沒有。少了這一格，人的實際反應是「改十個檔要點十次，乾脆整個放開」
   // —— 那才是真正的風險。setup_env 不算：它要連網裝套件，那是指令不是改檔案。
   if (S.auto === 'edit') {
     return READ_ONLY_TOOLS.indexOf(name) >= 0 || WRITE_TOOLS.indexOf(name) >= 0;
   }
-  if (S.auto === 'full') return name !== 'submit_plan';   // 計畫還是要人核准
+  // 計畫還是要人核准
+  if (S.auto === 'full' || S.auto === 'ws') return name !== 'submit_plan';
   return false;
 }
 

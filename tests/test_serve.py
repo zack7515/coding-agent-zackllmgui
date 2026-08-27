@@ -412,6 +412,58 @@ def test_edit_replace_all():
         assert "3 處" in out, out
 
 
+def test_edit_multi_is_all_or_nothing():
+    """edits 一次改多處：全部成功才寫檔，任何一組對不上就一個字都不動。"""
+    with Workspace() as ws:
+        f = ws / "pkg" / "calc.py"
+        serve.run_tool("read_file", {"path": "pkg/calc.py"})
+        out = serve.run_tool("edit_file", {"path": "pkg/calc.py", "edits": [
+            {"old": "def add", "new": "def plus"},
+            {"old": "a + b", "new": "a + b + 0"}]})
+        assert "2 處" in out, out
+        assert f.read_text() == "def plus(a, b):\n    return a + b + 0\n"
+
+        before = f.read_text()
+        try:
+            serve.run_tool("edit_file", {"path": "pkg/calc.py", "edits": [
+                {"old": "def plus", "new": "def sum2"},
+                {"old": "這段不存在", "new": "x"}]})
+            raise AssertionError("竟然寫成功了")
+        except ValueError as e:
+            assert "第 2 組" in str(e), e
+        assert f.read_text() == before, "有一組失敗，檔案就不該被動到"
+
+
+def test_loose_replace():
+    """縮排對不上時的退路：唯一命中才套用，而且要照檔案裡的縮排。"""
+    text = "def f():\n    x = 1\n    y = 2\n"
+    # 模型把片段貼齊到最左邊 —— 最常見的縮排失誤
+    assert serve.loose_replace(text, "x = 1\ny = 2", "x = 3\ny = 4") == \
+        "def f():\n    x = 3\n    y = 4\n"
+    # 行尾多空白
+    assert serve.loose_replace(text, "    x = 1   ", "    x = 9") is not None
+    # 兩處一模一樣就不猜
+    assert serve.loose_replace("go()\ngo()\n", "go()", "stop()") is None
+    # CRLF 不猜，猜了會把行尾弄成混排
+    assert serve.loose_replace("a = 1\r\n", "a = 1", "a = 2") is None
+    # 真的不存在還是要回 None
+    assert serve.loose_replace(text, "zzz", "y") is None
+
+
+def test_search_files_rg_and_python_agree():
+    """裝了 rg 就用 rg，但邊界不變：.git / .env 不會因為換掃描器就漏出去。"""
+    with Workspace():
+        want = "pkg/calc.py:1: def add(a, b):"
+        rows = serve.rg_rows("def add")
+        if rows is not None:                      # 沒裝 rg 的機器就只驗 Python 那條
+            assert [r[0].lstrip("./") for r in rows] == ["pkg/calc.py"], rows
+        assert want in serve.run_tool("search_files", {"pattern": "def add"})
+        # secret.env 與 .git/config 也含有字，一筆都不該出現
+        for hit in serve.run_tool("search_files", {"pattern": "."}).splitlines():
+            assert not hit.startswith(".git"), hit
+            assert ".env" not in hit.split(":")[0], hit
+
+
 def test_command_risk():
     """rm -rf 這類無法還原的操作要直接擋掉，救得回來的只標風險。"""
     block = ["rm -rf /", "rm -rf ~/", "sudo rm -rf /var", "mkfs.ext4 /dev/sda1",
@@ -428,6 +480,57 @@ def test_command_risk():
 
     for cmd in ["python -m pytest -q", "ls -la", "git status", "grep -r foo ."]:
         assert serve.command_risk(cmd)[0] == "ok", cmd
+
+
+def test_ws_scoped():
+    """「工作區內全自動」只放行動得到工作區檔案的那幾類，其他一律照樣問人。"""
+    assert serve.ws_scoped("rm build/out.o") is False, "沒有工作區時不能算工作區內"
+    with Workspace():
+        for cmd in ["rm pkg/calc.py", "rm -r pkg", "rm *.log", "mv a.py b.py",
+                    "chmod 755 pkg/calc.py"]:
+            assert serve.ws_scoped(cmd) is True, cmd
+
+        outside = ["rm /etc/passwd", "rm ../x", "rm ~/x", "mv a.py /tmp/b",
+                   "rm .git/config", "rm .env"]
+        for cmd in outside:
+            assert serve.ws_scoped(cmd) is False, cmd
+
+        # 動的不是檔案：路徑掃描說了不算
+        for cmd in ["sudo rm pkg/calc.py", "pip install requests", "kill 1234",
+                    "git reset --hard HEAD~1"]:
+            assert serve.ws_scoped(cmd) is False, cmd
+
+        # 串接／管線／重導藏得住第二條指令，一律不判
+        for cmd in ["rm a.py; rm /etc/passwd", "rm a.py && curl x", "rm $(cat evil)",
+                    "rm a.py > /etc/x", "rm `cat evil`"]:
+            assert serve.ws_scoped(cmd) is False, cmd
+
+        # ok 與 block 兩級都不歸這裡管
+        assert serve.ws_scoped("ls -la") is False
+        assert serve.ws_scoped("rm -rf pkg") is False
+
+
+def test_ws_scoped_with_sandbox():
+    """沙盒開著時，「動不動得到工作區外」不必從指令去猜 —— 沙盒本身就出不去。
+
+    但 block 那一級跟非風險指令的答案不能因此改變：前者是直接拒絕執行，
+    後者本來就不用問。
+    """
+    was = serve.ALLOW_SANDBOX
+    try:
+        with Workspace():
+            serve.ALLOW_SANDBOX = True
+            # 沒有沙盒時掃不動的寫法，有沙盒就不用問了
+            for cmd in ["pip install requests", "rm a.py; rm /etc/hosts",
+                        "rm ../outside.py", "sudo rm a.py", "mv a.py /tmp/b"]:
+                assert serve.ws_scoped(cmd) is True, cmd
+            # 這兩級不受影響
+            assert serve.ws_scoped("ls -la") is False
+            assert serve.ws_scoped("rm -rf pkg") is False
+            serve.ALLOW_SANDBOX = False
+            assert serve.ws_scoped("pip install requests") is False
+    finally:
+        serve.ALLOW_SANDBOX = was
 
 
 def test_blocked_command_refused():

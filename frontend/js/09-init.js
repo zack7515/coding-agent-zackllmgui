@@ -36,7 +36,11 @@ function init() {
   S.presets = lsGet(LS_PRESETS) || [];
   S.provider = conf.provider === 'openai' ? 'openai' : 'ollama';
   S.tab = TABS.indexOf(conf.tab) >= 0 ? conf.tab : 'params';
-  S.auto = ['off', 'read', 'edit', 'full'].indexOf(conf.auto) >= 0 ? conf.auto : 'off';
+  S.auto = ['off', 'read', 'edit', 'full', 'ws'].indexOf(conf.auto) >= 0 ? conf.auto : 'off';
+  if (Array.isArray(conf.sysChips)) {
+    const ids = SYS_METRICS.map(function (m) { return m[0]; });
+    S.sysChips = conf.sysChips.filter(function (x) { return ids.indexOf(x) >= 0; });
+  }
   S.fontScale = +conf.fontScale > 0 ? +conf.fontScale : 1;
   S.userName = conf.userName || '';
   renderUser();
@@ -47,7 +51,8 @@ function init() {
   applySideWidth('--params-w', $('params'), conf.paramsW);
   wireResizer($('sideResize'), $('sidebar'), '--side-w', 'right');
   wireResizer($('paramResize'), $('params'), '--params-w', 'left');
-  S.oa = Object.assign({ base: 'https://api.openai.com/v1', key: '' }, conf.oa || {});
+  S.oa = Object.assign({ base: 'https://api.openai.com/v1', key: '', tools: false },
+                       conf.oa || {});
   applyTheme();
   paramsToUi();
   renderFeatBtn();
@@ -162,7 +167,13 @@ function init() {
   });
 
   $('wsPick').addEventListener('click', openBrowser);
-  $('fvBack').addEventListener('click', showTreeView);
+  $('treeReload').addEventListener('click', function () {
+    if (!S.ws.path) { toast('還沒選工作區資料夾'); return; }
+    showTreeView();
+    redrawTree();
+  });
+  // 從檢視器回到樹的時候順便重讀：離開的那段時間模型可能又動過檔案
+  $('fvBack').addEventListener('click', function () { showTreeView(); redrawTree(); });
   $('writeBtn').addEventListener('click', toggleWrite);
 
   $('brCancel').addEventListener('click', function () {
@@ -319,7 +330,8 @@ function init() {
   $('hostSave').addEventListener('click', function () {
     S.provider = dialogMode();
     S.host = normalizeHost($('hostInput').value);
-    S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim() };
+    S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
+             tools: $('oaTools').checked };
     S.caps = {};
     S.model = '';                       // 換了後端，舊模型名多半不存在
     $('hostOverlay').classList.add('hidden');
@@ -339,7 +351,7 @@ function init() {
     if (e.key === 'Escape') {
       closeMenu();
       ['hostOverlay', 'modelsOverlay', 'cmpOverlay', 'fileOverlay',
-       'phOverlay', 'fsOverlay', 'brOverlay', 'rlOverlay'].forEach(function (id) {
+       'phOverlay', 'fsOverlay', 'brOverlay', 'rlOverlay', 'sysOverlay'].forEach(function (id) {
         $(id).classList.add('hidden');
       });
     }
@@ -354,6 +366,12 @@ function init() {
   updateCtx();
   setInterval(function () { if (!S.streaming) refreshModels(true); }, 30000);
   setInterval(checkSourceChanged, 30000);   // serve.py 改過就自己重開＋重整
+  $('sysBar').addEventListener('click', openSys);
+  $('sysClose').addEventListener('click', function () {
+    $('sysOverlay').classList.add('hidden');
+  });
+  refreshSys();
+  setInterval(refreshSys, 3000);            // 背景分頁不會問，refreshSys 自己擋掉
   $('resumeBtn').addEventListener('click', resumeRun);
   $('queueDrop').addEventListener('click', function () {
     S.queued = []; renderQueue(); toast('排隊的話取消了');

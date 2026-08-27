@@ -942,7 +942,14 @@ function openHostHelp() {
      + (S.srv.ext ? '請求經由 serve.py 轉送，不會有 CORS 問題，金鑰只在本機之間傳遞。'
                   : '直接開 HTML 檔時瀏覽器會直接連過去，對方沒給 CORS 標頭就會失敗，'
                     + '建議改用 serve.py 啟動。')],
-    ['這個模式少了什麼', '沒有 thinking、工具、圖片，模型能力也無法自動偵測。']
+    ['工具能不能用', '可以，但要自己勾上面那個「送出工具定義」——'
+     + '外部 API 問不到模型支不支援（/v1/models 只回 id，沒有 capabilities），'
+     + '所以這裡沒辦法像 Ollama 那樣自動判斷。勾了之後讀檔、跑指令、'
+     + '改檔案跟本機模式完全一樣。不支援工具的模型會直接回錯誤。'],
+    ['這個模式還少了什麼',
+     '思考過程只有部分服務給得出來（DeepSeek、vLLM 的 reasoning_content，'
+     + 'OpenRouter 的 reasoning）—— 那不是規格裡的欄位，給了就顯示，沒給就沒有。'
+     + '另外圖片還沒接，子代理（task）也不會出現在工具清單裡。']
   ] : [
     ['現在連到哪', S.upstream ? '經由代理連到 ' + S.upstream + '。' : '還沒連上。'],
     ['CORS 會不會出問題', SAME_ORIGIN
@@ -996,6 +1003,7 @@ function openHostDialog(pick) {
   $('hostInput').value = S.host;
   $('oaBase').value = S.oa.base;
   $('oaKey').value = S.oa.key;
+  $('oaTools').checked = !!S.oa.tools;
   $('hostResult').textContent = '';
   renderProvSeg(mode);
   $('hostOverlay').classList.remove('hidden');
@@ -1013,10 +1021,11 @@ async function testHost() {
   const res = $('hostResult');
   res.style.color = 'var(--ink3)';
   res.textContent = '測試中…';
-  const keep = { provider: S.provider, host: S.host, base: S.oa.base, key: S.oa.key };
+  const keep = { provider: S.provider, host: S.host, oa: S.oa };
   S.provider = dialogMode();
   S.host = normalizeHost($('hostInput').value);
-  S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim() };
+  S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
+           tools: $('oaTools').checked };
   try {
     if (S.provider === 'openai') {
       const data = await oaJson('/models', null, 20000);
@@ -1036,7 +1045,7 @@ async function testHost() {
   } finally {
     S.provider = keep.provider;
     S.host = keep.host;
-    S.oa = { base: keep.base, key: keep.key };
+    S.oa = keep.oa;
   }
 }
 
@@ -1090,3 +1099,110 @@ function openSettingsMenu(anchor) {
   ]);
 }
 
+
+
+/* ══════════════════════ 系統用量 ══════════════════════ */
+// 這是 **serve.py 那一台** 的數字。Ollama 指到別台時，GPU 那幾格講的不是
+// 真正在跑模型的那張卡 —— 面板上會標出來，不然會看到「模型在跑但 GPU 0%」
+// 然後以為是壞了。VRAM 排第一：它是唯一一個爆掉不報錯、只會慢十倍的東西。
+
+async function refreshSys() {
+  if (document.hidden) return;              // 分頁在背景就不要一直問
+  try {
+    const res = await fetch(apiUrl('/sys'));
+    S.sys = res.ok ? await res.json() : null;
+  } catch (e) { S.sys = null; }
+  renderSysBar();
+  if (!$('sysOverlay').classList.contains('hidden')) renderSysFull();
+}
+
+function sysShown() {
+  return SYS_METRICS.filter(function (m) {
+    return S.sysChips.indexOf(m[0]) >= 0 && sysCell(m[0], S.sys);
+  });
+}
+
+function renderSysBar() {
+  const bar = $('sysBar');
+  const shown = S.sys ? sysShown() : [];
+  bar.hidden = !shown.length;
+  if (!shown.length) return;
+  bar.innerHTML = shown.map(function (m) {
+    const c = sysCell(m[0], S.sys);
+    return '<span class="m ' + sysLevel(c.at) + '"><span>' + m[1] +
+      '</span><b>' + esc(c.text) + '</b></span>';
+  }).join('');
+}
+
+function sysRow(k, v, at) {
+  return '<div><div class="row"><span class="k">' + esc(k) + '</span>' +
+    '<span class="v">' + esc(v) + '</span></div>' +
+    (typeof at === 'number'
+      ? '<div class="bar ' + sysLevel(at) + '"><i style="width:' +
+        Math.min(100, Math.max(0, at * 100)).toFixed(0) + '%"></i></div>'
+      : '') + '</div>';
+}
+
+function renderSysFull() {
+  const d = S.sys, box = $('sysFull');
+  if (!d) { box.textContent = '拿不到系統用量（只有本機開的頁面看得到）。'; return; }
+  const rows = [];
+  (d.gpu || []).forEach(function (g, i) {
+    const tag = (d.gpu.length > 1 ? '#' + i + ' ' : '') + g.name;
+    if (g.vram && g.vram.total) {
+      rows.push(sysRow(tag + '　VRAM',
+        g.vram.used.toFixed(1) + ' / ' + g.vram.total.toFixed(1) + ' GB',
+        g.vram.used / g.vram.total));
+    }
+    rows.push(sysRow(tag + '　使用率', g.util + '%　' + g.temp + '°C', g.util / 100));
+  });
+  if (d.ram && d.ram.total) {
+    rows.push(sysRow('RAM', d.ram.used.toFixed(1) + ' / ' + d.ram.total.toFixed(1) + ' GB',
+      d.ram.used / d.ram.total));
+  }
+  if (typeof d.cpu === 'number' && d.cpu >= 0) {
+    rows.push(sysRow('CPU（' + d.cores + ' 核）', d.cpu.toFixed(0) + '%', d.cpu / 100));
+  }
+  if (!d.gpu || !d.gpu.length) {
+    rows.push('<div class="note">找不到 nvidia-smi，所以沒有 GPU 與 VRAM 那幾格。</div>');
+  }
+  (S.sysModels || []).forEach(function (m) {
+    rows.push(sysRow('載入中：' + m.name,
+      (m.size_vram ? (m.size_vram / 1073741824).toFixed(1) + ' GB 在 VRAM' : '在 CPU')));
+  });
+  box.innerHTML = rows.join('');
+  $('sysWhere').textContent = d.ollama_local
+    ? '這些是 serve.py 這台機器的數字，Ollama 也在同一台。'
+    : 'Ollama 不在這台機器上 —— GPU 與 VRAM 講的是 serve.py 這台的卡，不是跑模型的那張。';
+}
+
+function renderSysPick() {
+  $('sysPick').innerHTML = SYS_METRICS.map(function (m) {
+    const has = !!sysCell(m[0], S.sys);
+    return '<label class="check" title="' + esc(m[2]) + '">' +
+      '<input type="checkbox" data-sys="' + m[0] + '"' +
+      (S.sysChips.indexOf(m[0]) >= 0 ? ' checked' : '') +
+      (has ? '' : ' disabled') + '>' + m[1] + (has ? '' : '（這台拿不到）') + '</label>';
+  }).join('');
+  $('sysPick').querySelectorAll('input[data-sys]').forEach(function (el) {
+    el.addEventListener('change', function () {
+      const id = el.getAttribute('data-sys');
+      S.sysChips = SYS_METRICS.map(function (m) { return m[0]; }).filter(function (x) {
+        return x === id ? el.checked : S.sysChips.indexOf(x) >= 0;
+      });
+      saveConfig();
+      renderSysBar();
+    });
+  });
+}
+
+async function openSys() {
+  $('sysOverlay').classList.remove('hidden');
+  renderSysFull();
+  renderSysPick();
+  try {                                     // 哪個模型正佔著 VRAM，Ollama 自己知道
+    const res = await fetch(apiUrl('/api/ps'));
+    S.sysModels = res.ok ? ((await res.json()).models || []) : [];
+  } catch (e) { S.sysModels = []; }
+  renderSysFull();
+}

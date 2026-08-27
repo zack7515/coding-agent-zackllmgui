@@ -24,8 +24,18 @@
 | 6 | 每次執行前人工確認 | 上面全部漏掉時的最後一道 | 確認卡 |
 | 7 | 改檔案前自動備份 | 改壞了還原得回來 | `.zackllmgui-backup/` |
 
-第 6 道是唯一一道**沒有辦法用設定關掉到「完全不問」**的：
-自動模式最多放行一般工具，危險指令與計畫核准永遠要人看過。
+第 6 道**關不掉到「完全不問」**，但有一格例外要講清楚：自動模式的
+**「工作區內全自動」**會放行 ⚠ 風險指令中**動得到的路徑全部落在工作區裡**的那幾條
+（`rm pkg/a.py`、`mv a b`、`chmod 755 x`），判斷在 `serve.py` 的 `ws_scoped()`。
+其餘不變 —— ⛔ 級指令、`sudo`、裝套件、`git push`、`kill`、動到工作區外的路徑、
+以及計畫核准，永遠要人看過。選這一格等於說「工作區裡的檔案壞了我認了，
+反正有 git 跟 `.zackllmgui-backup/`」。
+
+**沙盒開著時，這一格會放行所有 ⚠ 級指令**（`ws_scoped()` 直接回 `true`）。
+理由是那時候「動不動得到工作區外」不必再從指令字串去猜：第 8 道把工作區以外
+整台機器變成唯讀、憑證目錄用 tmpfs 蓋掉、網路斷掉，`pip install`、
+`a && b`、`rm /etc/hosts` 全部在沙盒裡失敗。⛔ 那一級照樣拒絕執行 ——
+它擋的是「跑起來就回不去」，跟能不能出得了沙盒是兩件事。
 
 ---
 
@@ -59,7 +69,7 @@ if target != root and root not in target.parents:
 | 等級 | 例子 | 行為 |
 |---|---|---|
 | ⛔ block | `rm -rf`、`rm /`、`mkfs`、`dd of=/dev/`、`> /dev/sda`、fork bomb、`shutdown`、`chmod -R 777 /`、`userdel`、`git push --force`、`curl … \| sh` | **拒絕執行**，`/tool` 與 `/run` 兩條路都擋 |
-| ⚠ risky | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill` | 執行得了，但確認卡標紅講明原因，**自動模式也一定會問人** |
+| ⚠ risky | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill` | 執行得了，但確認卡標紅講明原因，**自動模式一定會問人**——除了「工作區內全自動」那一格（沙盒開著時是整級放行），見上面第 6 道 |
 | ok | `pytest`、`ls`、`git status`、`grep` | 照一般流程 |
 
 判斷只寫在後端一份。前端曾經有一份自己的正規表示式，刪掉了 ——

@@ -132,10 +132,21 @@ TOOL_SCHEMAS = [
     {"name": "edit_file", "needs": "write",
      "description": ("把檔案裡的一段文字換成另一段。old 必須與檔案內容完全一致（含縮排）"
                      "且在檔案裡只出現一次；出現多次就多帶幾行前後文，或設 replace_all。"
-                     "read_file 每行開頭的「行號→」不是檔案內容，old 只寫 → 後面的部分"),
+                     "read_file 每行開頭的「行號→」不是檔案內容，old 只寫 → 後面的部分。"
+                     "**同一個檔案要改好幾個地方時，用 edits 一次送完**，不要一輪改一處"),
      "properties": {"path": {"type": "string", "description": "相對於工作區的檔案路徑"},
                     "old": {"type": "string", "description": "要被取代的原文，含縮排"},
                     "new": {"type": "string", "description": "取代後的內容"},
-                    "replace_all": {"type": "boolean", "description": "取代全部出現的位置，預設 false"}},
-     "required": ["path", "old", "new"]},
+                    "replace_all": {"type": "boolean", "description": "取代全部出現的位置，預設 false"},
+                    "edits": {"type": "array",
+                              "description": "一次改多處：依序套用，有任何一組對不上就整個不寫。"
+                                             "用了 edits 就不要再給 old / new",
+                              "items": {"type": "object",
+                                        "properties": {
+                                            "old": {"type": "string", "description": "要被取代的原文，含縮排"},
+                                            "new": {"type": "string", "description": "取代後的內容"},
+                                            "replace_all": {"type": "boolean",
+                                                            "description": "取代全部出現的位置，預設 false"}},
+                                        "required": ["old", "new"]}}},
+     "required": ["path"]},
 ]

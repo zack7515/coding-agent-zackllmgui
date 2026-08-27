@@ -108,9 +108,13 @@ assert.ok(!/presence_penalty|frequency_penalty/.test(html), 'presence/frequency_
 });
 console.log('ok   進階參數欄位');
 
-// 工具定義由後端供給，前端不能再自己寫一份（兩份 schema 遲早對不上）
-assert.ok(!/type\s*:\s*'function'/.test(script), '前端又出現硬寫的工具 schema');
-assert.ok(/function toolDefs\(\) \{ return S\.toolDefs/.test(script), 'toolDefs 沒有改用後端給的定義');
+// 工具定義由後端供給，前端不能再自己寫一份（兩份 schema 遲早對不上）。
+// 認的是 schema 的特徵（parameters: { type: 'object' }）而不是 type:'function' ——
+// 後者在把 tool call 轉成 OpenAI 格式時本來就會出現，那是格式轉換不是 schema。
+assert.ok(!/parameters\s*:\s*\{\s*type\s*:\s*['"]object/.test(script),
+  '前端又出現硬寫的工具 schema');
+assert.ok(/function toolDefs\(\)/.test(script) && /S\.toolDefs \|\| \[\]/.test(script),
+  'toolDefs 沒有改用後端給的定義');
 assert.ok(/tool_defs/.test(script), '沒有從 /upstream 取回 tool_defs');
 console.log('ok   工具定義來自後端');
 
@@ -135,10 +139,36 @@ assert.ok(/class="cl del"><span class="ln"><\/span>/.test(dl), '刪除行不該�
 assert.ok(dl.indexOf('<span class="ln">11</span><span class="lt">+added') >= 0, '新增行的行號不對');
 console.log('ok   檔案檢視的行號與 diff');
 
+// 等第一個字的那段時間要看得出「還在跑、跑了多久」——
+// 只有一個游標閃在空白畫面上，分不出「在想」跟「當掉」。
+const wt = new Function(grab('fmtElapsed') + '\n' + grab('waitText') +
+  '\nreturn waitText;')();
+assert.ok(wt(3000, '', true).indexOf('等模型回應') === 0, '還沒收到字時要說在等');
+assert.ok(wt(65000, '', true).indexOf('1 分 5 秒') > 0, '秒數要自己走');
+assert.strictEqual(wt(3000, 'abc', true), '', '思考看得見的時候不必再畫一行');
+assert.ok(wt(3000, 'abc', false).indexOf('思考中') === 0,
+  '「顯示思考」關著時，思考那幾分鐘畫面上要有東西');
+assert.ok(/if \(!content && !retrying\) waitLine\(\);/.test(script),
+  'flush 不再更新等待狀態的話，秒數就不走了');
+console.log('ok   等回應時看得出還在跑');
+
+// 系統用量：拿不到的那一格要整格不畫。畫成 0 的話，「沒有這張卡」跟
+// 「這張卡現在很閒」在畫面上長得一模一樣。
+const sc = new Function(grab('sysCell') + '\nreturn sysCell;')();
+assert.strictEqual(sc('vram', null), null);
+assert.strictEqual(sc('vram', { gpu: [] }), null, '沒有卡就不該畫 VRAM');
+assert.strictEqual(sc('cpu', { cpu: -1 }), null, '第一次取樣沒有基準，不能畫成 0%');
+assert.strictEqual(sc('vram', { gpu: [{ vram: { used: 8.25, total: 12 } }] }).text, '8.3/12 G');
+assert.strictEqual(sc('ram', { ram: { used: 6.7, total: 62.5 } }).text, '6.7/63 G');
+const sl = new Function(grab('sysLevel') + '\nreturn sysLevel;')();
+assert.deepStrictEqual([sl(0.5), sl(0.8), sl(0.95)], ['', 'hot', 'full']);
+console.log('ok   系統用量只畫得出來的那幾格');
+
 // 自動模式：危險指令永遠要人看過，計畫永遠要人核准
 const am = new Function('let S;\n' + grab('AUTO_MODES', 'const') + '\n' +
   grab('READ_ONLY_TOOLS', 'const') + '\n' + grab('WRITE_TOOLS', 'const') + '\n' + grab('autoApprove') +
-  '\nreturn function (mode, name, risk) { S = { auto: mode }; return autoApprove(name, risk); };')();
+  '\nreturn function (mode, name, risk, scope) { S = { auto: mode }; ' +
+  'return autoApprove(name, risk, null, scope); };')();
 assert.strictEqual(am('off', 'read_file', 'ok'), false, '關閉時不該自動放行');
 assert.strictEqual(am('read', 'read_file', 'ok'), true);
 assert.strictEqual(am('read', 'edit_file', 'ok'), false, '唯讀模式不該放行寫入');
@@ -155,12 +185,24 @@ assert.strictEqual(am('edit', 'run_shell', 'ok'), false, '改檔案自動不該�
 assert.strictEqual(am('edit', 'run_tests', 'ok'), false);
 assert.strictEqual(am('edit', 'setup_env', 'ok'), false, 'setup_env 要連網裝套件，不算改檔案');
 assert.strictEqual(am('edit', 'submit_plan', 'ok'), false, '計畫永遠要人核准');
+// 「工作區內全自動」：只有後端算出 scope === 'ws' 的風險指令才放行。
+// 這一格是唯一一個會讓風險指令不問人的地方，所以每個邊界都要有一條。
+assert.strictEqual(am('ws', 'run_shell', 'risky', 'ws'), true, '工作區內的 rm 不該再問');
+assert.strictEqual(am('ws', 'run_shell', 'risky', ''), false, '動到工作區外還是要問');
+assert.strictEqual(am('ws', 'run_shell', 'block', 'ws'), false, 'block 那級永遠不放行');
+assert.strictEqual(am('ws', 'edit_file', 'ok'), true);
+assert.strictEqual(am('ws', 'submit_plan', 'ok'), false, '計畫永遠要人核准');
+assert.strictEqual(am('full', 'run_shell', 'risky', 'ws'), false,
+  'scope 只有在「工作區內全自動」那一格才算數');
 console.log('ok   自動模式的放行規則');
 
-// 四個檔位的順序：從寬鬆到危險，中間不能跳號
+// 五個檔位的順序：從嚴格到寬鬆，中間不能跳號（之後 Shift+Tab 循環要照這個順序）
+const SYS_ORDER = new Function(grab('SYS_METRICS', 'const') +
+  '\nreturn SYS_METRICS.map(function (m) { return m[0]; });')();
+assert.strictEqual(SYS_ORDER[0], 'vram', 'VRAM 要排第一 —— 窄畫面只留得下第一格');
 const AUTO_MODES_ORDER = new Function(grab('AUTO_MODES', 'const') +
   '\nreturn AUTO_MODES.map(function (m) { return m[0]; });')();
-assert.deepStrictEqual(AUTO_MODES_ORDER, ['off', 'read', 'edit', 'full']);
+assert.deepStrictEqual(AUTO_MODES_ORDER, ['off', 'read', 'edit', 'full', 'ws']);
 
 // 前端不再自己判斷指令風險（後端說了算）
 assert.ok(!/const RISKY = \//.test(script), '前端又出現自己的風險判斷');
@@ -984,6 +1026,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const renderTodos = () => {};
     const runStreamed = async () => '';
     const noteFinishSignals = () => {};
+    const READ_ONLY_TOOLS = ['read_file'];
+    const touchTree = () => {};
     const apiUrl = (p) => p;
     const fetch = async (u, o) => {
       sent.push(JSON.parse(o.body).name);
@@ -1223,6 +1267,147 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(/S\.streamTools\.indexOf\(name\) >= 0 && !args\.background/.test(script),
     '背景指令還是走 /run 串流，那會開一個永遠不會有輸出的卡片');
   console.log('ok   背景指令不走串流那條路');
+
+  // ── 外部 API 的工具支援 ──────────────────────────────────
+  // 工具往返轉成 OpenAI 格式：每一則 tool 訊息都要帶得回去的 tool_call_id。
+  {
+    const oa = new Function(`${grab('oaToolCall')}\n${grab('oaMsgs')}\nreturn oaMsgs;`)();
+    const out = oa([
+      { role: 'user', content: '看一下 a.py' },
+      { role: 'assistant', content: '',
+        tool_calls: [{ function: { name: 'read_file', arguments: { path: 'a.py' } } },
+                     { function: { name: 'list_dir', arguments: { path: '.' } } }] },
+      { role: 'tool', tool_name: 'read_file', content: '檔案內容' },
+      { role: 'tool', tool_name: 'list_dir', content: 'a.py' }
+    ]);
+    assert.strictEqual(out.length, 4);
+    const tcs = out[1].tool_calls;
+    assert.strictEqual(tcs.length, 2);
+    assert.strictEqual(typeof tcs[0].function.arguments, 'string',
+      'arguments 一定要是字串，OpenAI 不收物件');
+    assert.strictEqual(JSON.parse(tcs[0].function.arguments).path, 'a.py');
+    assert.strictEqual(tcs[0].type, 'function');
+    assert.strictEqual(out[2].role, 'tool');
+    assert.strictEqual(out[2].tool_call_id, tcs[0].id, '第一則結果要配回第一個呼叫');
+    assert.strictEqual(out[3].tool_call_id, tcs[1].id, '第二則配第二個');
+    assert.notStrictEqual(tcs[0].id, tcs[1].id, '同一輪的 id 不能撞在一起');
+
+    // 配不到的（舊對話、被壓縮過）退回純文字，不能丟出沒有 id 的 tool 訊息
+    const orphan = oa([{ role: 'tool', tool_name: 'read_file', content: 'x' }]);
+    assert.strictEqual(orphan[0].role, 'user', '配不到 id 就不能用 tool 這個 role');
+
+    // 兩輪工具往返：第二輪的 id 不能沿用第一輪沒被認領的
+    const two = oa([
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'a', arguments: {} } }] },
+      { role: 'tool', tool_name: 'a', content: '1' },
+      { role: 'assistant', content: '沒有工具了' },
+      { role: 'tool', tool_name: 'b', content: '2' }
+    ]);
+    assert.strictEqual(two[3].role, 'user', 'assistant 沒帶 tool_calls，後面的結果要退回純文字');
+    console.log('ok   工具往返轉成 OpenAI 格式');
+  }
+
+  // SSE 把一支工具的 arguments 切成好幾片，要按 index 拼回去
+  {
+    const src = script.slice(script.indexOf('async function chatStream'),
+                             script.indexOf('// 單次、不串流的呼叫'));
+    const chunks = [
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x',
+          function: { name: 'edit_', arguments: '{"pa' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0,
+          function: { name: 'file', arguments: 'th":"a.py"}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 1, id: 'call_y',
+          function: { name: 'run_tests', arguments: '{}' } }] } }] },
+      { usage: { prompt_tokens: 12, completion_tokens: 3 } }
+    ];
+    const got = { tools: null, done: null, body: null };
+    const run = new Function('GOT', `
+      const S = { provider: 'openai' };
+      const oaMsgs = (x) => x;
+      const streamSse = async (path, body, sig, onObj) => {
+        GOT.body = body;
+        ${JSON.stringify(chunks)}.forEach(onObj);
+      };
+      ${src}
+      return chatStream;
+    `)(got);
+    await run({ model: 'gpt-x', messages: [], tools: [{ type: 'function' }] }, null, {
+      think: () => {}, content: () => {}, images: () => {},
+      tools: (t) => { got.tools = t; }, done: (d) => { got.done = d; }
+    });
+    assert.ok(got.body.tools, '外部 API 現在要送出工具定義');
+    assert.ok(got.tools && got.tools.length === 2, '兩支工具都要拼回來：'
+      + JSON.stringify(got.tools));
+    assert.strictEqual(got.tools[0].function.name, 'edit_file', '名字被切開也要接得起來');
+    assert.strictEqual(got.tools[0].function.arguments, '{"path":"a.py"}',
+      'arguments 的片段要照 index 接回去');
+    assert.strictEqual(got.tools[0].id, 'call_x');
+    assert.strictEqual(got.done.eval_count, 3);
+    console.log('ok   SSE 的 tool_calls 片段拼得回來');
+  }
+
+  // 外部 API 問不到模型能力，所以改成手動開關
+  {
+    const ready = new Function('S', grab('toolsReady') + '\nreturn toolsReady();');
+    assert.strictEqual(ready({ provider: 'openai', srv: { tools: true }, oa: {}, caps: {} }), false);
+    assert.strictEqual(
+      ready({ provider: 'openai', srv: { tools: true }, oa: { tools: true }, caps: {} }), true);
+    assert.strictEqual(
+      ready({ provider: 'openai', srv: { tools: false }, oa: { tools: true }, caps: {} }), false,
+      '伺服器那邊沒開工具就是沒開');
+    assert.strictEqual(
+      ready({ provider: 'ollama', srv: { tools: true }, oa: { tools: true },
+              caps: { m: [] }, model: 'm' }), false, 'Ollama 這邊還是看模型能力');
+
+    // 子代理走 Ollama 專屬的路徑，外部 API 模式不能把它列進去
+    const defs = new Function('S', grab('toolDefs') + '\nreturn toolDefs();');
+    const all = [{ function: { name: 'task' } }, { function: { name: 'read_file' } }];
+    assert.strictEqual(defs({ provider: 'openai', toolDefs: all }).length, 1);
+    assert.strictEqual(defs({ provider: 'ollama', toolDefs: all }).length, 2);
+    console.log('ok   外部 API 的工具開關');
+  }
+
+  // ── 等人回應時的分頁標題 ────────────────────────────────
+  {
+    const box = new Function(`
+      const document = { title: 'ZackLLMGUI' };
+      ${grab('BASE_TITLE', 'const')}
+      let waitingN = 0;
+      ${grab('waitBadge')}
+      return { waitBadge: waitBadge, doc: document };
+    `)();
+    box.waitBadge(true);
+    assert.ok(box.doc.title.indexOf('●') === 0, '等人回應時標題要看得出來：' + box.doc.title);
+    box.waitBadge(true);
+    box.waitBadge(false);
+    assert.ok(box.doc.title.indexOf('●') === 0, '還有一張卡在等，標記不能先拿掉');
+    box.waitBadge(false);
+    assert.strictEqual(box.doc.title, 'ZackLLMGUI', '都回答完就要恢復原狀');
+    box.waitBadge(false);                       // 多減一次不能減成負的
+    box.waitBadge(true);
+    assert.ok(box.doc.title.indexOf('●') === 0, '計數變成負的就再也標不起來了');
+    console.log('ok   等人回應時分頁標題會標記');
+  }
+
+  // 確認卡與 ask_user_question 都要掛上標記，而且答完要拿掉
+  assert.ok(/waitBadge\(true\);[\s\S]{0,200}notifyBg\('等你確認/.test(script),
+    '確認卡沒有掛上等待標記');
+  assert.ok(/const done = function \(ok\) \{ waitBadge\(false\)/.test(script),
+    '確認卡答完沒有把標記拿掉');
+  assert.ok(/notifyBg\('模型在問你/.test(script), 'ask_user_question 沒有通知');
+
+  // ── 檔案樹會自己重讀 ────────────────────────────────────
+  assert.ok(/READ_ONLY_TOOLS\.indexOf\(name\) < 0\) touchTree\(\)/.test(script),
+    '動過檔案的工具跑完沒有重讀檔案樹');
+  {
+    const src = grab('touchTree');
+    assert.ok(/S\.atFiles = null/.test(src), '@檔名 的快取也要一起作廢');
+    assert.ok(/clearTimeout\(treeTimer\)/.test(src), '一輪改五個檔要收斂成一次重畫');
+    assert.ok(/S\.treeReady = false/.test(src), '沒開著檔案分頁時要留下「該重讀」的記號');
+    assert.ok(/expandInto\(kids, e\.path, depth \+ 1, open\)/.test(script),
+      '重畫時沒有把展開狀態往下傳，整棵樹會縮回根目錄');
+    console.log('ok   檔案樹會自己重讀');
+  }
 
   console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });

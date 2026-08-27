@@ -32,14 +32,25 @@ function saveChats() { lsSet(LS_CHATS, S.chats.slice(0, 100)); }
 function finishTurn() {
   const r = S.run || {};
   if (!r.calls) return;
-  notifyDone('跑完了：' + r.rounds + ' 輪 · ' + r.calls + ' 次工具 · '
+  notifyBg('跑完了：' + r.rounds + ' 輪 · ' + r.calls + ' 次工具 · '
     + fmtTokens(r.tokens) + ' tokens');
+}
+
+// 有東西在等人回答（確認卡、ask_user_question）就把分頁標題改掉。
+// 通知有可能被瀏覽器擋掉或使用者沒給權限，**標題一定看得到** ——
+// 而且切回來之前，分頁列上那個 ● 就是「這裡卡住了」唯一的線索。
+const BASE_TITLE = (typeof document !== 'undefined' && document.title) || 'ZackLLMGUI';
+let waitingN = 0;
+
+function waitBadge(on) {
+  waitingN = Math.max(0, waitingN + (on ? 1 : -1));
+  document.title = (waitingN ? '● 等你回應 · ' : '') + BASE_TITLE;
 }
 
 // 工具跑起來動輒好幾分鐘，人早就切到別的分頁去了。回來才發現它十分鐘前
 // 就停在一張確認卡上，那段時間是白等的。
 // 只在**看不到這個分頁**的時候發 —— 人在看的話通知只是吵。
-function notifyDone(text) {
+function notifyBg(text) {
   try {
     if (!document.hidden || typeof Notification === 'undefined') return;
     if (Notification.permission === 'granted') {
@@ -58,11 +69,12 @@ function saveConfig() {
     userName: S.userName,
     showThink: S.showThink, params: S.params, tools: S.tools,
     provider: S.provider, oa: S.oa, paramsVersion: 3, tab: S.tab, auto: S.auto,
+    sysChips: S.sysChips,
     hideSidebar: document.body.classList.contains('hide-sidebar'),
     hideParams: document.body.classList.contains('hide-params'),
     sideW: savedSideWidth('--side-w'), paramsW: savedSideWidth('--params-w'),
     // 工作區與這四個開關都是 serve.py 的**行程全域**，重啟就沒了。
-    // 自動模式卻存在瀏覽器裡，所以不存這些的話會出現「全自動但改不動檔案」。
+    // 自動模式卻存在瀏覽器裡，所以不存這些的話會出現「全放開了但改不動檔案」。
     wsPath: S.ws.path || '',
     srv: { tools: !!S.srv.tools, write: !!S.ws.write,
            browser: !!S.srv.browser, sandbox: !!S.srv.sandbox }
@@ -672,7 +684,6 @@ async function runStream(c, depth) {
   const thinkEl = el.querySelector('.think');
   const thinkBody = el.querySelector('.think-body');
   const bodyEl = el.querySelector('.msg-body');
-  bodyEl.innerHTML = '<span class="caret"></span>';
 
   const payload = { model: S.model, messages: apiMessages(c), stream: true };
   const note = roundsNote(depth || 0);
@@ -690,8 +701,21 @@ async function runStream(c, depth) {
   let toolCalls = [], images = [];
   const t0 = performance.now();
   let firstToken = null;
+  let retrying = false;              // 重試倒數自己在畫 bodyEl，這時不要跟它搶
+
+  // 第一個字還沒到、或思考的字都吐在 think 裡（「顯示思考」關著時一個字都看不見）
+  // 的那段時間，畫面上要看得到「還在跑，跑了多久」。
+  // 之前是一個游標閃在空白畫面上 —— 分不出「在想」跟「當掉」。
+  const waitLine = function () {
+    const st = waitText(performance.now() - t0, thinking, S.showThink);
+    if (!st) { bodyEl.innerHTML = '<span class="caret"></span>'; return; }
+    bodyEl.innerHTML = '<span class="wait"></span>';
+    bodyEl.firstChild.textContent = st;
+  };
+  waitLine();
 
   const flush = function () {
+    if (!content && !retrying) waitLine();   // 秒數要自己走，不能只在收到字時更新
     if (!dirty) return;
     dirty = false;
     if (thinking && S.showThink) {
@@ -735,7 +759,9 @@ async function runStream(c, depth) {
       } catch (err) {
         const got = !!(content || thinking || toolCalls.length || done);
         if (attempt >= RETRY_MAX || !isRetryable(err, got)) throw err;
-        await countdown(bodyEl, RETRY_BASE_MS * attempt, attempt, friendlyError(err).msg);
+        retrying = true;
+        try { await countdown(bodyEl, RETRY_BASE_MS * attempt, attempt, friendlyError(err).msg); }
+        finally { retrying = false; }
       }
     }
   } catch (err) {
@@ -885,10 +911,11 @@ async function chatStream(payload, signal, on) {
   const o = payload.options || {};
   const body = {
     model: payload.model,
-    messages: payload.messages.map(oaMsg),
+    messages: oaMsgs(payload.messages),
     stream: true,
     stream_options: { include_usage: true }
   };
+  if (payload.tools && payload.tools.length) body.tools = payload.tools;
   if (o.temperature !== undefined) body.temperature = o.temperature;
   if (o.top_p !== undefined) body.top_p = o.top_p;
   if (o.seed !== undefined) body.seed = o.seed;
@@ -896,12 +923,26 @@ async function chatStream(payload, signal, on) {
   if (o.num_predict !== undefined) body.max_tokens = o.num_predict;
 
   let info = null;
+  // Ollama 的 NDJSON 一次給完整的 tool_calls，SSE 不是：一支工具的 arguments
+  // 會被切成十幾片分批送過來，只能按 delta.tool_calls[].index 自己拼回去。
+  // 拼不回去的症狀是模型「呼叫了工具但參數是半截 JSON」。
+  const parts = [];
   await streamSse('/chat/completions', body, signal, function (obj) {
     const ch = (obj.choices || [])[0] || {};
     const d = ch.delta || {};
     // DeepSeek 與部分 vLLM 會把思考內容放在 reasoning_content
     if (d.reasoning_content || d.reasoning) on.think(d.reasoning_content || d.reasoning);
     if (d.content) on.content(d.content);
+    (d.tool_calls || []).forEach(function (t) {
+      const i = t.index || 0;
+      const cur = parts[i] || (parts[i] =
+        { id: '', type: 'function', function: { name: '', arguments: '' } });
+      if (t.id) cur.id = t.id;
+      const fn = t.function || {};
+      // 都用累加：name 通常第一片就給完，但也有服務會拆開送
+      if (fn.name) cur.function.name += fn.name;
+      if (fn.arguments) cur.function.arguments += fn.arguments;
+    });
     if (obj.usage) {
       info = {
         prompt_eval_count: obj.usage.prompt_tokens || 0,
@@ -909,6 +950,8 @@ async function chatStream(payload, signal, on) {
       };
     }
   });
+  const calls = parts.filter(function (t) { return t && t.function.name; });
+  if (calls.length) on.tools(calls);
   on.done(info || {});
 }
 

@@ -127,7 +127,7 @@ MAX_LINE_CHARS = 4000              # 單行上限。minified JS 或 base64 一�
 # 模型可以先去做別的，之後用 check_job 收。
 #
 # 這推翻了 tech.md〈長指令為什麼沒做 job API〉的結論。那個結論的前提是
-# 「每次工具呼叫都要人確認，所以人一定在旁邊看著」—— 有了全自動模式，
+# 「每次工具呼叫都要人確認，所以人一定在旁邊看著」—— 自動模式可以放到不問，
 # 前提就不成立了。
 BG_TIMEOUT = 3600                  # 背景指令的上限，一小時
 BG_MAX = 8                         # 同時最多這麼多條，忘了收的不會無限累積
@@ -752,6 +752,49 @@ def _tool_list_dir(path: str = ".") -> str:
     return f"{ws_rel(base)}/\n" + ("\n".join(rows) or "（空資料夾）")
 
 
+def glob_ok(f: Path, glob: str) -> bool:
+    """檔名與相對路徑都比對一次：模型很自然會傳 "pkg/calc.py" 或 "pkg/*.py"，
+    只比對 f.name 的話那兩種寫法都會掃到 0 個檔案（實測害小模型直接放棄）。"""
+    if not glob:
+        return True
+    rel = ws_rel(f)
+    return (fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(rel, glob)
+            or fnmatch.fnmatch(rel, "*/" + glob.lstrip("/")))
+
+
+def rg_rows(pattern: str):
+    """用 ripgrep 掃一遍，回傳 [(相對路徑, 行號, 內容)]。用不了就回 None。
+
+    只拿 rg 當**快速的候選清單產生器**，邊界還是原本那一支：每一筆都要再過
+    ws_path()，所以 .git／.venv／.env 不會因為換了掃描器就漏出去。
+    這是這個專案既有的「裝了就用」慣例（ruff / eslint 也是這樣）——
+    沒裝 rg 就走下面的純 Python 迴圈，不會變成必要相依。
+    """
+    # PATH 上沒有的話還可以指過去：VSCode 與 Claude Code 都自帶一份 rg，
+    # 但那份不在 PATH 上（實測 `rg` 只是 shell function，subprocess 看不到）。
+    exe = os.environ.get("ZACKLLMGUI_RG") or shutil.which("rg")
+    if not exe or not Path(exe).exists():
+        return None
+    cmd = [exe, "--line-number", "--no-heading", "--color", "never", "--no-messages",
+           "--max-filesize", str(MAX_FILE_BYTES), "--max-count", str(SEARCH_HITS)]
+    for d in DENY_DIRS:
+        cmd += ["--glob", "!" + d + "/"]      # rg 預設吃 .gitignore，但工作區不一定是 git repo
+    try:
+        proc = subprocess.run(cmd + ["-e", pattern, "."], cwd=str(ws_root()),
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    except Exception:
+        return None
+    # 2 = rg 不認這個 pattern（Rust 的 regex 沒有後向參照與 lookaround，Python 有）
+    if proc.returncode not in (0, 1):
+        return None
+    rows = []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        part = line.split(":", 2)
+        if len(part) == 3:
+            rows.append((part[0], part[1], part[2]))
+    return rows
+
+
 def _tool_search_files(pattern: str, glob: str = "") -> str:
     """在工作區裡找字串，只回命中的那幾行 —— 整檔讀進去會把 context 吃光。"""
     try:
@@ -759,12 +802,21 @@ def _tool_search_files(pattern: str, glob: str = "") -> str:
     except re.error as e:
         raise ValueError(f"pattern 不是合法的正規表示式：{e}") from None
     hits, scanned = [], 0
+    rows = rg_rows(pattern)
+    if rows is not None:
+        for rel, n, line in rows:
+            try:
+                f = ws_path(rel)             # 不開放的目錄與檔案在這裡被擋掉
+            except Exception:
+                continue
+            if not glob_ok(f, glob):
+                continue
+            hits.append(f"{ws_rel(f)}:{n}: {line.strip()[:200]}")
+            if len(hits) >= SEARCH_HITS:
+                return "\n".join(hits) + f"\n…（只顯示前 {SEARCH_HITS} 筆，請縮小範圍）"
+        return "\n".join(hits) if hits else f"沒有找到「{pattern}」"
     for f in ws_walk():
-        # 檔名與相對路徑都比對一次：模型很自然會傳 "pkg/calc.py" 或 "pkg/*.py"，
-        # 只比對 f.name 的話那兩種寫法都會掃到 0 個檔案（實測害小模型直接放棄）。
-        if glob and not (fnmatch.fnmatch(f.name, glob)
-                         or fnmatch.fnmatch(ws_rel(f), glob)
-                         or fnmatch.fnmatch(ws_rel(f), "*/" + glob.lstrip("/"))):
+        if not glob_ok(f, glob):
             continue
         try:
             if f.stat().st_size > MAX_FILE_BYTES:
@@ -796,36 +848,111 @@ def _tool_write_file(path: str, content: str) -> str:
     return f"已寫入 {ws_rel(p)}（{len(content)} 字元）" + (f"\n[backup]{mark}" if mark else "")
 
 
-def _tool_edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
-    """精確字串取代。刻意不吃 diff 也不吃行號：小模型算不對，錯了就改到別的地方。"""
+def _indent(line: str) -> str:
+    return line[:len(line) - len(line.lstrip())]
+
+
+def loose_replace(text: str, old: str, new: str):
+    """完全比對找不到時的退路：只忽略每行前後的空白再找一次。找不到就回 None。
+
+    本機小模型最常寫壞的就是縮排 —— 把片段貼齊到最左邊、行尾多一個空白。
+    原本這種情況直接報錯，模型的反應是換個字串再試，然後撞上連續失敗上限。
+    **只在唯一命中時才算數**：兩處以上寧可報錯，猜錯一個地方比多問一輪貴得多。
+    命中之後 new 會照檔案裡實際的縮排搬過去，不然貼進去的那段縮排是錯的。
+    """
+    if "\r" in text:
+        return None                      # CRLF 的檔案別猜，行尾會被弄成混排
+    want = [ln.strip() for ln in old.strip("\n").split("\n")]
+    if not any(want):
+        return None
+    lines = text.split("\n")
+    at = [i for i in range(len(lines) - len(want) + 1)
+          if [ln.strip() for ln in lines[i:i + len(want)]] == want]
+    if len(at) != 1:
+        return None
+    i = at[0]
+    src, dst = _indent(old.strip("\n").split("\n")[0]), _indent(lines[i])
+    body = new.split("\n")
+    if src != dst:
+        body = [(dst + (ln[len(src):] if src and ln.startswith(src) else ln))
+                if ln.strip() else ln for ln in body]
+    return "\n".join(lines[:i] + body + lines[i + len(want):])
+
+
+def edit_items(old: str, new: str, replace_all, edits) -> list:
+    """把兩種寫法（單組 old/new、多組 edits）收成同一種形狀。"""
+    if edits:
+        if not isinstance(edits, list):
+            raise ValueError('edits 要是陣列：[{"old": …, "new": …}, …]')
+        items = [e for e in edits if isinstance(e, dict)]
+        if not items:
+            raise ValueError("edits 裡面沒有東西")
+        return items
+    if not old:
+        raise ValueError("要給 old 與 new；同一個檔案要改好幾個地方就用 edits 一次送")
+    return [{"old": old, "new": new, "replace_all": replace_all}]
+
+
+def apply_edits(text: str, items: list, where: str, hint=None):
+    """把一組取代依序套到文字上。回傳 (新文字, 改了幾處, 提醒)。
+
+    **全有全無**：任何一組對不上就丟 ValueError，檔案一個字都不會被動到。
+    確認卡的預覽跟真正的寫入共用這一支 —— 兩份實作的話，
+    卡片上的 diff 遲早會跟寫進去的東西不一樣。
+    """
+    total, notes = 0, []
+    for n, e in enumerate(items, 1):
+        tag = f"第 {n} 組：" if len(items) > 1 else ""
+        one, two = str(e.get("old", "")), str(e.get("new", ""))
+        if one == two:
+            raise ValueError(f"{tag}old 與 new 一樣，沒有東西要改")
+        count = text.count(one)
+        if count == 0:
+            fixed = loose_replace(text, one, two)
+            if fixed is None:
+                raise ValueError(f"{tag}在 {where} 裡找不到要取代的內容"
+                                 f"{hint(one) if hint else ''}，請先用 read_file 確認原文")
+            text, total = fixed, total + 1
+            notes.append(f"{tag}縮排或行尾空白跟檔案裡的不一樣，已照檔案裡的實際內容套用")
+            continue
+        if count > 1 and not e.get("replace_all"):
+            raise ValueError(f"{tag}要取代的內容在 {where} 出現 {count} 次，"
+                             f"請多帶一些前後文讓它唯一，或設 replace_all=true")
+        text = text.replace(one, two) if e.get("replace_all") else text.replace(one, two, 1)
+        total += count if e.get("replace_all") else 1
+    return text, total, notes
+
+
+def edit_hint(p: Path, old: str) -> str:
+    if re.match(r"^\s*\d+\u2192", old):
+        return "（old 裡面帶了 read_file 的「行號→」前綴，那不是檔案內容）"
+    return stale_hint(p)
+
+
+def _tool_edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False,
+                    edits: list = None) -> str:
+    """精確字串取代。刻意不吃 diff 也不吃行號：小模型算不對，錯了就改到別的地方。
+
+    edits 一次送多組是為了省輪數：改五個地方本來要五輪，而每一輪都要把整包
+    context 重送給 Ollama 重算一次 prefill —— 那才是本機模型真正的成本。
+    """
     p = ws_path(path, must_exist=True)
     text = p.read_text("utf-8", errors="replace")
-    if old == new:
-        raise ValueError("old 與 new 一樣，沒有東西要改")
-    count = text.count(old)
-    if count == 0:
-        hint = ""
-        if re.match(r"^\s*\d+\u2192", old):
-            hint = "（old 裡面帶了 read_file 的「行號→」前綴，那不是檔案內容）"
-        else:
-            hint = stale_hint(p)
-        raise ValueError(f"在 {ws_rel(p)} 裡找不到要取代的內容{hint}，請先用 read_file 確認原文")
-    if count > 1 and not replace_all:
-        raise ValueError(f"要取代的內容在 {ws_rel(p)} 出現 {count} 次，"
-                         f"請多帶一些前後文讓它唯一，或設 replace_all=true")
+    out, count, notes = apply_edits(text, edit_items(old, new, replace_all, edits),
+                                    ws_rel(p), lambda o: edit_hint(p, o))
     mark = backup_file(p)
     journal_add("edit_file", ws_rel(p), mark, False)
-    p.write_text(text.replace(old, new) if replace_all else text.replace(old, new, 1),
-                 encoding="utf-8")
+    p.write_text(out, encoding="utf-8")
     note_read(p)          # 自己剛寫的內容不算「被別人改過」
-    return f"已修改 {ws_rel(p)}（{count if replace_all else 1} 處）\n[backup]{mark}"
+    return (f"已修改 {ws_rel(p)}（{count} 處）"
+            + ("\n" + "\n".join(notes) if notes else "") + f"\n[backup]{mark}")
 
 
 # 一定要擋下來的：打錯一個字就回不去的那種。
 # 這裡列的是「無法用備份救回來」的操作，跟 rm 掉工作區裡的檔案不同層級。
 BLOCKED_CMDS = [
     (r"\brm\s+(-[a-zA-Z]*\s+)*(/|/\*|~|~/|\$HOME)(\s|$)", "rm 掉根目錄或家目錄"),
-    (r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r", "rm -rf（請指明確切路徑，或用 git 還原）"),
+    (r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r", "rm -rf（工作區裡的東西請改用 rm -r <路徑>，不要加 -f）"),
     (r"\bmkfs(\.|\s)", "格式化磁碟"),
     (r"\bdd\s+[^|]*of=/dev/", "dd 寫進裝置"),
     (r">\s*/dev/(sd|nvme|hd)", "覆寫磁碟裝置"),
@@ -838,15 +965,17 @@ BLOCKED_CMDS = [
     (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
 ]
 
-# 會改動環境但救得回來的：不擋，但確認卡要標紅，自動模式也一定要問人。
+# 會改動環境但救得回來的：不擋，但確認卡要標紅，自動模式一定要問人。
+# 第三欄 True＝「動的是檔案」：路徑全部落在工作區裡的話，「工作區內全自動」
+# 那一檔可以不問（見 ws_scoped）。沒有第三欄的動的不是檔案，永遠要問。
 RISKY_CMDS = [
     (r"\bsudo\b", "用 sudo 提權"),
-    (r"\brm\b", "刪除檔案"),
+    (r"\brm\b", "刪除檔案", True),
     (r"\bpip\s+(install|uninstall)|\bnpm\s+(i|install|uninstall)\b|\bconda\s+(install|remove)",
      "安裝或移除套件"),
     (r"\bapt(-get)?\s+(install|remove|purge)|\byum\s+(install|remove)", "動到系統套件"),
     (r"\bgit\s+(push|reset\s+--hard|clean\s+-[a-zA-Z]*f|checkout\s+--\s)", "動到 git 歷史或工作區"),
-    (r"\bmv\b|\bchmod\b|\bchown\b", "搬動檔案或改權限"),
+    (r"\bmv\b|\bchmod\b|\bchown\b", "搬動檔案或改權限", True),
     (r">\s*/(etc|usr|bin|boot|lib)", "寫進系統目錄"),
     (r"\bkill(all)?\b|\bpkill\b", "終止程序"),
 ]
@@ -862,10 +991,53 @@ def command_risk(command: str) -> tuple:
     for pattern, why in BLOCKED_CMDS:
         if re.search(pattern, cmd, re.I):
             return ("block", why)
-    for pattern, why in RISKY_CMDS:
+    for pattern, why, *_ in RISKY_CMDS:
         if re.search(pattern, cmd, re.I):
             return ("risky", why)
     return ("ok", "")
+
+
+# 串接、管線、重導、命令替換：後面藏得住第二條指令，路徑掃描就不算數了。
+CHAINED = re.compile(r"[;&|`\n<>]|\$\(")
+
+
+def ws_scoped(command: str) -> bool:
+    """這行風險指令是不是只動得到工作區裡的檔案。
+
+    只有「工作區內全自動」那一檔在用它：決定 rm 這種指令還要不要問人。
+    判斷刻意保守 —— 解析不出來的一律回 False（照樣問），寧可多問一次。
+    block 那一級不走這裡：那一層是直接拒絕執行，不是問不問。
+    """
+    cmd = " ".join(str(command or "").split())
+    if command_risk(cmd)[0] != "risky":
+        return False                     # block 那級直接拒絕執行，ok 那級本來就不用問
+    # 沙盒開著的話「動不動得到工作區外」不必從指令去猜：工作區以外整台唯讀、
+    # 家目錄被 tmpfs 蓋掉、網路切斷，指令再怎麼串接也出不去。這一條讓
+    # pip install、`a && b` 這種原本掃不動的寫法在沙盒裡也不用問。
+    if ALLOW_SANDBOX:
+        return True
+    if WORKSPACE is None or CHAINED.search(cmd):
+        return False
+    for pattern, why, *rest in RISKY_CMDS:
+        if re.search(pattern, cmd, re.I):
+            # sudo、裝套件、git push、kill 動的不是檔案，路徑落在哪裡都不算工作區內
+            if not (rest and rest[0]):
+                return False
+            break
+    else:
+        return False                     # 不是風險指令，輪不到這裡回答
+    try:
+        args = shlex.split(cmd)[1:]
+    except ValueError:
+        return False                     # 引號沒配對
+    for tok in args:
+        if tok.startswith("-"):
+            continue                     # 旗標；chmod 的 755 這種會落到下面，剛好也在工作區裡
+        try:
+            ws_path(tok)                 # 同一支路徑限制：..、絕對路徑、symlink、.git 一律不算
+        except Exception:
+            return False
+    return True
 
 
 def _tool_run_shell(command: str, background: bool = False) -> str:
@@ -1208,6 +1380,87 @@ def _tool_fetch_url(url: str) -> str:
 
 
 
+# 系統用量。刻意不吃 psutil：這支只用標準函式庫，而 /proc 跟 nvidia-smi
+# 本來就在那裡。拿不到的欄位一律不回傳，前端就不畫那一格。
+# ponytail: Linux（/proc）＋ NVIDIA（nvidia-smi）。macOS／Windows／AMD 只會少幾格，
+#           不會壞掉。真的有人要再加 vm_stat / GlobalMemoryStatusEx / rocm-smi。
+CPU_LAST = {}
+SYS_CACHE = {"at": 0.0, "data": {}}
+SYS_TTL = 1.5                      # 開兩個分頁時不要變成一秒兩次 nvidia-smi
+
+
+def cpu_percent() -> float:
+    """/proc/stat 兩次取樣之間的忙碌比例。第一次沒有基準，回 -1。"""
+    try:
+        with open("/proc/stat", encoding="utf-8") as fh:
+            v = [float(x) for x in fh.readline().split()[1:]]
+    except Exception:
+        return -1.0
+    idle, total = v[3] + (v[4] if len(v) > 4 else 0), sum(v)
+    prev = CPU_LAST.get("v")
+    CPU_LAST["v"] = (total, idle)
+    if not prev or total <= prev[0]:
+        return -1.0
+    return round(100.0 * (1 - (idle - prev[1]) / (total - prev[0])), 1)
+
+
+def ram_info() -> dict:
+    """RAM 用量，單位 GB。用 MemAvailable 而不是 MemFree —— cache 是可以拿回來的，
+    算成「已用」會看起來永遠快滿了。"""
+    try:
+        got = {}
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                k, _, val = line.partition(":")
+                if k in ("MemTotal", "MemAvailable"):
+                    got[k] = int(val.split()[0]) / 1048576.0
+        if len(got) == 2:
+            return {"used": round(got["MemTotal"] - got["MemAvailable"], 1),
+                    "total": round(got["MemTotal"], 1)}
+    except Exception:
+        pass
+    return {}
+
+
+def gpu_info() -> list:
+    """問一次 nvidia-smi。沒有卡、沒裝驅動、指令不在，都回空清單。"""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3).stdout.decode(
+                "utf-8", "replace")
+    except Exception:
+        return []
+    cards = []
+    for line in out.strip().splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) < 5:
+            continue
+        try:
+            cards.append({"name": f[0], "util": int(f[3]), "temp": int(f[4]),
+                          "vram": {"used": round(int(f[1]) / 1024.0, 1),
+                                   "total": round(int(f[2]) / 1024.0, 1)}})
+        except ValueError:
+            continue
+    return cards
+
+
+def sys_usage() -> dict:
+    """給 topbar 用的一包數字。這是 serve.py 這一台的數字 ——
+    Ollama 在別台的話，GPU 那幾格講的不是跑模型的那張卡（前端會標出來）。"""
+    now = time.time()
+    if now - SYS_CACHE["at"] < SYS_TTL and SYS_CACHE["data"]:
+        return SYS_CACHE["data"]
+    data = {"cpu": cpu_percent(), "ram": ram_info(), "gpu": gpu_info(),
+            "cores": os.cpu_count() or 0, "ollama_local": ollama_is_local()}
+    SYS_CACHE.update(at=now, data=data)
+    return data
+
+
 def agent_rules() -> str:
     """依目前開放的工具拼出給模型的操作規則。
 
@@ -1227,7 +1480,8 @@ def agent_rules() -> str:
     if ALLOW_WRITE:
         r += ["- 修改既有檔案一律用 edit_file：old 要與檔案內容完全一致（含縮排），"
               "並帶足前後文讓它在檔案裡唯一；write_file 只用來建立新檔案。",
-              "- 一次只改一個地方，改完立刻用 run_tests 驗證。",
+              "- 同一個檔案要改好幾處時用 edits 一次送完，不要一輪改一處。",
+              "- 一次做完一件事就用 run_tests 驗證，不要改一整輪才驗。",
               "- 測試失敗時修的是程式，不是測試。真的認為測試寫錯，先說出來讓使用者決定。"]
     if WORKSPACE is not None:
         r.append("- 缺套件時用 setup_env 裝進工作區的 .venv，不要用 run_shell 下 pip install。")
@@ -1799,15 +2053,13 @@ def preview_tool(name: str, args: dict) -> str:
     if name == "edit_file":
         p = ws_path(args.get("path", ""), must_exist=True)
         old = p.read_text("utf-8", errors="replace")
-        target = args.get("old", "")
-        count = old.count(target)
-        if count == 0:
-            return "（無法預覽：在檔案裡找不到要取代的內容）"
-        if count > 1 and not args.get("replace_all"):
-            return f"（無法預覽：要取代的內容出現 {count} 次，需要 replace_all）"
-        new_text = (old.replace(target, args.get("new", "")) if args.get("replace_all")
-                    else old.replace(target, args.get("new", ""), 1))
-        return unified(old, new_text, ws_rel(p))
+        try:
+            items = edit_items(args.get("old", ""), args.get("new", ""),
+                               args.get("replace_all"), args.get("edits"))
+            new_text, _, notes = apply_edits(old, items, ws_rel(p))
+        except ValueError as e:
+            return f"（無法預覽：{e}）"
+        return unified(old, new_text, ws_rel(p)) + ("\n" + "\n".join(notes) if notes else "")
     return ""
 
 
@@ -2061,6 +2313,10 @@ class Handler(BaseHTTPRequestHandler):
                         "cpus": os.cpu_count() or 0,
                         "ollama_local": ollama_is_local(),
                         "client": self.client_address[0], "trust_remote": TRUST_REMOTE})
+        elif self.path == "/sys":
+            # topbar 的用量。輕到可以每幾秒問一次（nvidia-smi 有 1.5 秒的快取）。
+            # 只回給本機：這台機器有幾張卡、多少記憶體不是給同網段的人看的。
+            self._json(sys_usage() if self._is_local() else {})
         elif self.path == "/alive":
             # 很輕的一支，網頁每 30 秒問一次。只回「程式碼有沒有被改過」
             self._json({"src_changed": source_stamp() != SRC_STAMP,
@@ -2462,11 +2718,13 @@ class Handler(BaseHTTPRequestHandler):
             args = req.get("args") or {}
             diff = preview_tool(name, args)
             risk = command_risk(args.get("command", ""))[0] if name == "run_shell" else "ok"
+            # 只在風險指令上算一次：前端要用它決定「工作區內全自動」放不放行
+            scope = "ws" if risk == "risky" and ws_scoped(args.get("command", "")) else ""
             hit = rule_match(name, args)
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
-        self._json({"diff": diff, "risk": risk, "rule": hit})
+        self._json({"diff": diff, "risk": risk, "rule": hit, "scope": scope})
 
     def _do_view(self) -> None:
         """把工作區裡的檔案內容送給介面顯示。

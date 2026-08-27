@@ -13,9 +13,10 @@ const S = {
   jobs: [],                                // 背景指令，活在 serve.py 那個行程裡
   pre: null,                               // 背景先算好的壓縮摘要
   streamTools: ['run_shell', 'run_tests'], mcp: null, cpus: 0, layers: {},
+  sysChips: ['vram'], sys: null,        // topbar 要顯示哪幾格用量
   browse: null, treeReady: false, skills: null, slash: { items: [], at: 0 },
   run: { rounds: 0, calls: 0, tokens: 0 }, queued: [], runTicker: null,
-  auto: 'off',                             // off | read | full，見 AUTO_MODES
+  auto: 'off',                             // off|read|edit|full|ws，見 AUTO_MODES
   files: [], presets: [], tools: false, ctxRatio: 1, lastEst: 0, ctxLabel: ''
 };
 

@@ -1,7 +1,10 @@
 /* ══════════════════════ 工具呼叫 ══════════════════════ */
 function toolsReady() {
-  return !!(S.provider !== 'openai' && S.srv.tools &&
-    (S.caps[S.model] || []).indexOf('tools') >= 0);
+  if (!S.srv.tools) return false;
+  // 外部 API 沒有辦法問「這個模型支不支援 tools」——/v1/models 只回 id，
+  // 沒有 capabilities 這種東西。所以這一邊改成手動開關（連線設定裡）。
+  if (S.provider === 'openai') return !!S.oa.tools;
+  return (S.caps[S.model] || []).indexOf('tools') >= 0;
 }
 
 // 為什麼不能開工具；空字串代表可以開
@@ -13,7 +16,10 @@ function toolsReason() {
         + '在自己的機器上跑一份 serve.py，或那台加 --trust-remote'
       : '直接開 HTML 檔沒有 serve.py，工具不會出現';
   }
-  if (S.provider === 'openai') return '外部 API 模式不送出工具定義';
+  if (S.provider === 'openai') {
+    return S.oa.tools ? ''
+      : '外部 API 模式要自己勾「送出工具定義」（連線設定裡）—— 那邊問不到模型支不支援';
+  }
   if ((S.caps[S.model] || []).indexOf('tools') < 0) return (S.model || '這個模型') + ' 沒有 tools 能力';
   return '';
 }
@@ -74,10 +80,10 @@ function autoMenuItem() {
           action: async function () {
             S.auto = m[0];
             saveConfig();
-            // 全自動＝不再一個一個問，但「能不能改檔案」是另一道開關。
+            // 放開之後就不再一個一個問，但「能不能改檔案」是另一道開關。
             // 兩個不連動的話，使用者以為放著讓它自己跑，結果模型連檔案都動不了。
             let extra = '';
-            if (m[0] === 'full' && !S.ws.write) {
+            if ((m[0] === 'full' || m[0] === 'ws') && !S.ws.write) {
               const why = writeReason();
               if (why) extra = '（' + why + '，目前只能讀）';
               else {
@@ -89,7 +95,8 @@ function autoMenuItem() {
             renderWriteBtn();
             toast(m[0] === 'off' ? '每個工具呼叫都會問你'
               : (m[0] === 'read' ? '唯讀工具自動放行'
-                : '全自動：危險指令仍會問你' + extra));
+                : (m[0] === 'ws' ? '工作區內全自動：只動工作區檔案的指令不再問你' + extra
+                  : '跑指令自動：rm、sudo 這種風險指令仍會問你' + extra)));
           }
         };
       }));
@@ -265,7 +272,7 @@ function renderTodos() {
     }).join('');
 }
 
-// 工具跑幾輪、花多少 token，全自動模式時這是唯一看得出「它還在做事」的地方。
+// 工具跑幾輪、花多少 token。自動模式開著時這是唯一看得出「它還在做事」的地方。
 function renderRunBar() {
   const bar = $('runBar');
   const r = S.run;
@@ -274,6 +281,7 @@ function renderRunBar() {
   const bits = ['第 ' + r.rounds + '/' + MAX_TOOL_ROUNDS + ' 輪',
                 r.calls + ' 次工具',
                 '累計 ' + fmtTokens(r.tokens) + ' tokens'];
+  if (r.now) bits.push('執行中 ' + r.now);
   if (r.t0) bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
   // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
   const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
@@ -351,8 +359,11 @@ function askUser(args) {
     S.stick = true;
     pin();
     input.focus();
+    waitBadge(true);
+    notifyBg('模型在問你：' + String(args.question || '').slice(0, 80));
 
     const done = function (text) {
+      waitBadge(false);
       el.querySelector('.ta:last-child').innerHTML = '';
       opts.innerHTML = '';
       opts.hidden = true;
@@ -643,8 +654,14 @@ function treeRow(entry, depth) {
   return row;
 }
 
-async function expandInto(box, rel, depth) {
-  box.innerHTML = '<div class="fv-empty" style="padding:4px 14px;">讀取中…</div>';
+// open：refreshTree() 傳下來的「重畫前哪些資料夾是開的」，重建之後照樣打開。
+// 沒有它的話，模型每寫一個檔就把整棵樹縮回根目錄，沒有人會想開著它。
+async function expandInto(box, rel, depth, open) {
+  open = open || {};
+  // 已經有內容就別閃「讀取中…」：自動重讀時那一下閃爍比不更新還煩
+  if (!box.querySelector('.it')) {
+    box.innerHTML = '<div class="fv-empty" style="padding:4px 14px;">讀取中…</div>';
+  }
   try {
     const entries = await lsDir(rel);
     box.innerHTML = '';
@@ -656,13 +673,20 @@ async function expandInto(box, rel, depth) {
       const row = treeRow(e, depth);
       const kids = document.createElement('div');
       kids.className = 'kids';
+      kids.dataset.rel = e.path;          // refreshTree() 靠這個認出哪一格是開的
       box.appendChild(row);
       box.appendChild(kids);
+      if (e.dir && open[e.path]) {
+        kids.classList.add('open');
+        row.querySelector('.tw').classList.add('open');
+        kids.dataset.loaded = '1';
+        expandInto(kids, e.path, depth + 1, open);
+      }
       row.addEventListener('click', function () {
         if (e.dir) {
-          const open = kids.classList.toggle('open');
-          row.querySelector('.tw').classList.toggle('open', open);
-          if (open && !kids.dataset.loaded) {
+          const on = kids.classList.toggle('open');
+          row.querySelector('.tw').classList.toggle('open', on);
+          if (on && !kids.dataset.loaded) {
             kids.dataset.loaded = '1';
             expandInto(kids, e.path, depth + 1);
           }
@@ -683,7 +707,33 @@ async function expandInto(box, rel, depth) {
 
 function renderTree() {
   showTreeView();
-  expandInto($('fvTree'), '', 0);
+  redrawTree();
+}
+
+// 展開狀態不能在重畫時掉。收集現在開著的資料夾，重建時原樣打開。
+function openDirs() {
+  const out = {};
+  Array.prototype.forEach.call($('fvTree').querySelectorAll('.kids.open'),
+    function (k) { if (k.dataset.rel) out[k.dataset.rel] = 1; });
+  return out;
+}
+
+function redrawTree() {
+  expandInto($('fvTree'), '', 0, openDirs());
+}
+
+// 手動的 ↻，以及工具動過檔案之後的自動重讀。
+// 檔案樹本來只在切到這個分頁時讀一次 —— 模型寫了新檔、rm 掉一個資料夾，
+// 樹上完全看不出來，只能自己去點別的分頁再切回來。
+let treeTimer = null;
+
+function touchTree() {
+  S.treeReady = false;      // 沒開著檔案分頁的話，等切過去時自然會重讀
+  S.atFiles = null;         // @檔名 的自動完成也是同一份清單，一起作廢
+  if (S.tab !== 'file' || !S.ws.path || !S.srv.toolsLocal) return;
+  // 一輪常常連改五六個檔，每一個都重畫一次是白做工。收斂成最後一次。
+  clearTimeout(treeTimer);
+  treeTimer = setTimeout(function () { S.treeReady = true; redrawTree(); }, 400);
 }
 
 function showTreeView() {
@@ -907,7 +957,7 @@ async function toggleWrite() {
 //
 // 為什麼需要這個：工作區與四個開關都是 serve.py 的**行程全域**，重啟 serve.py
 // 就回到預設；自動模式與其他偏好卻存在瀏覽器的 localStorage 裡。兩邊不對齊的
-// 症狀是「自動模式顯示全自動，但模型改不動檔案」—— 看起來像壞掉，其實是
+// 症狀是「自動模式已經放到最開，但模型改不動檔案」—— 看起來像壞掉，其實是
 // 伺服器那邊的「修改檔案」根本沒開。
 //
 // 順序有意義：**工作區一定要先設**，因為 serve.py 的 ALLOW_WRITE 有
@@ -991,9 +1041,9 @@ async function toolPreview(name, args) {
     });
     const data = await res.json();
     return { diff: data.diff || data.error || '', risk: data.risk || 'ok',
-             rule: data.rule || null };
+             rule: data.rule || null, scope: data.scope || '' };
   } catch (e) {
-    return { diff: '', risk: 'ok', rule: null };
+    return { diff: '', risk: 'ok', rule: null, scope: '' };
   }
 }
 
@@ -1119,6 +1169,10 @@ function confirmTool(name, args, pre) {
     $('thread').appendChild(el);
     S.stick = true;
     pin();
+    waitBadge(true);
+    notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
+      + (write && args.path ? ' · ' + args.path : '')
+      + (risky ? ' · ' + risky : ''));
 
     // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
     if (write && pre && pre.diff) {
@@ -1143,7 +1197,7 @@ function confirmTool(name, args, pre) {
       });
     }
 
-    const done = function (ok) { el.remove(); resolve(ok); };
+    const done = function (ok) { waitBadge(false); el.remove(); resolve(ok); };
     el.querySelector('[data-go]').addEventListener('click', function () { done(true); });
     el.querySelector('[data-no]').addEventListener('click', function () { done(false); });
   });
@@ -1185,7 +1239,7 @@ async function execTool(name, args, msg) {
     msg.blocked = true;
     return msg;
   }
-  const auto = autoApprove(name, pre.risk, pre.rule);
+  const auto = autoApprove(name, pre.risk, pre.rule, pre.scope);
   if (!auto && !await confirmTool(name, args, pre)) {
     msg.content = '（使用者拒絕執行這個工具）';
     msg.denied = true;
@@ -1193,6 +1247,9 @@ async function execTool(name, args, msg) {
   }
   msg.auto = auto;
   S.run.calls += 1;
+  // 不串流的工具，結果卡是**跑完之後**才貼上來的 —— setup_env 裝套件裝兩分鐘，
+  // 這中間畫面上一個字都不會多。把正在跑的那一支寫進進度條，秒數本來就在走。
+  S.run.now = name;
   renderRunBar();
   try {
     // 會跑很久的那兩支邊跑邊顯示；其他工具一次回來就好
@@ -1200,6 +1257,8 @@ async function execTool(name, args, msg) {
       msg.content = await runStreamed(name, args);
       msg.failed = msg.content.indexOf('錯誤：') === 0;
       msg.streamed = true;
+      S.run.now = '';
+      touchTree();                         // run_shell／run_tests 最常動到檔案
       if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
       else delete S.run.fails[key];
       return msg;
@@ -1224,8 +1283,12 @@ async function execTool(name, args, msg) {
     msg.content = '錯誤：' + e.message;
     msg.failed = true;
   }
+  S.run.now = '';
+  renderRunBar();
   if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
   else delete S.run.fails[key];            // 成功過就重新計算
+  // 失敗的也要重讀：run_shell 跑到一半掛掉，前半段的檔案已經寫下去了
+  if (READ_ONLY_TOOLS.indexOf(name) < 0) touchTree();
   if (!msg.failed) noteFinishSignals(name, args);
   return msg;
 }
