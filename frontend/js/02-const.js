@@ -313,13 +313,8 @@ function finishCheck(run) {
 }
 
 function toolDefs() {
-  const all = S.toolDefs || [];
-  // ponytail: 子代理（task）走的是 Ollama 的 /api/chat，外部 API 模式下沒有
-  //           對應的路徑，所以那邊乾脆不給這一支 —— 給了只會在呼叫時才爆。
-  //           要支援就把 runSubagent 改成走 chatStream。
-  return S.provider === 'openai'
-    ? all.filter(function (d) { return ((d.function || {}).name) !== 'task'; })
-    : all;
+  // 子代理改走 chatStream 之後，外部 API 那條路它自己就處理好了，不必再濾掉 task。
+  return S.toolDefs || [];
 }
 
 // 後端的 tail_of() 的前端版。**中途停掉那條路繞過了後端的截斷** ——

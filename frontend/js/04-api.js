@@ -67,9 +67,15 @@ function friendlyError(err) {
   return { msg: raw };
 }
 
-async function apiJson(path, body, timeoutMs) {
+async function apiJson(path, body, timeoutMs, signal) {
   const ctrl = new AbortController();
   const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 8000);
+  // 外面給的 signal（停止鍵）要接進來，不然按了停止只停得了主迴圈
+  const relay = function () { ctrl.abort(); };
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', relay);
+  }
   try {
     const res = await fetch(apiUrl(path), {
       method: body ? 'POST' : 'GET',
@@ -82,7 +88,10 @@ async function apiJson(path, body, timeoutMs) {
     try { data = JSON.parse(text); } catch (e) { /* 非 JSON */ }
     if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status + '：' + text.slice(0, 200)));
     return data;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', relay);
+  }
 }
 
 // 走 serve.py 代理時要顯示真正的 Ollama 位址，不是網頁自己的 port；

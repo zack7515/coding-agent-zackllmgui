@@ -189,8 +189,9 @@ OpenAI 規定每一則 tool 訊息要帶 `tool_call_id` 指回去。`oaMsgs()` �
 配不到的（舊對話、被 `squeezeTools` 動過）退回純文字的 `role:'user'` ——
 寧可少一點結構，也不要讓整串歷史被對方 400 退回。
 
-**`task`（子代理）在這個模式不會出現在工具清單裡**：`runSubagent()` 直接打
-Ollama 的 `/api/chat`，外部 API 沒有對應的路徑。給了只會在呼叫時才爆。
+**子代理在這個模式也能用了**：`runSubagent()` 原本直接打 Ollama 的 `/api/chat`，
+所以外部 API 模式得把 `task` 從工具清單濾掉。改成走 `chatStream()` 之後，
+兩種 provider 的差異在那一層就處理完了，子代理不必知道自己在跟誰講話。
 
 外部 API 一律經由 `serve.py` 的 `/ext` 轉送，原因跟 `/api/*` 一樣是 CORS：
 瀏覽器直接打 `api.openai.com` 會被擋。轉送時金鑰原封不動從 `Authorization` 帶過去，
@@ -502,6 +503,34 @@ code block 的語言標籤）。內容清空等於刪除，晶片旁邊的 × �
 寫入前 `POST /preview` 用 `difflib` 算 diff 給確認卡顯示；寫入時先把原檔複製到
 `.zackllmgui-backup/<時間戳>/<相對路徑>`，結果卡上就能一鍵還原。
 `[backup]路徑` 這個標記在前端會被抽掉，不會佔模型的 context。
+
+### 子代理：預設唯讀、停得住、explore 平行跑
+
+全自動變成常態用法之後，子代理有三個地方站不住：
+
+**輪數 8 輪**是「每次呼叫都要人確認」時代留下的值 —— 那時每一輪都有人在看。放著跑
+的時候 8 輪掃不完一個真實專案，交辦出去只會拿回「我還在找」。改成 60，性質跟
+`MAX_TOOL_ROUNDS` 一樣是**失控煞車不是預算**。
+
+**停止鍵停不住它。** 子代理自己開一個 `AbortController`，主迴圈的 `S.abort` 跟它沒
+關係，所以按下停止之後它會一路跑到輪數用完 —— 全自動之後那可能是好幾分鐘、幾十次
+工具呼叫。現在 `S.abort.signal` 一路傳進去，每一輪開頭與每次工具呼叫前都看一眼。
+`apiJson()` 也跟著多收一個 signal：計時器與外面的停止是兩回事，兩個都要能中止它。
+
+**沒有人在看它做什麼。** 所以 `task` 多一個 `type`：`explore`（預設）只拿得到唯讀
+工具，`work` 才給改檔案與跑指令的。分兩種的理由不是「功能比較多」，是交辦「找出所
+有用到 X 的地方」不需要寫檔案的權限，那就不要給。認不得的值退回 `explore` ——
+權限的預設值錯的方向只有一個。
+
+三種工具**兩種型別都不給**：`task`（遞迴沒有底）、`ask_user_question`（它問了也沒人
+看得懂上下文）、`todo_write`（待辦是主代理那一條線的東西，子代理寫進去等於把它的清
+單蓋掉——工作區跟著分頁走之後，子代理跟主代理是同一個 `Session`，會真的蓋到）。
+
+**平行只給 explore。** 同一輪來了好幾個 `task` 就一起發：每個子代理是一整條獨立的
+模型迴圈，平行省的是真正的牆鐘時間。這跟「平行跑 `read_file`」不是同一回事——後者
+省的是微秒級的本機 I/O，而同一輪一次送三個省的是兩輪 60k context 的 prefill，差好
+幾個數量級，所以那一項量過之後決定不做。`work` 型不平行：兩個會寫檔案的子代理同時
+動同一個檔案，收拾起來比省下的時間貴。
 
 ### 對話存在 IndexedDB，一則一筆
 
@@ -1137,11 +1166,10 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **GPU 節點是寫死的 glob 清單**（[sandbox/bwrap.py](sandbox/bwrap.py) `GPU_NODES`） | 只有 NVIDIA 驗過，其餘照文件寫 | 在沙盒裡 `ls /dev` 看少了什麼，往清單補一條。細節見 [sandbox/README.md](sandbox/README.md) |
 | **容器後端不接 GPU** | docker／podman 裡沒有顯示卡 | `--gpus all` 需要 NVIDIA Container Toolkit，沒裝會讓 docker 直接失敗，所以不無條件加。要做就得先偵測 |
 | **重複失敗只比「工具名＋參數完全一樣」**（[07-tools.js](frontend/js/07-tools.js) `REPEAT_LIMIT`） | 差一個空白就繞過去 | 模型重試時通常原封不動送同一份。真的漏掉再做參數正規化 |
-| **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 不能平行跑工具 | 一次只跑一個工具（每次都要人確認）所以夠用。要平行就得把 chat id 當參數穿到 `journal_add` |
+| **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 同一個分頁裡，還原點的「屬於哪則對話」可能標錯 | 工作區已經跟著分頁走了（`Session`），但 chat id 還是行程一份。要準就把它移進 `Session` |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |
 | **「繼續」不是真的 resume** | 沒有 resume token 這種東西 | 就是拿同一份訊息再送一次，模型從最後那則接下去。Ollama 本來就這樣運作，沒有更好的做法 |
-| **狀態接回來只認一個瀏覽器分頁** | 兩個分頁開不同對話會互相蓋掉工作區 | 工作區是 `serve.py` 的行程全域。真的要分開得讓每個請求帶 chat id，那是另一個層級的改動 |
-| **子代理只有一種，不能再開子代理** | 不能針對不同任務給不同提示與工具 | Claude Code 有 `subagent_type`。等到真的有兩種明顯不同的用法再說 |
+| **子代理不能再開子代理** | 深一層的分工做不到 | 遞迴沒有底，成本也沒有底。要拆更細就由主代理拆成好幾件平行交辦 |
 | **背景指令沒有 `GET /job/{id}` 串流** | 看不到即時輸出，只能整段收 | 收結果走既有的 `/tool`，因為 `check_job` 是工具不是路由。要即時看再補一條 SSE |
 | **`check_job` 用輪詢 `time.sleep(0.2)` 等**（[serve.py](serve.py) `BG_WAIT`） | 一條指令佔住一條 HTTP 執行緒 | `ThreadingHTTPServer` 一條指令一條執行緒，上限 `BG_MAX = 8`。要更省就換 `threading.Event` |
 | **focus chain 靠 mtime 判斷「誰改的」**（[serve.py](serve.py) `TODO_MTIME`） | 同一秒內連改兩次可能漏掉一次 | 人手動編輯不會有這種頻率。真的要準就存內容的 hash |
@@ -1152,12 +1180,13 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 
 ## 已知限制
 
-- 對話存在 `localStorage`，換瀏覽器或清除資料就沒了；最多保留 100 組對話。
+- 對話存在瀏覽器的 IndexedDB，換瀏覽器或清除網站資料就沒了（不出這台機器是刻意的，
+  見〈對話存在 IndexedDB〉）。`file://` 下 Firefox 不給用 IndexedDB，會退回 `localStorage`。
 - `num_ctx` 預設 65536。舊設定若停在 4096（上一版的預設值）會自動升上來一次，
   之後以使用者自己填的為準。模型實際支援的長度以模型為準，填超過會被 Ollama 截。
 - 外部 API 模式**問不到模型能力**（`/v1/models` 只回 id，沒有 capabilities），
   所以工具是手動勾的開關而不是自動偵測；thinking 要看服務給不給
-  （規格裡沒有這個欄位）；圖片與子代理還沒接。
+  （規格裡沒有這個欄位）；圖片還沒接。
 - Hugging Face 的模型走 `hf.co/使用者/儲存庫:量化`，由 Ollama 自己去抓；
   沒填量化標籤時抓該儲存庫的預設檔案。私有儲存庫需要在 Ollama 那端設定憑證，
   這個介面不處理。

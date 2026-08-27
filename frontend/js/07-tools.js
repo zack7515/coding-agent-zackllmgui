@@ -1310,58 +1310,100 @@ async function execTool(name, args, msg) {
 /* ══════════════════════ 子代理 ══════════════════════ */
 // 「掃過整個專案找出所有用到 X 的地方」這種事，自己做會把幾十個檔案的內容
 // 灌進主對話，之後每一輪都要重送。子代理有自己的 context，只有結論回來。
-const SUB_ROUNDS = 8;
 
-function subTools() {
+// 跟 MAX_TOOL_ROUNDS 一樣是**失控煞車，不是預算**：交辦出去的事沒有人在旁邊看，
+// 8 輪根本不夠掃完一個真實專案 —— 原本那個值是「每次呼叫都要人確認」時代留下的。
+const SUB_ROUNDS = 60;
+
+// explore 只給讀的，work 給全部。分兩種的理由不是「功能比較多」，是**全自動之後
+// 沒有人在看子代理做什麼** —— 交辦「找出所有用到 X 的地方」不需要寫檔案的權限，
+// 那就不要給。模型沒指定時當 explore：task 的描述本來就是在講調查。
+const SUB_TYPES = ['explore', 'work'];
+
+function subKind(args) {
+  const t = String(((args || {}).type) || '').toLowerCase();
+  return SUB_TYPES.indexOf(t) >= 0 ? t : 'explore';
+}
+
+function subTools(kind) {
   // 不給 task：子代理再開子代理就沒有底了。
   // 不給 ask_user_question：它問了也沒人看得懂上下文，該問就回報給主代理去問。
+  // 不給 todo_write：待辦是主代理那一條線的東西，子代理寫進去等於把它的清單蓋掉。
+  const never = ['task', 'ask_user_question', 'submit_plan', 'todo_write'];
   return toolDefs().filter(function (d) {
-    return ['task', 'ask_user_question', 'submit_plan'].indexOf(d.function.name) < 0;
+    const n = (d.function || {}).name;
+    if (never.indexOf(n) >= 0) return false;
+    return kind === 'work' || READ_ONLY_TOOLS.indexOf(n) >= 0;
   });
 }
 
 async function runSubagent(args) {
   const task = String((args && (args.prompt || args.task)) || '').trim();
   if (!task) return '錯誤：task 要給 prompt';
+  const kind = subKind(args);
+  const signal = S.abort ? S.abort.signal : null;
 
   const el = msgEl('assistant');
   el.innerHTML =
     '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
-    '<div class="msg-col"><div class="tool-card"><div class="th">子代理 ' +
-    '<span class="st">進行中</span></div><pre class="out" style="margin:0;"></pre></div></div>';
+    '<div class="msg-col"><div class="tool-card"><div class="th">子代理' +
+    (kind === 'work' ? '（可改檔案）' : '（唯讀）') +
+    ' <span class="st">進行中</span></div><pre class="out" style="margin:0;"></pre></div></div>';
   const out = el.querySelector('.out');
   out.textContent = task;
   $('thread').appendChild(el);
   pin();
   const log = function (line) { out.textContent += '\n' + line; pin(); };
+  const stopped = function () { return signal && signal.aborted; };
 
   const msgs = [{ role: 'system', content:
     '你是子代理，只負責完成交辦的這一件事。你有跟主代理一樣的工具，但是：\n'
     + '- 不能再開子代理，也問不到使用者，卡住就把卡在哪裡寫進結論。\n'
+    + (kind === 'work' ? '' : '- 你只有唯讀工具。要改檔案就把「該改什麼」寫進結論，讓主代理去改。\n')
     + '- 做完用不超過 15 行回報結論，帶上關鍵的檔案與行號。\n'
     + '- 你的過程不會被主代理看到，只有最後這段文字會，所以結論要能單獨讀懂。\n\n'
     + (agentRules() || '') }, { role: 'user', content: task }];
 
   try {
     for (let i = 1; i <= SUB_ROUNDS; i++) {
+      // 停止鍵要停得住。原本子代理自己開 AbortController，按停止只停得了主迴圈，
+      // 子代理會繼續跑到輪數用完 —— 全自動之後那可能是好幾分鐘。
+      if (stopped()) {
+        el.querySelector('.st').textContent = '已停止';
+        return '（子代理被停止鍵停掉了，任務沒有完成）';
+      }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
-      const body = { model: S.model, messages: msgs, tools: subTools(), stream: false };
+
+      let text = '';
+      let calls = null;
+      const payload = { model: S.model, messages: msgs, tools: subTools(kind), stream: true };
       const opts = buildOptions();
-      if (Object.keys(opts).length) body.options = opts;
-      if (thinkValue() !== null) body.think = false;      // 子代理不用思考，省時間
-      const data = await apiJson('/api/chat', body, 600000);
-      const m = data.message || {};
+      if (Object.keys(opts).length) payload.options = opts;
+      if (thinkValue() !== null) payload.think = false;   // 子代理不用思考，省時間
+      // 走 chatStream 而不是自己打 /api/chat：外部 API 那條路它已經處理好了，
+      // 子代理才跟著能用（原本 toolDefs() 在外部 API 模式下要把 task 濾掉）。
+      await chatStream(payload, signal, {
+        think: function () { },
+        images: function () { },
+        content: function (t) { text += t; },
+        tools: function (tc) { calls = (calls || []).concat(tc); },
+        done: function () { }
+      });
+
+      const m = { role: 'assistant', content: text };
+      if (calls && calls.length) m.tool_calls = calls;
       msgs.push(m);
-      const tcs = m.tool_calls || [];
-      if (!tcs.length) {
-        const text = (m.content || '').trim();
+
+      if (!calls || !calls.length) {
+        const done = text.trim();
         el.querySelector('.tool-card').classList.add('done');
         el.querySelector('.st').textContent = '完成（' + i + ' 輪）';
-        log('→ ' + (text || '（沒有結論）'));
-        return text || '（子代理沒有給出結論）';
+        log('→ ' + (done || '（沒有結論）'));
+        return done || '（子代理沒有給出結論）';
       }
-      for (let k = 0; k < tcs.length; k++) {
-        const fn = tcs[k].function || {};
+      for (let k = 0; k < calls.length; k++) {
+        if (stopped()) break;
+        const fn = calls[k].function || {};
         let a = fn.arguments;
         if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = {}; } }
         log('· ' + fn.name + ' ' + JSON.stringify(a || {}).slice(0, 120));
@@ -1373,10 +1415,35 @@ async function runSubagent(args) {
     el.querySelector('.st').textContent = '輪數用完';
     return '（子代理跑了 ' + SUB_ROUNDS + ' 輪還沒有結論，任務可能太大，拆小一點再交辦）';
   } catch (e) {
+    if (stopped()) {
+      el.querySelector('.st').textContent = '已停止';
+      return '（子代理被停止鍵停掉了，任務沒有完成）';
+    }
     el.querySelector('.st').textContent = '失敗';
     log('→ ' + e.message);
     return '子代理失敗：' + e.message;
   }
+}
+
+// 同一輪來了好幾個 task 就一起發。**這是唯一值得平行化的東西**：每個子代理是一整條
+// 獨立的模型迴圈，平行省的是真正的牆鐘時間；三個 read_file 平行跑省的只有微秒級的
+// 本機 I/O，而同一輪一次送三個省的是兩輪 60k context 的 prefill（見 tech.md）。
+// 只平行 explore：兩個會寫檔案的子代理同時動同一個檔案，收拾起來比省下的時間貴。
+function startSubagents(calls) {
+  const running = {};
+  const idx = [];
+  for (let i = 0; i < calls.length; i++) {
+    if (((calls[i] || {}).function || {}).name === 'task'
+        && subKind(callArgs(calls[i])) === 'explore') idx.push(i);
+  }
+  if (idx.length > 1) idx.forEach(function (i) { running[i] = runSubagent(callArgs(calls[i])); });
+  return running;
+}
+
+function callArgs(call) {
+  let a = ((call || {}).function || {}).arguments;
+  if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = {}; } }
+  return a || {};
 }
 
 // 給 finishCheck 用的兩個訊號。只在工具**成功**之後記 ——
@@ -1411,12 +1478,11 @@ async function runTools(c, calls, depth) {
   // 不鎖輸入框了：跑十分鐘的任務不該讓人只能乾等。打字會排隊（submitFromInput），
   // 送出鍵維持「停止」的語意，所以按鍵仍然是停用的。
   blockComposer(RUNNING_HINT);
+  const subs = startSubagents(calls);        // 同一輪的多個 explore 子代理一起發
   for (let i = 0; i < calls.length; i++) {
     const fn = (calls[i] || {}).function || {};
     const name = fn.name || '';
-    let args = fn.arguments;
-    if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = {}; } }
-    args = args || {};
+    const args = callArgs(calls[i]);
 
     const msg = { role: 'tool', tool_name: name, args: args, content: '' };
 
@@ -1428,7 +1494,7 @@ async function runTools(c, calls, depth) {
       continue;
     }
     if (name === 'task') {
-      msg.content = await runSubagent(args);
+      msg.content = await (subs[i] || runSubagent(args));
       c.messages.push(msg);          // 只存結論：過程留在子代理自己的 context 裡
       saveChats();
       continue;

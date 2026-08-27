@@ -118,10 +118,15 @@ TOOL_SCHEMAS = [
     {"name": "task", "needs": "ws",
      "description": ("把一件需要翻很多檔案的事交給子代理去做，只有結論會回到這裡。"
                      "適合「掃過整個專案找出所有用到 X 的地方」這種問題 —— "
-                     "自己做的話幾十個檔案的內容會塞滿對話。子代理有同樣的工具，"
-                     "但不能再開子代理，也問不到使用者，所以任務要一次講清楚"),
+                     "自己做的話幾十個檔案的內容會塞滿對話。子代理不能再開子代理、"
+                     "問不到使用者、也看不到這裡的對話，所以任務要一次講清楚。"
+                     "同一輪可以一次交辦好幾件 explore，它們會平行跑"),
      "properties": {"prompt": {"type": "string",
-                               "description": "要子代理做的事，講清楚範圍與你要什麼結論"}},
+                               "description": "要子代理做的事，講清楚範圍與你要什麼結論"},
+                    "type": {"type": "string", "enum": ["explore", "work"],
+                             "description": ("explore（預設）只給唯讀工具，用來調查；"
+                                             "work 才給改檔案與跑指令的工具。"
+                                             "只是要答案就用 explore")}},
      "required": ["prompt"]},
     {"name": "load_skill", "needs": "skills",
      "description": ("把一份 skill 的完整步驟讀進來。系統提示裡只有名字與一行描述，"

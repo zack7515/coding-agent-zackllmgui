@@ -1088,19 +1088,30 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   });
 })();
 
-// 子代理：自己的 context，只有結論回到主對話。跑得起來、不會遞迴、
-// 輪數用完會停 —— 這三件事錯了都會變成無限迴圈或整頁卡住。
-(function () {
+// 子代理：自己的 context，只有結論回到主對話。跑得起來、不會遞迴、輪數用完會停、
+// 停止鍵停得住 —— 這四件事錯了都會變成無限迴圈或停不下來的背景任務。
+(async function () {
   const src = script.slice(script.indexOf('const SUB_ROUNDS'),
                            script.indexOf('async function runTools'));
-  const mk = (replies) => new Function(`
-    const S = { model: 'm', srv: {}, run: { calls: 0 }, streamTools: [], toolDefs: [] };
+  const mk = (replies, aborted) => new Function(`
+    const S = { model: 'm', srv: {}, run: { calls: 0 }, streamTools: [], toolDefs: [],
+                abort: { signal: { aborted: ${!!aborted} } } };
     let turn = 0;
     const calls = [];
-    const apiJson = async () => ${JSON.stringify(replies)}[turn++];
+    const started = [];
+    // 子代理改走 chatStream：外部 API 那條路才跟著能用
+    const chatStream = async (payload, signal, on) => {
+      started.push(payload.tools.map((d) => d.function.name).join(','));
+      const r = ${JSON.stringify(replies)}[turn++] || {};
+      if (r.content) on.content(r.content);
+      if (r.tools) on.tools(r.tools);
+      on.done({});
+    };
     const execTool = async (n, a, msg) => { calls.push(n); msg.content = 'OK:' + n; return msg; };
-    const toolDefs = () => [{ function: { name: 'read_file' } }, { function: { name: 'task' } },
-                            { function: { name: 'ask_user_question' } }];
+    const READ_ONLY_TOOLS = ['read_file', 'search_files'];
+    const toolDefs = () => ['read_file', 'search_files', 'write_file', 'run_shell',
+                            'task', 'ask_user_question', 'todo_write']
+      .map((n) => ({ function: { name: n } }));
     const agentRules = () => 'rules';
     const buildOptions = () => ({});
     const thinkValue = () => null;
@@ -1114,33 +1125,67 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const $ = () => ({ appendChild() {} });
     const pin = () => {};
     ${src}
-    return { runSubagent, subTools, calls };
+    return { runSubagent, subTools, subKind, startSubagents, callArgs, calls, started,
+             rounds: SUB_ROUNDS };
   `)();
 
-  // 子工具清單：不能有 task（遞迴就沒有底了），也不該有 ask_user_question
-  const names = mk([]).subTools().map((d) => d.function.name);
-  assert.deepStrictEqual(names, ['read_file'], '子代理拿到了不該有的工具：' + names);
+  // 唯讀子代理只能拿到唯讀工具。全自動之後沒有人在看子代理做什麼 ——
+  // 交辦「找出所有用到 X 的地方」不需要寫檔案的權限，那就不要給。
+  const box = mk([]);
+  assert.deepStrictEqual(box.subTools('explore').map((d) => d.function.name),
+    ['read_file', 'search_files'], '唯讀子代理拿到了會改東西的工具');
+  assert.deepStrictEqual(box.subTools('work').map((d) => d.function.name),
+    ['read_file', 'search_files', 'write_file', 'run_shell'], 'work 少了該有的工具');
+  // task 會遞迴、ask_user_question 沒人看得懂上下文、
+  // todo_write 會把主代理那條線的待辦蓋掉 —— 兩種都不能給
+  ['explore', 'work'].forEach(function (k) {
+    const n = box.subTools(k).map((d) => d.function.name);
+    ['task', 'ask_user_question', 'todo_write'].forEach(function (bad) {
+      assert.ok(n.indexOf(bad) < 0, k + ' 拿到了不該有的 ' + bad);
+    });
+  });
+  assert.strictEqual(box.subKind({}), 'explore', '沒指定要當唯讀，不是預設放權限');
+  assert.strictEqual(box.subKind({ type: 'work' }), 'work');
+  assert.strictEqual(box.subKind({ type: '亂寫' }), 'explore', '認不得的值要退回唯讀');
 
   // 正常流程：呼叫一支工具 → 給結論
   const ok = mk([
-    { message: { tool_calls: [{ function: { name: 'read_file', arguments: '{"path":"a"}' } }] } },
-    { message: { content: '結論：a.py 第 3 行' } }]);
-  ok.runSubagent({ prompt: '看一下 a.py' }).then((out) => {
-    assert.strictEqual(out, '結論：a.py 第 3 行');
-    assert.deepStrictEqual(ok.calls, ['read_file']);
-  });
+    { tools: [{ function: { name: 'read_file', arguments: '{"path":"a"}' } }] },
+    { content: '結論：a.py 第 3 行' }]);
+  assert.strictEqual(await ok.runSubagent({ prompt: '看一下 a.py' }), '結論：a.py 第 3 行');
+  assert.deepStrictEqual(ok.calls, ['read_file']);
 
   // 一直呼叫工具、永遠不給結論 → 要在輪數用完時停下來
-  const loop = mk(Array(20).fill(
-    { message: { tool_calls: [{ function: { name: 'read_file', arguments: '{}' } }] } }));
-  loop.runSubagent({ prompt: '無限迴圈' }).then((out) => {
-    assert.ok(/輪還沒有結論/.test(out), '輪數用完沒有停：' + out);
-    assert.strictEqual(loop.calls.length, 8, '應該剛好跑 SUB_ROUNDS 輪');
-  });
+  const loop = mk(Array(200).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }));
+  const out = await loop.runSubagent({ prompt: '無限迴圈' });
+  assert.ok(/輪還沒有結論/.test(out), '輪數用完沒有停：' + out);
+  assert.strictEqual(loop.calls.length, loop.rounds, '應該剛好跑 SUB_ROUNDS 輪');
+
+  // 停止鍵要停得住。原本子代理自己開 AbortController，按停止只停得了主迴圈，
+  // 子代理會一路跑到輪數用完 —— 全自動之後那可能是好幾分鐘。
+  const stop = mk(Array(5).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }), true);
+  assert.ok(/停止/.test(await stop.runSubagent({ prompt: '停我' })), '停止鍵停不住子代理');
+  assert.strictEqual(stop.calls.length, 0, '按了停止還在呼叫工具');
 
   // 沒給 prompt 就不要開一個什麼都不知道的子代理
-  mk([]).runSubagent({}).then((out) => assert.ok(/錯誤/.test(out), out));
-  console.log('ok   子代理');
+  assert.ok(/錯誤/.test(await mk([]).runSubagent({})));
+
+  // 同一輪好幾個 explore 要一起發。每個子代理是一整條獨立的模型迴圈，
+  // 平行省的是真正的牆鐘時間 —— 這跟平行跑 read_file 不是同一回事。
+  const task = (t) => ({ function: { name: 'task', arguments: JSON.stringify(t) } });
+  const par = mk([{ content: 'done' }]);
+  assert.deepStrictEqual(Object.keys(par.startSubagents(
+    [task({ prompt: 'a' }), task({ prompt: 'b' }), { function: { name: 'read_file' } }])),
+    ['0', '1'], '兩個 explore 沒有一起發');
+  assert.deepStrictEqual(Object.keys(par.startSubagents([task({ prompt: 'a' })])), [],
+    '只有一個就不必先發，維持原本的順序');
+  // 兩個會寫檔案的子代理同時動同一個檔案，收拾起來比省下的時間貴
+  assert.deepStrictEqual(Object.keys(par.startSubagents(
+    [task({ prompt: 'a', type: 'work' }), task({ prompt: 'b', type: 'work' })])), [],
+    'work 型的子代理不可以平行跑');
+  console.log('ok   子代理：唯讀預設、停得住、輪數有底、explore 平行跑');
 })();
 
 // 4. 開關：要驗證伺服器真的照做，還有全自動與修改檔案的連動（都得 await）
@@ -1388,10 +1433,12 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       ready({ provider: 'ollama', srv: { tools: true }, oa: { tools: true },
               caps: { m: [] }, model: 'm' }), false, 'Ollama 這邊還是看模型能力');
 
-    // 子代理走 Ollama 專屬的路徑，外部 API 模式不能把它列進去
+    // 子代理改走 chatStream 之後，外部 API 那條路它自己就處理好了 ——
+    // 兩種 provider 拿到的工具清單要一樣，再濾掉 task 等於白白少一支
     const defs = new Function('S', grab('toolDefs') + '\nreturn toolDefs();');
     const all = [{ function: { name: 'task' } }, { function: { name: 'read_file' } }];
-    assert.strictEqual(defs({ provider: 'openai', toolDefs: all }).length, 1);
+    assert.strictEqual(defs({ provider: 'openai', toolDefs: all }).length, 2,
+      '外部 API 模式又把 task 濾掉了');
     assert.strictEqual(defs({ provider: 'ollama', toolDefs: all }).length, 2);
     console.log('ok   外部 API 的工具開關');
   }
