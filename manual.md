@@ -923,7 +923,7 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
 
 | 東西 | 存在哪 | 誰的 |
 |---|---|---|
-| 對話、設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**，不落地成檔案 | 你這台瀏覽器的 |
+| 對話、設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**，不落地成檔案（**存不下時會 toast 提醒**，別忽略它 —— 重整就沒了） | 你這台瀏覽器的 |
 | 改檔案前的備份 | `<工作區>/.zackllmgui-backup/<時間戳>/<相對路徑>` | 你的專案裡 |
 | 還原點的順序紀錄 | `<工作區>/.zackllmgui-backup/journal.jsonl` | 同上 |
 | MCP 設定 | `<工作區>/.zackllmgui-mcp.json`，或 `serve.py` 旁邊 | 同上 |

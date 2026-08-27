@@ -225,10 +225,12 @@ async function runStreamed(name, args) {
         if (obj.done) result = obj.result || '';
       }
     }
-    if (!result) result = out.textContent.trim() + '\n（連線提早結束）';
+    // 這兩條路沒有後端算好的結果，用的是瀏覽器累積的整段輸出 ——
+    // 一定要自己截，不然按停止反而比跑完更會撐爆 context
+    if (!result) result = tailLines(out.textContent.trim()) + '\n（連線提早結束）';
   } catch (e) {
     result = e.name === 'AbortError'
-      ? out.textContent.trim() + '\n（使用者按了停止）'
+      ? tailLines(out.textContent.trim()) + '\n（使用者按了停止）'
       : '錯誤：' + e.message;
   } finally {
     el.remove();

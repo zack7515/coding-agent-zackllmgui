@@ -1567,6 +1567,24 @@ function toolDefs() {
     : all;
 }
 
+// 後端的 tail_of() 的前端版。**中途停掉那條路繞過了後端的截斷** ——
+// 正常結束時結果是後端算好的（留最後 100 行），按停止或連線斷掉時用的是
+// 瀏覽器自己累積的整段，而那一段最多會到 MAX_RUN_BYTES（2MB）。
+// 沒有這一支的話「按停止」比「讓它跑完」更容易把 context 撐爆。
+const TAIL_KEEP = 100;
+
+function tailLines(text, keep) {
+  const lines = String(text || '').split('\n');
+  keep = keep || TAIL_KEEP;
+  if (lines.length <= keep) return String(text || '');
+  const bad = lines.slice(0, -keep)
+    .filter(function (ln) { return /(FAILED|ERROR|Traceback|assert |Exception)/.test(ln); })
+    .slice(-40);
+  const head = '（前面省略 ' + (lines.length - keep) + ' 行'
+    + (bad.length ? '，以下是其中的錯誤行）\n' + bad.join('\n') + '\n…\n' : '）\n');
+  return head + lines.slice(-keep).join('\n');
+}
+
 const MAX_TOOL_ROUNDS = 25;     // 「改一個檔 → 跑測試 → 再改」通常要十幾輪
 const ROUNDS_WARN = 5;          // 剩這麼多輪才提醒。太早講只是每輪多燒一句話
 
@@ -1763,8 +1781,16 @@ function humanSize(n) {
 function lsGet(key) {
   try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; }
 }
+// 回傳有沒有真的存進去。**這個回傳值不能省** —— 這個 catch 除了無痕模式，
+// 也吞掉 QuotaExceededError，而配額滿了之後每一次 saveChats() 都會無聲失敗，
+// 重整才發現整場任務沒了。靜靜掉資料是最不該簡化掉的那一類。
 function lsSet(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 無痕模式等 */ }
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 let toastTimer = null;
 function toast(msg) {
@@ -2576,7 +2602,18 @@ function autoTitle(c) {
   }
   c.title = '新對話';
 }
-function saveChats() { lsSet(LS_CHATS, S.chats.slice(0, 100)); }
+// 存不進去就講。一場長任務大約 400KB，配額 5–10MB —— 十幾場之後就會滿，
+// 而 saveChats() 有十九個呼叫點，沒有一個會知道自己失敗了。
+// 只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
+let saveWarned = false;
+
+function saveChats() {
+  if (lsSet(LS_CHATS, S.chats.slice(0, 100))) { saveWarned = false; return; }
+  if (saveWarned) return;
+  saveWarned = true;
+  toast('對話存不進瀏覽器了（空間滿了）——'
+    + '請先匯出這個對話，或刪掉幾個舊對話，否則重整就會不見');
+}
 
 // 一輪結束（最外層的 runStream 回來了）。有跑過工具才通知 ——
 // 一句話問答不會讓人跑去別的分頁等。
@@ -3859,10 +3896,12 @@ async function runStreamed(name, args) {
         if (obj.done) result = obj.result || '';
       }
     }
-    if (!result) result = out.textContent.trim() + '\n（連線提早結束）';
+    // 這兩條路沒有後端算好的結果，用的是瀏覽器累積的整段輸出 ——
+    // 一定要自己截，不然按停止反而比跑完更會撐爆 context
+    if (!result) result = tailLines(out.textContent.trim()) + '\n（連線提早結束）';
   } catch (e) {
     result = e.name === 'AbortError'
-      ? out.textContent.trim() + '\n（使用者按了停止）'
+      ? tailLines(out.textContent.trim()) + '\n（使用者按了停止）'
       : '錯誤：' + e.message;
   } finally {
     el.remove();

@@ -25,7 +25,18 @@ function autoTitle(c) {
   }
   c.title = '新對話';
 }
-function saveChats() { lsSet(LS_CHATS, S.chats.slice(0, 100)); }
+// 存不進去就講。一場長任務大約 400KB，配額 5–10MB —— 十幾場之後就會滿，
+// 而 saveChats() 有十九個呼叫點，沒有一個會知道自己失敗了。
+// 只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
+let saveWarned = false;
+
+function saveChats() {
+  if (lsSet(LS_CHATS, S.chats.slice(0, 100))) { saveWarned = false; return; }
+  if (saveWarned) return;
+  saveWarned = true;
+  toast('對話存不進瀏覽器了（空間滿了）——'
+    + '請先匯出這個對話，或刪掉幾個舊對話，否則重整就會不見');
+}
 
 // 一輪結束（最外層的 runStream 回來了）。有跑過工具才通知 ——
 // 一句話問答不會讓人跑去別的分頁等。

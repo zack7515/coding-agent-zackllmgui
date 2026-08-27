@@ -312,6 +312,24 @@ function toolDefs() {
     : all;
 }
 
+// 後端的 tail_of() 的前端版。**中途停掉那條路繞過了後端的截斷** ——
+// 正常結束時結果是後端算好的（留最後 100 行），按停止或連線斷掉時用的是
+// 瀏覽器自己累積的整段，而那一段最多會到 MAX_RUN_BYTES（2MB）。
+// 沒有這一支的話「按停止」比「讓它跑完」更容易把 context 撐爆。
+const TAIL_KEEP = 100;
+
+function tailLines(text, keep) {
+  const lines = String(text || '').split('\n');
+  keep = keep || TAIL_KEEP;
+  if (lines.length <= keep) return String(text || '');
+  const bad = lines.slice(0, -keep)
+    .filter(function (ln) { return /(FAILED|ERROR|Traceback|assert |Exception)/.test(ln); })
+    .slice(-40);
+  const head = '（前面省略 ' + (lines.length - keep) + ' 行'
+    + (bad.length ? '，以下是其中的錯誤行）\n' + bad.join('\n') + '\n…\n' : '）\n');
+  return head + lines.slice(-keep).join('\n');
+}
+
 const MAX_TOOL_ROUNDS = 25;     // 「改一個檔 → 跑測試 → 再改」通常要十幾輪
 const ROUNDS_WARN = 5;          // 剩這麼多輪才提醒。太早講只是每輪多燒一句話
 

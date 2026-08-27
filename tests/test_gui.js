@@ -1409,5 +1409,59 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     console.log('ok   檔案樹會自己重讀');
   }
 
+  // ── 中途停掉的輸出也要截 ──────────────────────────────
+  {
+    const tail = new Function(grab('TAIL_KEEP', 'const') + '\n' + grab('tailLines')
+      + '\nreturn tailLines;')();
+    const short = ['a', 'b', 'c'].join('\n');
+    assert.strictEqual(tail(short), short, '短的不要動它');
+    const long = Array.from({ length: 500 }, (_, i) => 'line' + i).join('\n');
+    const cut = tail(long);
+    assert.ok(cut.split('\n').length < 150, '五百行沒有截：' + cut.split('\n').length);
+    assert.ok(cut.indexOf('line499') >= 0, '最後一行要留著');
+    assert.ok(cut.indexOf('省略 400 行') >= 0, '要講省略了幾行：' + cut.slice(0, 60));
+    // 被省略的那一段裡的錯誤行要撈出來，不然截斷等於把失敗原因丟掉
+    const withErr = (['Traceback (most recent call last):']
+      .concat(Array.from({ length: 300 }, (_, i) => 'noise' + i))).join('\n');
+    assert.ok(tail(withErr).indexOf('Traceback') >= 0, '省略掉的錯誤行要撈回來');
+    console.log('ok   中途停掉的輸出也會截斷');
+  }
+  // 兩條繞過後端截斷的路都要走 tailLines
+  assert.ok(!/result = out\.textContent\.trim\(\) \+/.test(script),
+    '按停止／連線斷掉那條路又直接用整段輸出了，最多 2MB 會進 context');
+  assert.strictEqual((script.match(/tailLines\(out\.textContent/g) || []).length, 2,
+    '兩條路都要截');
+
+  // ── localStorage 存不進去要講 ──────────────────────────
+  {
+    const box = new Function(`
+      const store = { fail: false, n: 0 };
+      const localStorage = { setItem: () => { if (store.fail) throw new Error('quota'); store.n++; } };
+      const said = [];
+      const toast = (m) => said.push(m);
+      const LS_CHATS = 'c';
+      const S = { chats: [] };
+      let saveWarned = false;
+      ${grab('lsSet')}
+      ${grab('saveChats')}
+      return { store, said, saveChats, lsSet };
+    `)();
+    assert.strictEqual(box.lsSet('k', 1), true, '存成功要回 true');
+    box.store.fail = true;
+    assert.strictEqual(box.lsSet('k', 1), false, '存失敗要回 false，不能靜靜吞掉');
+    box.saveChats();
+    assert.strictEqual(box.said.length, 1, '滿了要講一次：' + JSON.stringify(box.said));
+    assert.ok(/匯出|滿/.test(box.said[0]), '要說得出怎麼辦：' + box.said[0]);
+    box.saveChats();
+    box.saveChats();
+    assert.strictEqual(box.said.length, 1, '每次呼叫都 toast 會洗版');
+    box.store.fail = false;
+    box.saveChats();
+    box.store.fail = true;
+    box.saveChats();
+    assert.strictEqual(box.said.length, 2, '好了之後再壞要再講一次');
+    console.log('ok   對話存不進去會講');
+  }
+
   console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });

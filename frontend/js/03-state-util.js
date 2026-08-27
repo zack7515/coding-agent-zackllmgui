@@ -43,8 +43,16 @@ function humanSize(n) {
 function lsGet(key) {
   try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; }
 }
+// 回傳有沒有真的存進去。**這個回傳值不能省** —— 這個 catch 除了無痕模式，
+// 也吞掉 QuotaExceededError，而配額滿了之後每一次 saveChats() 都會無聲失敗，
+// 重整才發現整場任務沒了。靜靜掉資料是最不該簡化掉的那一類。
 function lsSet(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 無痕模式等 */ }
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 let toastTimer = null;
 function toast(msg) {
