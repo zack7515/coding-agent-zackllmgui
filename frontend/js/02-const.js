@@ -330,7 +330,11 @@ function tailLines(text, keep) {
   return head + lines.slice(-keep).join('\n');
 }
 
-const MAX_TOOL_ROUNDS = 25;     // 「改一個檔 → 跑測試 → 再改」通常要十幾輪
+// **失控煞車，不是預算。** 這個數字唯一擋的是模型繞圈（A→B→A→B ——
+// REPEAT_LIMIT 只認得參數一模一樣的重試，繞圈認不出來）。
+// 原本是 25，而 25 輪對「改一個檔 → 跑測試 → 再改」的任務常常不夠，
+// 停下來等人按「繼續」就違反了放著跑的目的。
+const MAX_TOOL_ROUNDS = 200;
 const ROUNDS_WARN = 5;          // 剩這麼多輪才提醒。太早講只是每輪多燒一句話
 
 // 撞到上限之前先讓模型知道。不講的話它不會安排優先順序 ——
@@ -346,19 +350,20 @@ function roundsNote(depth) {
     + (left <= 2 ? '開始收尾：先存檔，再講清楚進度。' : '先做最重要的那幾件事。') + '）';
 }
 
-// 長時間自動執行的煞車。輪數不是唯一會失控的東西 ——
-// 25 輪每輪 60k context 就是一百多萬 token，而人在乎的其實是牆上的時鐘。
-// 撞到就停下來給一顆「繼續」，不是直接結束。
-const TURN_TIME_BUDGET_MS = 30 * 60 * 1000;
-const TURN_TOKEN_BUDGET = 1000000;
+// **本機模型不設預算。** 原本有一個 30 分鐘的時鐘上限，撞到就停下來等人按
+// 「繼續」—— 但那正好違反「放著讓它自己跑完」這個目的，而本機跑掉的
+// 只有電費與時間，沒有別人在替你結帳。
+//
+// 外部 API 是另一回事：那裡的 token 是錢，而且是自動模式下沒人看著燒的。
+// 所以護欄留在有代價的那一邊，用 token 不用時鐘（時鐘跟花費沒有關係，
+// 等對方 API 排隊也是時間）。撞到不是結束，是停下來給一顆「繼續」。
+const OA_TOKEN_BUDGET = 150000;
+
 function budgetStop(run) {
-  if (!run) return '';
-  // typeof 而不是 run.t0 &&：t0 是 0 的時候 && 會判成「沒有計時」
-  if (typeof run.t0 === 'number' && performance.now() - run.t0 > TURN_TIME_BUDGET_MS) {
-    return '這一輪已經跑了 ' + fmtElapsed(performance.now() - run.t0) + '，先停下來讓你看一眼';
-  }
-  if (run.tokens > TURN_TOKEN_BUDGET) {
-    return '這一輪已經用掉 ' + fmtTokens(run.tokens) + ' tokens，先停下來讓你看一眼';
+  if (!run || S.provider !== 'openai') return '';
+  if (run.tokens > OA_TOKEN_BUDGET) {
+    return '這一輪已經用掉 ' + fmtTokens(run.tokens)
+      + ' tokens（外部 API 是按量計費的），先停下來讓你看一眼';
   }
   return '';
 }

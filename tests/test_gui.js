@@ -1192,16 +1192,15 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   const longRun = new Function(`
     ${grab('MAX_TOOL_ROUNDS', 'const')}
     ${grab('ROUNDS_WARN', 'const')}
-    ${grab('TURN_TIME_BUDGET_MS', 'const')}
-    ${grab('TURN_TOKEN_BUDGET', 'const')}
+    ${grab('OA_TOKEN_BUDGET', 'const')}
     ${grab('fmtElapsed')}
     ${grab('fmtTokens')}
     ${grab('roundsNote')}
     ${grab('budgetStop')}
+    const S = { provider: 'ollama' };
     const performance = { now: () => nowMs };
     let nowMs = 0;
-    return { roundsNote, budgetStop, MAX_TOOL_ROUNDS, ROUNDS_WARN,
-             TURN_TIME_BUDGET_MS, TURN_TOKEN_BUDGET,
+    return { roundsNote, budgetStop, MAX_TOOL_ROUNDS, ROUNDS_WARN, OA_TOKEN_BUDGET, S,
              at: (t) => { nowMs = t; } };
   `)();
 
@@ -1217,16 +1216,20 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(/用完/.test(over) && /存檔/.test(over), '最後一輪要講清楚怎麼收：' + over);
   console.log('ok   模型知道自己還剩幾輪');
 
-  // 預算：輪數不是唯一會失控的東西
-  longRun.at(0);
+  // 預算只擋有代價的那一邊：本機跑掉的是電費，外部 API 是錢
+  const huge = { t0: 0, tokens: longRun.OA_TOKEN_BUDGET * 100 };
+  longRun.at(9 * 60 * 60 * 1000);        // 跑九小時
+  assert.strictEqual(longRun.budgetStop(huge), '',
+    '本機模式不該有預算 —— 目的就是放著讓它跑完，不是跑一半等人按繼續');
+  longRun.S.provider = 'openai';
   assert.strictEqual(longRun.budgetStop({ t0: 0, tokens: 0 }), '');
-  longRun.at(longRun.TURN_TIME_BUDGET_MS + 1000);
-  assert.ok(/分/.test(longRun.budgetStop({ t0: 0, tokens: 0 })), '跑太久沒有停');
-  longRun.at(0);
-  assert.ok(/tokens/.test(longRun.budgetStop({ t0: 0, tokens: longRun.TURN_TOKEN_BUDGET + 1 })),
-    '燒太多 token 沒有停');
+  assert.ok(/tokens/.test(longRun.budgetStop(huge)), '外部 API 燒太多沒有停');
+  assert.ok(/計費|錢/.test(longRun.budgetStop(huge)), '要說得出為什麼只有這邊擋');
   assert.strictEqual(longRun.budgetStop(null), '');
-  console.log('ok   跑太久或燒太多會停下來');
+  longRun.S.provider = 'ollama';
+  // 時鐘不該再出現在停下來的理由裡
+  assert.ok(!/TURN_TIME_BUDGET/.test(script), '時間預算沒有清乾淨');
+  console.log('ok   預算只擋外部 API（本機放著跑）');
 
   // 撞到上限不能只丟一句 toast 就沒了：要留得下「怎麼接回去」
   assert.ok(/c\.stopWhy = over/.test(script), 'runTools 撞到上限沒有記下原因');
