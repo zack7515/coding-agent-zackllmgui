@@ -1825,7 +1825,7 @@ def test_worktree_isolates_writes():
             subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=30)
         serve.cur().write = True
-        info = serve.worktree_open()
+        info = serve.agent_open("work")
         aid = info["id"]
         try:
             assert Path(info["path"]).is_dir(), info
@@ -1838,12 +1838,12 @@ def test_worktree_isolates_writes():
             assert (Path(info["path"]) / "只在分支.txt").is_file(), "檔案沒落在 worktree"
 
             # 有改動就要留著並且講清楚 —— 跑了十分鐘的結果不能靜靜刪掉
-            out = serve.worktree_close(aid)
+            out = serve.agent_close(aid)
             assert out["kept"] is True and out["changes"] >= 1, out
             assert out["branch"] == info["branch"]
         finally:
             if aid in serve.cur().agents:
-                serve.worktree_close(aid, force=True)
+                serve.agent_close(aid, force=True)
             subprocess.run(["git", "worktree", "remove", "--force", info["path"]],
                            cwd=ws, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             serve.cur().write = False
@@ -1858,8 +1858,8 @@ def test_worktree_cleans_up_when_untouched():
                   ["commit", "-qm", "base"]):
             subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=30)
-        info = serve.worktree_open()
-        out = serve.worktree_close(info["id"])
+        info = serve.agent_open("work")
+        out = serve.agent_close(info["id"])
         assert out["kept"] is False, out
         assert not Path(info["path"]).exists(), "沒改動卻留著"
         assert info["id"] not in serve.cur().agents
@@ -1873,6 +1873,126 @@ def test_bind_agent_rejects_unknown_id():
             assert False, "不認得的 id 應該要擋下來"
         except ValueError as e:
             assert "沒有這個子代理" in str(e), e
+
+
+def test_agent_guard_is_a_rule_not_a_prompt():
+    """子代理的工具白名單由**伺服器**擋，不是靠網頁少送幾支定義。
+
+    網頁那一層是「不要讓模型看到它不該用的工具」，這一層是「就算它硬叫也叫不動」。
+    只有前者的話，模型幻覺出一個工具名就繞過去了 —— 送到 /tool 的只是一個字串，
+    伺服器原本無從知道是誰在叫。這一條錯了，唯讀子代理其實是可以寫檔案的。
+    """
+    with Workspace():
+        serve.cur().write = True
+        info = serve.agent_open("explore")
+        try:
+            with serve.as_agent(info["id"]):
+                # 型別的 tools 裡有的照跑
+                assert "pkg" in serve.run_tool("list_dir", {"path": "."})
+                # 沒有的擋掉，而且要說得出「這一型拿得到什麼」
+                for bad, args in (("write_file", {"path": "x.txt", "content": "x"}),
+                                  ("edit_file", {"path": "pkg/calc.py",
+                                                 "old": "a", "new": "b"}),
+                                  ("run_shell", {"command": "echo hi"}),
+                                  ("delete_file", {"path": "pkg/calc.py"})):
+                    try:
+                        serve.run_tool(bad, args)
+                        assert False, f"{bad} 應該要被擋下來"
+                    except PermissionError as e:
+                        assert "explore" in str(e) and bad in str(e), e
+                # 這兩支型別檔寫進去也沒用
+                try:
+                    serve.run_tool("todo_write", {"items": ["x"]})
+                    assert False, "todo_write 會把主代理的待辦蓋掉，一定要擋"
+                except PermissionError:
+                    pass
+            # 切回主代理之後一切照舊 —— 擋的是子代理，不是整台服務
+            assert serve.run_tool("write_file", {"path": "主代理可以.txt", "content": "x"})
+        finally:
+            serve.agent_close(info["id"], force=True)
+            serve.cur().write = False
+
+
+def test_agent_depth_is_capped_server_side():
+    """深度上限在伺服器算。網頁那一層也擋，但真正算數的是這裡。"""
+    with Workspace():
+        ids = []
+        try:
+            parent = ""
+            for _ in range(serve.SUB_DEPTH_MAX):
+                info = serve.agent_open("explore", parent)
+                ids.append(info["id"])
+                parent = info["id"]
+            try:
+                serve.agent_open("explore", parent)
+                assert False, f"第 {serve.SUB_DEPTH_MAX + 1} 層應該要被擋下來"
+            except PermissionError as e:
+                assert "層" in str(e), e
+        finally:
+            for i in ids:
+                serve.cur().agents.pop(i, None)
+
+
+def test_agent_stop_reaches_descendants_and_jobs():
+    """依 id 中斷：自己、所有後代、還有它們丟到背景的指令。
+
+    只停自己的話，它開的下一層還在跑；不殺背景指令的話「已中斷」只中斷了一半 ——
+    指令還在這台機器上跑，而且沒有人會去收它。
+    """
+    with Workspace():
+        a = serve.agent_open("explore")
+        b = serve.agent_open("explore", a["id"])
+        job = ""
+        try:
+            with serve.as_agent(b["id"]):
+                pass
+            # 用底層的 _start_job 直接掛一條在 b 名下，不必真的走 run_shell 的權限
+            with serve.as_agent(b["id"]):
+                out = serve._start_job("sleep 30", ["sleep", "30"], None, False, "$ sleep 30")
+            job = out.split("id = ")[1].split("（")[0].strip()
+            assert serve.JOBS[job]["agent"] == b["id"], "背景指令沒有記上是誰開的"
+
+            res = serve.agent_stop(a["id"], "測試")
+            assert set(res["stopped"]) == {a["id"], b["id"]}, res
+            assert job in res["jobs"], "背景指令沒被殺，中斷只中斷了一半"
+
+            # 標記之後，綁在這些 id 上的呼叫一律拒絕 —— 網頁不理也叫不動
+            for aid in (a["id"], b["id"]):
+                try:
+                    with serve.as_agent(aid):
+                        serve.run_tool("list_dir", {"path": "."})
+                    assert False, "中斷之後還跑得動工具"
+                except PermissionError as e:
+                    assert "已經被中斷" in str(e), e
+            # 被中斷的子代理不能再開下一層
+            try:
+                serve.agent_open("explore", b["id"])
+                assert False, "被中斷的子代理還能生下一層"
+            except PermissionError:
+                pass
+        finally:
+            if job and serve.JOBS.get(job, {}).get("proc") is not None:
+                serve.kill_tree(serve.JOBS[job]["proc"])
+            serve.JOBS.pop(job, None)
+            for i in (b["id"], a["id"]):
+                serve.cur().agents.pop(i, None)
+
+
+def test_agent_trace_finds_the_root():
+    """給一個 id，要說得出它是什麼、誰開的、一路往上到根是誰。"""
+    with Workspace():
+        a = serve.agent_open("explore", chat="chat-1")
+        b = serve.agent_open("explore", a["id"], chat="chat-1")
+        try:
+            t = serve.agent_trace(b["id"])
+            assert [x["id"] for x in t["chain"]] == [b["id"], a["id"]], t["chain"]
+            assert t["chain"][-1]["parent"] == "", "最後一個應該是根"
+            assert t["agent"]["depth"] == 2 and t["agent"]["chat"] == "chat-1", t["agent"]
+            # 從上面看得到下面
+            assert [c["id"] for c in serve.agent_trace(a["id"])["children"]] == [b["id"]]
+        finally:
+            for i in (b["id"], a["id"]):
+                serve.cur().agents.pop(i, None)
 
 
 if __name__ == "__main__":

@@ -1110,21 +1110,31 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const calls = [];       // [工具名, 跑在哪個 worktree]
     const agentOps = [];
     const chatStream = async (payload, signal, on) => {
+      await new Promise((r) => setTimeout(r, 0));   // 讓「中斷」那顆鈕有機會插進來
       const r = ${JSON.stringify(replies)}[turn++] || {};
       if (r.content) on.content(r.content);
       if (r.tools) on.tools(r.tools);
       on.done({});
     };
     const execTool = async (n, a, msg, agent) => {
-      calls.push([n, agent || '']); msg.content = 'OK:' + n; return msg;
+      calls.push([n, agent || '']);
+      msg.content = conf.toolErr || ('OK:' + n);
+      return msg;
     };
     const apiUrl = (p) => p;
+    let seq = 0;
     const fetch = async (url, init) => {
       const body = JSON.parse(init.body);
-      agentOps.push(body.action);
+      agentOps.push([body.action, body.type || body.id || '', body.parent || '']);
       if (body.action === 'open') {
-        return { ok: true, json: async () => ({ id: 'wt1', branch: 'zackllmgui/wt1',
-                                                path: '/tmp/wt1' }) };
+        seq += 1;
+        return { ok: true, json: async () => ({
+          id: 'a' + seq, type: body.type, depth: body.parent ? 2 : 1,
+          parent: body.parent || '',
+          branch: body.type === 'work' ? 'zackllmgui/wt1' : '', path: '/tmp/wt1' }) };
+      }
+      if (body.action === 'stop') {
+        return { ok: true, json: async () => ({ stopped: [body.id], jobs: ['job1'] }) };
       }
       return { ok: true, json: async () => ({ kept: !!conf.dirty, changes: conf.dirty || 0,
                                               branch: 'zackllmgui/wt1', path: '/tmp/wt1' }) };
@@ -1136,9 +1146,11 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const agentRules = () => 'rules';
     const buildOptions = () => ({});
     const thinkValue = () => null;
+    const clicks = [];
     const msgEl = () => {
       const el = { html: '' };
-      el.querySelector = () => ({ textContent: '', classList: { add() {} } });
+      el.querySelector = () => ({ textContent: '', classList: { add() {} },
+                                  addEventListener: (_, f) => clicks.push(f) });
       Object.defineProperty(el, 'innerHTML', { set(v) { el.html = v; }, get() { return el.html; } });
       return el;
     };
@@ -1147,7 +1159,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const pin = () => {};
     ${src}
     return { runSubagent, subTools, subWrites, agentType, startSubagents, callArgs,
-             calls, agentOps, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
+             calls, agentOps, clicks, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
   `)();
 
   const box = mk([]);
@@ -1192,12 +1204,15 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.deepStrictEqual(Object.keys(par.startSubagents([task({ type: 'explore' })])), [],
     '只有一個就不必先發');
 
-  // 隔離型：開 worktree → 工具都跑在裡面 → 沒改動就自動收掉
+  // 每一種子代理都要在伺服器登記，**不只需要 worktree 的那些**。工具白名單如果只靠
+  // 網頁不送定義，模型幻覺出一個工具名就繞過去了 —— 登記之後伺服器才擋得住。
   const wt = mk([{ tools: [{ function: { name: 'read_file', arguments: '{}' } }] },
                  { content: '看完了' }]);
   const clean = await wt.runSubagent({ prompt: '做事', type: 'work' });
-  assert.deepStrictEqual(wt.agentOps, ['open', 'close'], 'worktree 沒有開或沒有收');
-  assert.deepStrictEqual(wt.calls, [['read_file', 'wt1']], '工具沒有跑在子代理的 worktree 裡');
+  assert.deepStrictEqual(wt.agentOps, [['open', 'work', ''], ['close', 'a1', '']],
+    '子代理沒有登記或沒有收');
+  assert.deepStrictEqual(wt.calls, [['read_file', 'a1']],
+    '工具沒有標上是哪個子代理在叫，伺服器就擋不了它的白名單');
   assert.ok(clean.indexOf('看完了') === 0 && clean.indexOf('[worktree]') < 0,
     '沒改動就不該留 worktree：' + clean);
 
@@ -1208,10 +1223,40 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     '有改動卻沒說改在哪：' + kept);
   assert.ok(/merge/.test(kept), '沒告訴主代理怎麼收下這些改動');
 
-  // 唯讀型別不開 worktree（沒東西要隔離，開了只是浪費）
+  // 唯讀的一樣要登記（伺服器要知道它只能讀），只是不開 worktree
   const ro = mk([{ content: '找到了' }]);
   await ro.runSubagent({ prompt: '找東西', type: 'explore' });
-  assert.deepStrictEqual(ro.agentOps, [], '唯讀子代理不該開 worktree');
+  assert.deepStrictEqual(ro.agentOps.map((x) => x[0]), ['open', 'close'],
+    '唯讀子代理也要登記');
+  assert.strictEqual(ro.agentOps[0][1], 'explore', '登記時要講清楚是哪一種');
+
+  // 下一層要把上層的 id 帶上去：伺服器靠 parent 算深度、也靠它連出血緣
+  const nest = mk([{ tools: [{ function: { name: 'task',
+                                           arguments: '{"prompt":"再查","type":"explore"}' } }] },
+                   { content: '外層結論' }, { content: '內層結論' }]);
+  await nest.runSubagent({ prompt: '外層', type: 'work' });
+  const opened = nest.agentOps.filter((x) => x[0] === 'open');
+  assert.strictEqual(opened.length, 2, '下一層沒有登記');
+  assert.strictEqual(opened[1][2], 'a1', '下一層沒有帶上層的 id，血緣就斷了');
+
+  // 按卡片上的「中斷」：要打到伺服器（那裡才停得住背景指令），而且迴圈要收工
+  const cut = mk(Array(10).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }));
+  const job = cut.runSubagent({ prompt: '跑久一點', type: 'explore' });
+  await new Promise((r) => setTimeout(r, 0));
+  cut.clicks.forEach((f) => f());
+  const cutOut = await job;
+  assert.ok(/中斷/.test(cutOut), '按了中斷卻沒收工：' + cutOut);
+  assert.ok(cut.agentOps.filter((x) => x[0] === 'stop').length === 1,
+    '中斷沒有打到伺服器，背景指令會繼續跑');
+
+  // 從別的地方中斷時，工具會開始被伺服器拒絕 —— 認出來就收工，
+  // 不要用剩下的輪數去撞一道已經關上的門
+  const far = mk(Array(10).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }),
+    { toolErr: '錯誤：PermissionError: 子代理 a1 已經被中斷（另一個分頁）' });
+  await far.runSubagent({ prompt: '被別人停掉', type: 'explore' });
+  assert.strictEqual(far.calls.length, 1, '伺服器已經拒絕了還一直叫：' + far.calls.length);
 
   // 結論最後要給得出 id，主代理才追問得下去
   const res = mk([{ content: '第一段' }]);
@@ -1227,12 +1272,14 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(/輪還沒有結論/.test(out), '輪數用完沒有停：' + out);
   assert.strictEqual(loop.calls.length, loop.rounds, '應該剛好跑 SUB_ROUNDS 輪');
 
-  // 停止鍵停得住，而且**要把 worktree 收掉**，不然按一次停止就漏一份
+  // 主迴圈的停止鍵一樣停得住，而且**要把登記與 worktree 收掉**，
+  // 不然按一次停止就漏一份 worktree 在專案裡
   const stop = mk(Array(5).fill(
     { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }), { aborted: true });
-  assert.ok(/停止/.test(await stop.runSubagent({ prompt: '停我', type: 'work' })));
+  assert.ok(/中斷/.test(await stop.runSubagent({ prompt: '停我', type: 'work' })));
   assert.strictEqual(stop.calls.length, 0, '按了停止還在呼叫工具');
-  assert.deepStrictEqual(stop.agentOps, ['open', 'close'], '停止時 worktree 沒收掉');
+  assert.deepStrictEqual(stop.agentOps.map((x) => x[0]), ['open', 'close'],
+    '停止時 worktree 沒收掉');
 
   // 沒給 prompt 就不要開一個什麼都不知道的子代理
   assert.ok(/錯誤/.test(await mk([]).runSubagent({})));

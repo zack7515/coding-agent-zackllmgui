@@ -23,6 +23,8 @@ const SLASH_CMDS = [
   ['rewind', '把檔案還原到某個時間點', function () { openRewind(); }],
   ['tools', '功能與工具（本機工具、計畫模式、自動模式）', function () { openFeatureMenu(); }],
   ['export', '匯出這個對話（HTML / Markdown / JSON）', function () { exportMenu(); }],
+  ['agents', '看有哪些子代理在跑：追出上層是誰、把它連同背景指令中斷',
+   function () { openAgents(); }],
   ['new', '開一個新對話', function () { newChat(true); }]
 ];
 

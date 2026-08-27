@@ -697,6 +697,74 @@ async function attachSkill(name) {
   }
 }
 
+/* ══════════════════════ 子代理：定位、追溯、中斷 ══════════════════════ */
+// 卡片捲走了、或是從紀錄／背景指令那邊只拿到一個 id 時，這是唯一找得回去的路。
+// 中斷是**伺服器**那一端的事：標記之後連後代與它們的背景指令一起停，
+// 而且任何綁在那些 id 上的工具呼叫都會被拒絕 —— 網頁不理也叫不動。
+async function openAgents() {
+  let data;
+  try { data = await agentCall({ action: 'list' }); }
+  catch (e) { toast('問不到子代理：' + e.message); return; }
+
+  const el = msgEl('assistant');
+  el.innerHTML =
+    '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
+    '<div class="msg-col"><div class="tool-card"><div class="th">子代理</div>' +
+    '<div class="agents"></div></div></div>';
+  const boxEl = el.querySelector('.agents');
+  const list = (data.agents || []).slice().sort(function (a, b) {
+    return a.depth - b.depth || a.started - b.started;
+  });
+
+  if (!list.length) {
+    const p = document.createElement('div');
+    p.className = 'muted';
+    p.textContent = '現在沒有子代理在跑。可用的型別：'
+      + (data.types || []).map(function (t) { return t.name; }).join('、')
+      + '（最多 ' + data.depth_max + ' 層）';
+    boxEl.appendChild(p);
+  }
+
+  list.forEach(function (a) {
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    const info = document.createElement('div');
+    // 全部用 textContent：型別名字來自 agents/*.md，那是檔案內容不是我們寫的字串
+    const bits = [a.id, a.type, '第 ' + a.depth + ' 層'];
+    if (a.parent) bits.push('上層 ' + a.parent);
+    if (a.branch) bits.push(a.branch);
+    bits.push(a.calls + ' 次工具');
+    bits.push(a.secs + ' 秒');
+    if (a.last) bits.push('最後 ' + a.last.tool);
+    if (a.jobs && a.jobs.length) bits.push('背景 ' + a.jobs.join('、'));
+    if (a.stopped) bits.push('已中斷：' + a.why);
+    info.textContent = bits.join(' · ');
+    row.appendChild(info);
+    if (!a.stopped) {
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = '中斷';
+      btn.addEventListener('click', async function () {
+        btn.disabled = true;
+        try {
+          const r = await agentCall({ action: 'stop', id: a.id, why: '從子代理清單中斷' });
+          if (S.subs) r.stopped.forEach(function (k) {
+            Object.keys(S.subs).forEach(function (key) {
+              if (S.subs[key].sid === k || key === k) S.subs[key].stopped = true;
+            });
+          });
+          info.textContent += ' · 已中斷 ' + r.stopped.join('、')
+            + (r.jobs.length ? '（連背景指令 ' + r.jobs.join('、') + '）' : '');
+        } catch (e) { info.textContent += ' · 中斷失敗：' + e.message; }
+      });
+      row.appendChild(btn);
+    }
+    boxEl.appendChild(row);
+  });
+  $('thread').appendChild(el);
+  pin();
+}
+
 /* ══════════════════════ 選單 ══════════════════════ */
 let openMenu = null;
 function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }

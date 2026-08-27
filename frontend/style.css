@@ -847,3 +847,8 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
 .sys-full .bar.hot i{background:var(--warn);}
 .sys-full .bar.full i{background:var(--err);}
 .sys-pick{display:flex; flex-wrap:wrap; gap:14px; margin:8px 0 4px;}
+
+/* 子代理清單（/agents）：一行一個，右邊一顆中斷 */
+.agent-row { display: flex; align-items: center; gap: 8px; padding: 3px 0;
+             font-size: 12px; font-family: var(--mono, monospace); }
+.agent-row > div { flex: 1; word-break: break-all; }

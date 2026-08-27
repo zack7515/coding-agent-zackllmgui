@@ -1327,6 +1327,8 @@ const SUB_DEPTH_MAX = 2;
 // 這兩支永遠不給，型別檔寫了也沒用：問了沒人看得懂上下文、
 // 待辦是主代理那條線的東西（同一個 Session，寫進去會真的蓋掉）。
 const SUB_NEVER = ['ask_user_question', 'todo_write'];
+// 續談用的 context 最多留這麼多則。每一則都是一整條對話，不能無限留。
+const SUB_KEEP = 20;
 
 function agentTypes() { return S.agentTypes || []; }
 
@@ -1366,7 +1368,7 @@ async function agentCall(body) {
   return data;
 }
 
-async function runSubagent(args, depth) {
+async function runSubagent(args, depth, parent) {
   const at = depth || 1;
   const prev = S.subs && S.subs[String((args || {}).resume || '')];
   const task = String((args && (args.prompt || args.task)) || '').trim();
@@ -1374,72 +1376,91 @@ async function runSubagent(args, depth) {
   const type = prev ? prev.type : agentType((args || {}).type);
   if (!type) return '錯誤：沒有任何子代理型別可用（agents/ 是空的）';
   const signal = S.abort ? S.abort.signal : null;
-  const stopped = function () { return signal && signal.aborted; };
 
   const el = msgEl('assistant');
   el.innerHTML =
     '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
     '<div class="msg-col"><div class="tool-card"><div class="th">子代理 ' + type.name +
-    ' <span class="st">進行中</span></div><pre class="out" style="margin:0;"></pre></div></div>';
+    ' <span class="sid"></span> <span class="st">進行中</span>' +
+    '<button class="mini" data-stop style="margin-left:auto;">中斷</button></div>' +
+    '<pre class="out" style="margin:0;"></pre></div></div>';
   const out = el.querySelector('.out');
   out.textContent = task;
   $('thread').appendChild(el);
   pin();
   const log = function (line) { out.textContent += '\n' + line; pin(); };
 
-  // 隔離型的先要一份自己的 git worktree。開不起來（不是 git 儲存庫）就照實說 ——
-  // 靜靜退回共用工作區的話，平行跑的兩個子代理會開始互相蓋檔案。
-  // 再下一層的子代理跑在上一層的 worktree 裡：它是同一件工作的細分，不是另一個人。
-  // 各開一份的話，下一層是從 HEAD 開出來的，看不到上一層還沒提交的修改。
-  let agent = prev ? prev.agent : String((args || {})._agent || '');
-  if (!agent && type.isolation === 'worktree') {
-    try {
-      const w = await agentCall({ action: 'open' });
-      agent = w.id;
-      log('· worktree ' + w.branch);
-    } catch (e) {
-      el.querySelector('.st').textContent = '開不起來';
-      return '子代理失敗：要不到獨立的 worktree（' + e.message + '）';
-    }
+  // **每一種子代理都要在伺服器登記**，不只需要 worktree 的那些。工具白名單如果只靠
+  // 網頁「不送那幾支定義」，模型幻覺出一個工具名就繞過去了 —— 送到 /tool 的只是一個
+  // 字串，伺服器原本無從知道是誰在叫。登記之後 agent_guard() 才擋得住。
+  //
+  // 續談也要重新登記一次：上一輪結束時伺服器那邊的登記就收掉了（連同 worktree）。
+  // 對外的追問 id（box.id）跨續談不變，這一次的伺服器 id（box.sid）每次都新的。
+  S.subs = S.subs || {};
+  const box = prev || { id: '', sid: '', type: type, msgs: null, stopped: false };
+  box.stopped = false;
+  try {
+    const info = await agentCall({ action: 'open', type: type.name,
+                                   parent: parent || '', chat: S.currentId });
+    box.sid = info.id;
+    box.id = box.id || info.id;
+    log('· 子代理 ' + info.id + '（第 ' + info.depth + ' 層'
+      + (info.parent ? '，上層 ' + info.parent : '')
+      + (info.branch ? '，分支 ' + info.branch : '') + '）');
+  } catch (e) {
+    el.querySelector('.st').textContent = '開不起來';
+    return '子代理失敗：登記不了（' + e.message + '）';
   }
+  const sid = box.sid;
+  el.querySelector('.sid').textContent = box.id;
+  S.subs[box.id] = box;
+  // 留著是為了讓主代理追問得下去，但不能無限留 —— 每一則都是一整條 context
+  const keys = Object.keys(S.subs);
+  if (keys.length > SUB_KEEP) delete S.subs[keys[0]];
+  // 中斷是伺服器那一端的事：標記之後連它的後代與背景指令一起停，
+  // 而且任何綁在這個 id 上的工具呼叫都會被拒絕 —— 網頁不理也叫不動。
+  el.querySelector('[data-stop]').addEventListener('click', async function () {
+    box.stopped = true;
+    try {
+      const r = await agentCall({ action: 'stop', id: sid, why: '使用者在卡片上按了中斷' });
+      log('· 已中斷 ' + r.stopped.join('、')
+        + (r.jobs.length ? '（順手殺掉背景指令 ' + r.jobs.join('、') + '）' : ''));
+    } catch (e) { log('· 中斷失敗：' + e.message); }
+  });
+  const stopped = function () { return box.stopped || (signal && signal.aborted); };
 
-  const msgs = prev ? prev.msgs : [{ role: 'system', content:
+  box.msgs = box.msgs || [{ role: 'system', content:
     (type.prompt || '') + '\n\n'
     + '你是子代理，只負責完成交辦的這一件事：\n'
     + '- 問不到使用者，卡住就把卡在哪裡寫進結論。\n'
     + '- 做完用不超過 15 行回報結論，帶上關鍵的檔案與行號。\n'
     + '- 你的過程不會被主代理看到，只有最後這段文字會，所以結論要能單獨讀懂。\n\n'
     + (agentRules() || '') }];
+  const msgs = box.msgs;
   msgs.push({ role: 'user', content: task });
-
-  const owned = (!prev && !String((args || {})._agent || '')) ? agent : '';   // 誰開的誰收
-  const sid = prev ? prev.id : (agent || Math.random().toString(36).slice(2, 8));
-  S.subs = S.subs || {};
-  S.subs[sid] = { id: sid, type: type, msgs: msgs, agent: agent };
 
   const finish = async function (text) {
     // 有改動就留著 worktree 並且講清楚改在哪個分支 —— 子代理跑了十分鐘的結果，
     // 不能因為主代理沒接住就靜靜刪掉。沒改動的才自動清掉（照它們的規則）。
     let note = '';
-    if (agent && agent === owned) {
-      try {
-        const r = await agentCall({ action: 'close', id: agent });
-        if (r.kept) {
-          note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，留在分支 ' + r.branch
-            + '（' + r.path + '）。要收下就 git merge ' + r.branch + '，不要就 git worktree remove。';
-        }
-      } catch (e) { note = '\n[worktree] 收不掉：' + e.message; }
-      delete S.subs[sid];
-    }
-    return text + note + '\n[子代理 ' + sid + '] 要追問就用 task 帶 resume:"' + sid + '"';
+    try {
+      const r = await agentCall({ action: 'close', id: sid });
+      if (r.kept) {
+        note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，留在分支 ' + r.branch
+          + '（' + r.path + '）。要收下就 git merge ' + r.branch
+          + '，不要就 git worktree remove。';
+      }
+    } catch (e) { /* 已經收掉了就算了 */ }
+    return text + note + '\n[子代理 ' + box.id + '] 要追問就用 task 帶 resume:"' + box.id + '"';
   };
 
   try {
     for (let i = 1; i <= SUB_ROUNDS; i++) {
-      // 停止鍵要停得住。子代理原本自己開 AbortController，按停止只停得了主迴圈。
+      // 停止鍵與卡片上的「中斷」都要停得住。子代理原本自己開 AbortController，
+      // 按停止只停得了主迴圈，它會一路跑到輪數用完。
       if (stopped()) {
-        el.querySelector('.st').textContent = '已停止';
-        return await finish('（子代理被停止鍵停掉了，任務沒有完成）');
+        el.querySelector('.st').textContent = '已中斷';
+        return await finish('（子代理被中斷了，任務沒有完成）');
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
@@ -1475,11 +1496,13 @@ async function runSubagent(args, depth) {
         const fn = calls[k].function || {};
         const a = callArgs(calls[k]);
         log('· ' + fn.name + ' ' + JSON.stringify(a).slice(0, 120));
-        // 再下一層的子代理跑在同一份 worktree 裡：它是這一層的分身，不是另一個人
         const r = fn.name === 'task'
-          ? { content: await runSubagent(Object.assign({}, a, { _agent: agent }), at + 1) }
+          ? { content: await runSubagent(a, at + 1, sid) }
           : await execTool(fn.name || '', a, { role: 'tool', tool_name: fn.name, content: '' },
-                           agent);
+                           sid);
+        // 從別的地方（另一個分頁、curl）中斷時，工具會開始被伺服器拒絕。
+        // 認出這件事就收工，不要用剩下的輪數去撞一道已經關上的門。
+        if (String(r.content || '').indexOf('已經被中斷') >= 0) box.stopped = true;
         msgs.push({ role: 'tool', tool_name: fn.name, content: String(r.content || '') });
       }
     }
@@ -1487,8 +1510,8 @@ async function runSubagent(args, depth) {
     return await finish('（子代理跑了 ' + SUB_ROUNDS + ' 輪還沒有結論，任務可能太大，拆小一點再交辦）');
   } catch (e) {
     if (stopped()) {
-      el.querySelector('.st').textContent = '已停止';
-      return await finish('（子代理被停止鍵停掉了，任務沒有完成）');
+      el.querySelector('.st').textContent = '已中斷';
+      return await finish('（子代理被中斷了，任務沒有完成）');
     }
     el.querySelector('.st').textContent = '失敗';
     log('→ ' + e.message);

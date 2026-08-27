@@ -1201,9 +1201,13 @@ def _start_job(command: str, cmd, cwd, use_shell: bool, head: str) -> str:
                 f"先用 check_job 把跑完的收掉，或用 check_job(kill=true) 終止不要的。")
         JOB_SEQ += 1
         jid = f"job{JOB_SEQ}"
+        rec = getattr(_CUR, "agent", None)
         job = {"id": jid, "cmd": " ".join(str(command).split())[:200], "code": None,
                "lines": collections.deque(maxlen=RING_LINES),
-               "started": time.time(), "ended": 0.0, "proc": None}
+               "started": time.time(), "ended": 0.0, "proc": None,
+               # 誰丟的。中斷一個子代理時要連它的背景指令一起殺，
+               # 不然「已中斷」只中斷了一半 —— 指令還在這台機器上跑。
+               "agent": (rec or {}).get("id", ""), "chat": CURRENT_CHAT}
         JOBS[jid] = job
     proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, bufsize=1, text=True,
@@ -1278,7 +1282,8 @@ def jobs_state() -> list:
     with JOBS_LOCK:
         every = list(JOBS.values())
     return [{"id": j["id"], "cmd": j["cmd"], "code": j["code"],
-             "secs": int((j["ended"] or time.time()) - j["started"])}
+             "secs": int((j["ended"] or time.time()) - j["started"]),
+             "agent": j.get("agent", ""), "chat": j.get("chat", "")}
             for j in every]
 
 
@@ -2035,7 +2040,55 @@ def git_at(root: Path, *args) -> str:
     return p.stdout
 
 
-def worktree_open() -> dict:
+AGENT_NEVER = ("ask_user_question", "todo_write")
+# 前者問了也沒人看得懂上下文；後者是主代理那一條線的待辦，子代理跟它同一個 Session，
+# 寫進去會真的把清單蓋掉。型別檔寫進 tools 也沒用 —— 這一條在伺服器擋。
+SUB_DEPTH_MAX = 2     # 子代理再開子代理的層數上限。網頁那一層也擋，但真正算數的是這裡
+
+
+def agent_open(type_name: str = "", parent: str = "", chat: str = "") -> dict:
+    """登記一個子代理。**每一種都要登記，不只隔離型的。**
+
+    為什麼不只在需要 worktree 時才登記：工具白名單如果只靠網頁「不送那幾支定義」，
+    模型幻覺出一個工具名就繞過去了 —— 送到 /tool 的是名字，伺服器不知道這是誰在叫。
+    登記之後 agent_guard() 才擋得住，那才是規則；網頁那一層只是「不要讓它看到」。
+    """
+    types = {t["name"]: t for t in agent_types()}
+    t = types.get(str(type_name or "")) or (agent_types()[0] if types else None)
+    if t is None:
+        raise ValueError("agents/ 裡沒有任何子代理型別")
+    s = cur()
+    up = s.agents.get(str(parent)) if parent else None
+    if parent and up is None:
+        raise ValueError(f"沒有這個上層子代理：{parent}")
+    if up and up.get("stopped"):
+        raise PermissionError(f"上層子代理 {parent} 已經被中斷，不能再開下一層")
+    depth = (up["depth"] + 1) if up else 1
+    if depth > SUB_DEPTH_MAX:
+        raise PermissionError(f"子代理最多 {SUB_DEPTH_MAX} 層，這是第 {depth} 層")
+    if len(s.agents) >= WORKTREE_MAX:
+        raise RuntimeError(f"同時最多 {WORKTREE_MAX} 個子代理，先收掉沒在用的")
+
+    aid = f"a{int(time.time() * 1000) % 100000000:08d}{len(s.agents)}"
+    ws = up["ws"] if up else ws_root().resolve()
+    rec = {"id": aid, "type": t["name"], "tools": list(t["tools"]),
+           "isolation": "", "ws": ws, "branch": "", "root": None,
+           "parent": str(parent or ""), "depth": depth, "chat": str(chat or "")[:64],
+           "started": time.time(), "calls": 0, "last": None,
+           "stopped": False, "why": ""}
+    # 下一層跑在上一層的 worktree 裡：它是同一件工作的細分，而各開一份的話
+    # 下一層是從 HEAD 開出來的，看不到上一層還沒提交的修改。
+    if t["isolation"] == "worktree" and not (up and up["isolation"]):
+        info = worktree_add()
+        rec.update(isolation="worktree", ws=info["ws"], branch=info["branch"],
+                   root=info["root"])
+    elif up and up["isolation"]:
+        rec.update(isolation="inherited", branch=up["branch"], root=up["root"])
+    s.agents[aid] = rec
+    return agent_view(rec)
+
+
+def worktree_add() -> dict:
     """給子代理一份自己的 git worktree。
 
     照 Claude Code 的 `isolation: "worktree"` 做。兩個會改檔案的子代理平行跑時，
@@ -2049,12 +2102,9 @@ def worktree_open() -> dict:
     root = ws_root().resolve()
     if not (root / ".git").exists():
         raise RuntimeError("這個工作區不是 git 儲存庫，給不了獨立的 worktree")
-    s = cur()
-    if len(s.agents) >= WORKTREE_MAX:
-        raise RuntimeError(f"同時最多 {WORKTREE_MAX} 份 worktree，先收掉沒在用的")
-    aid = f"{int(time.time() * 1000) % 100000000:08d}{len(s.agents)}"
-    dst = root / WORKTREE_DIR / aid
-    branch = f"zackllmgui/{aid}"
+    tag = f"{int(time.time() * 1000) % 100000000:08d}"
+    dst = root / WORKTREE_DIR / tag
+    branch = f"zackllmgui/{tag}"
     # 主 worktree 不該把這個資料夾看成未追蹤的檔案。寫 .git/info/exclude 而不是
     # .gitignore：那是使用者的檔案，我們不動它。
     try:
@@ -2071,25 +2121,108 @@ def worktree_open() -> dict:
     except Exception:
         pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
     git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
-    s.agents[aid] = {"ws": dst.resolve(), "branch": branch, "root": root}
-    return {"id": aid, "path": str(dst.resolve()), "branch": branch}
+    return {"ws": dst.resolve(), "branch": branch, "root": root}
 
 
-def worktree_close(aid: str, force: bool = False) -> dict:
-    """收掉一份 worktree。
+def agent_view(rec: dict) -> dict:
+    """給網頁看的樣子。Path 不能直接進 JSON，而且要看得出它現在在幹嘛。"""
+    return {"id": rec["id"], "type": rec["type"], "tools": rec["tools"],
+            "isolation": rec["isolation"], "path": str(rec["ws"]),
+            "branch": rec["branch"], "parent": rec["parent"], "depth": rec["depth"],
+            "chat": rec["chat"], "secs": int(time.time() - rec["started"]),
+            "calls": rec["calls"], "last": rec["last"],
+            "stopped": rec["stopped"], "why": rec["why"],
+            "jobs": [j["id"] for j in jobs_of(rec["id"])]}
 
-    照它們的規則：**沒有改動才自動清掉**。有改動就留著並且講清楚改在哪個分支 ——
-    子代理跑了十分鐘的結果，不能因為主代理沒接住就靜靜刪掉。
+
+def agent_kin(aid: str) -> list:
+    """這個子代理與它底下的所有後代。中斷要連根拔，不是只停自己。"""
+    s = cur()
+    out = []
+    todo = [str(aid)]
+    while todo:
+        cur_id = todo.pop()
+        rec = s.agents.get(cur_id)
+        if rec is None or rec in out:
+            continue
+        out.append(rec)
+        todo += [k for k, v in s.agents.items() if v["parent"] == cur_id]
+    return out
+
+
+def agent_chain(aid: str) -> list:
+    """從這個子代理往上走到根。**追溯根源用的就是這一支。**"""
+    s = cur()
+    out = []
+    seen = set()
+    node = s.agents.get(str(aid))
+    while node is not None and node["id"] not in seen:
+        seen.add(node["id"])
+        out.append(agent_view(node))
+        node = s.agents.get(node["parent"]) if node["parent"] else None
+    return out
+
+
+def jobs_of(aid: str) -> list:
+    with JOBS_LOCK:
+        return [j for j in JOBS.values() if j.get("agent") == str(aid)]
+
+
+def agent_stop(aid: str, why: str = "") -> dict:
+    """依 id 中斷：自己、所有後代，以及它們丟到背景的指令。
+
+    **這一支是規則不是提示。** 標記之後，任何綁在這些 id 上的呼叫都會被
+    agent_guard() 直接拒絕 —— 就算網頁那一端沒收到、或根本不理，也叫不動工具了。
+    背景指令活在這個行程裡，所以連它們一起殺，不然「中斷」只中斷了一半。
     """
-    w = cur().agents.get(str(aid))
-    if w is None:
+    kin = agent_kin(aid)
+    if not kin:
         raise ValueError(f"沒有這個子代理：{aid}")
-    out = {"id": aid, "branch": w["branch"], "path": str(w["ws"]), "kept": False,
-           "changes": 0, "stat": ""}
+    killed = []
+    for rec in kin:
+        rec["stopped"] = True
+        rec["why"] = str(why or "使用者中斷")[:200]
+        for job in jobs_of(rec["id"]):
+            if job["code"] is None and job.get("proc") is not None:
+                kill_tree(job["proc"])
+                killed.append(job["id"])
+    return {"stopped": [r["id"] for r in kin], "jobs": killed,
+            "why": kin[0]["why"]}
+
+
+def agent_trace(aid: str) -> dict:
+    """給一個 id，說清楚它是什麼、誰開的、現在在跑什麼、丟了哪些背景指令。"""
+    chain = agent_chain(aid)
+    if not chain:
+        raise ValueError(f"沒有這個子代理：{aid}")
+    return {"agent": chain[0], "chain": chain,
+            "children": [agent_view(r) for r in agent_kin(aid) if r["id"] != str(aid)],
+            "jobs": [{"id": j["id"], "cmd": j["cmd"], "code": j["code"],
+                      "secs": int((j["ended"] or time.time()) - j["started"])}
+                     for j in jobs_of(aid)]}
+
+
+def agent_close(aid: str, force: bool = False) -> dict:
+    """收掉一個子代理（連同它底下沒收的後代）。
+
+    worktree 照它們的規則：**沒有改動才自動清掉**。有改動就留著並且講清楚改在哪個
+    分支 —— 子代理跑了十分鐘的結果，不能因為主代理沒接住就靜靜刪掉。
+    """
+    s = cur()
+    rec = s.agents.get(str(aid))
+    if rec is None:
+        raise ValueError(f"沒有這個子代理：{aid}")
+    for kid in [r for r in agent_kin(aid) if r["id"] != str(aid)]:
+        s.agents.pop(kid["id"], None)
+    out = {"id": str(aid), "branch": rec["branch"], "path": str(rec["ws"]),
+           "kept": False, "changes": 0, "stat": ""}
+    if rec["isolation"] != "worktree":
+        s.agents.pop(str(aid), None)
+        return out
     try:
         # 自己的備份目錄與巢狀 worktree 不算「子代理做的事」——
         # 算進去的話每一份 worktree 都會回報有改動，那個訊號就沒有意義了
-        lines = [ln for ln in git_at(w["ws"], "status", "--porcelain").splitlines()
+        lines = [ln for ln in git_at(rec["ws"], "status", "--porcelain").splitlines()
                  if ln.strip()
                  and not ln[3:].strip('"').startswith((BACKUP_DIR, WORKTREE_DIR))]
     except Exception:
@@ -2099,50 +2232,75 @@ def worktree_close(aid: str, force: bool = False) -> dict:
         out["stat"] = "\n".join(lines)[:2000]
         if not force:
             out["kept"] = True
-            cur().agents.pop(str(aid), None)
+            s.agents.pop(str(aid), None)
             return out
     try:
-        git_at(w["root"], "worktree", "remove", "--force", str(w["ws"]))
-        git_at(w["root"], "branch", "-D", w["branch"])
+        git_at(rec["root"], "worktree", "remove", "--force", str(rec["ws"]))
+        git_at(rec["root"], "branch", "-D", rec["branch"])
     except Exception as e:
         out["kept"] = True
         out["error"] = str(e)
-    cur().agents.pop(str(aid), None)
+    s.agents.pop(str(aid), None)
     return out
 
 
 @contextlib.contextmanager
 def as_agent(aid: str):
-    """只在**跑工具的那一段**切到子代理的 worktree。
+    """只在**跑工具的那一段**切到子代理的身分。
 
     回應裡的 todos／plan／tool_defs 仍然要是分頁自己的 —— 子代理的 Session 是新的，
     待辦是空的，切過去不切回來會讓網頁上的待辦清單整個消失。
     """
-    was = getattr(_CUR, "s", None)
+    was_s = getattr(_CUR, "s", None)
+    was_a = getattr(_CUR, "agent", None)
     try:
         bind_agent(aid)
         yield
     finally:
-        _CUR.s = was
+        _CUR.s, _CUR.agent = was_s, was_a
 
 
 def bind_agent(aid: str) -> None:
-    """把這個請求切到某個子代理的 worktree。
+    """把這個請求切到某個子代理的身分（工作區 + 工具白名單）。
 
     只認 Session 自己開過的 id —— 路徑是伺服器產生的，不是請求帶進來的，
     所以網頁那端沒辦法靠這條路指到任意資料夾。
     """
     if not aid:
+        _CUR.agent = None
         return
     s = cur()
-    w = s.agents.get(str(aid))
-    if w is None:
+    rec = s.agents.get(str(aid))
+    if rec is None:
         raise ValueError(f"沒有這個子代理：{aid}（可能已經收掉了）")
     sub = Session(s)                 # 繼承 write
-    sub.ws = w["ws"]
+    sub.ws = rec["ws"]
     sub.auto = s.auto
-    sub.agents = s.agents            # 讓下一層還找得到（遞迴的深度由網頁那端管）
+    sub.agents = s.agents            # 讓下一層還找得到
     _CUR.s = sub
+    _CUR.agent = rec
+
+
+def agent_guard(name: str) -> None:
+    """綁在子代理身上的呼叫，工具白名單由這裡擋。
+
+    **兩層是刻意的，不是重複**：網頁那一層決定「不要讓模型看到它不該用的工具」，
+    這一層決定「就算它硬叫也叫不動」。只有前者的話，模型幻覺出一個工具名就過去了——
+    送到 /tool 的只是一個字串，伺服器原本無從知道是誰在叫。
+    """
+    rec = getattr(_CUR, "agent", None)
+    if not rec:
+        return
+    if rec["stopped"]:
+        raise PermissionError(f"子代理 {rec['id']} 已經被中斷（{rec['why']}），不再執行任何工具")
+    if name in AGENT_NEVER:
+        raise PermissionError(f"子代理不能用 {name}")
+    tools = rec["tools"] or ["*"]
+    if "*" not in tools and name not in tools:
+        raise PermissionError(
+            f"子代理型別「{rec['type']}」拿不到 {name}（它的工具是：{'、'.join(tools)}）")
+    rec["calls"] += 1
+    rec["last"] = {"tool": name, "at": time.time()}
 
 
 # ══════════════════════ 允許規則 ══════════════════════ #
@@ -2352,6 +2510,7 @@ def preview_tool(name: str, args: dict) -> str:
 
 def run_tool(name: str, args: dict) -> str:
     """執行一個工具。呼叫端負責先問過使用者。"""
+    agent_guard(name)          # 子代理的工具白名單。在網頁之外再擋一次是刻意的
     if name in ("ask_user_question", "task"):
         # 這兩支由網頁處理：問問題要有人在，子代理的模型迴圈也跑在瀏覽器那一端
         raise ValueError("這個工具由網頁處理，不在伺服器執行")
@@ -2707,6 +2866,7 @@ class Handler(BaseHTTPRequestHandler):
             # 子代理有自己的 worktree 時，cwd 要跟著它 —— 這一段算完 cmd/cwd 就切回來，
             # 後面的串流不需要（也不該）還掛在子代理的 Session 上
             with as_agent(str(req.get("agent", ""))):
+                agent_guard(name)
                 if cur().ws is None:
                     raise PermissionError("這個工具需要先設定工作區資料夾")
                 args = req.get("args") or {}
@@ -3024,6 +3184,7 @@ class Handler(BaseHTTPRequestHandler):
             name = req.get("name", "")
             args = req.get("args") or {}
             with as_agent(str(req.get("agent", ""))):
+                agent_guard(name)      # 預覽會把檔案內容算成 diff 送回去，一樣要擋
                 diff = preview_tool(name, args)
                 risk = command_risk(args.get("command", ""))[0] if name == "run_shell" else "ok"
                 # 只在風險指令上算一次：前端要用它決定「工作區內全自動」放不放行
@@ -3085,13 +3246,17 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self._read_body(4096) or b"{}")
             act = str(req.get("action", "open"))
             if act == "open":
-                self._json(worktree_open())
+                self._json(agent_open(str(req.get("type", "")), str(req.get("parent", "")),
+                                      str(req.get("chat", ""))))
             elif act == "close":
-                self._json(worktree_close(str(req.get("id", "")), bool(req.get("force"))))
+                self._json(agent_close(str(req.get("id", "")), bool(req.get("force"))))
+            elif act == "stop":
+                self._json(agent_stop(str(req.get("id", "")), str(req.get("why", ""))))
+            elif act == "trace":
+                self._json(agent_trace(str(req.get("id", ""))))
             elif act == "list":
-                self._json({"agents": [{"id": k, "branch": v["branch"], "path": str(v["ws"])}
-                                       for k, v in cur().agents.items()],
-                            "types": agent_types()})
+                self._json({"agents": [agent_view(v) for v in cur().agents.values()],
+                            "types": agent_types(), "depth_max": SUB_DEPTH_MAX})
             else:
                 raise ValueError(f"不認得的動作：{act}")
         except Exception as e:
