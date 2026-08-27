@@ -1492,5 +1492,13 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     console.log('ok   自動模式會同步到後端');
   }
 
+  // ── 長回覆不要每 60ms 重解一次整篇 ────────────────────
+  assert.ok(/content\.length < BIG_MSG \|\| now - lastRender > BIG_MSG_MS/.test(script),
+    '長回覆還是每一輪 flush 都重解整篇 markdown');
+  // 但收尾一定要整篇重畫，不然跳過的那一次會變成畫面停在半截
+  assert.ok(/fillAssistant\(el, record\)/.test(script),
+    'finishStream 沒有整篇重畫，降頻會讓最後一段掉字');
+  console.log('ok   長回覆的 markdown 重解會降頻');
+
   console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });

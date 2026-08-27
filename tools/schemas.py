@@ -31,12 +31,16 @@ TOOL_SCHEMAS = [
      "properties": {"path": {"type": "string", "description": "相對於工作區的資料夾，預設為根目錄"}},
      "required": []},
     {"name": "search_files", "needs": "ws",
-     "description": "用正規表示式在工作區裡搜尋，只回傳命中的那幾行。要找東西一律先用這個，不要整個檔案讀進來",
-     "properties": {"pattern": {"type": "string", "description": "正規表示式"},
+     "description": ("在工作區裡搜尋。給 pattern＝找內容，只回傳命中的那幾行；"
+                     "**只給 glob 不給 pattern＝照檔名找檔案**，回傳路徑清單。"
+                     "要找東西一律先用這個，不要整個檔案讀進來，也不要一層一層 list_dir"),
+     "properties": {"pattern": {"type": "string",
+                                "description": "正規表示式。想照檔名找檔案就不要給這個"},
                     "glob": {"type": "string",
-                             "description": "限定範圍，檔名或相對路徑都可以："
-                                            "*.py、pkg/*.py、pkg/calc.py"}},
-     "required": ["pattern"]},
+                             "description": "檔名或相對路徑都可以：*.py、pkg/*.py、"
+                                            "test_*.py、pkg/calc.py。"
+                                            "跟 pattern 一起給＝在這些檔案裡找內容"}},
+     "required": []},
     {"name": "read_file", "needs": "ws",
      "description": "讀取工作區裡的檔案。每一行前面會加上「行號→」，那個前綴不是檔案內容",
      "properties": {"path": {"type": "string", "description": "相對於工作區的檔案路徑"},

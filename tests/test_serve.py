@@ -510,6 +510,35 @@ def test_ws_scoped():
         assert serve.ws_scoped("rm -rf pkg") is False
 
 
+def test_search_by_filename_only():
+    """只給 glob 不給 pattern＝照檔名找檔案。
+
+    沒有這條的話「這個專案的測試檔在哪」只能一層一層 list_dir，
+    而每多一輪就要模型重新吃一次整份 context —— 那是這裡最貴的東西。
+    """
+    with Workspace():
+        out = serve.TOOLS["search_files"](glob="*.py")
+        names = out.splitlines()
+        assert "pkg/calc.py" in names, out
+        assert all(":" not in n for n in names), "檔名模式不該回行號：" + out
+
+        # 兩個都給還是原本的「在這些檔案裡找內容」
+        both = serve.TOOLS["search_files"](pattern="def ", glob="*.py")
+        assert "pkg/calc.py:" in both, both
+
+        # 都不給要講清楚，不要靜靜掃全部
+        try:
+            serve.TOOLS["search_files"]()
+            assert False, "兩個都沒給應該要報錯"
+        except ValueError as e:
+            assert "glob" in str(e), e
+
+        assert "沒有檔名符合" in serve.TOOLS["search_files"](glob="*.nope")
+
+        # 不開放的目錄不能因為換了一條路就漏出去
+        assert ".git" not in serve.TOOLS["search_files"](glob="*")
+
+
 def test_delete_file_is_undoable():
     """刪檔案要有還原點 —— 在這支之前，模型唯一的刪檔手段是 rm，而 rm 沒有備份。"""
     with Workspace() as ws:

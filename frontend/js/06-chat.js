@@ -725,6 +725,7 @@ async function runStream(c, depth) {
   };
   waitLine();
 
+  let lastRender = 0;
   const flush = function () {
     if (!content && !retrying) waitLine();   // 秒數要自己走，不能只在收到字時更新
     if (!dirty) return;
@@ -745,7 +746,11 @@ async function runStream(c, depth) {
         thinkEl.querySelector('.think-dots').style.display = 'none';
         thinkEl.querySelector('.chev').innerHTML = ico('chevRight', 12, 2.2);
       }
-      bodyEl.innerHTML = renderMarkdown(content) + '<span class="caret"></span>';
+      const now = performance.now();
+      if (content.length < BIG_MSG || now - lastRender > BIG_MSG_MS) {
+        lastRender = now;
+        bodyEl.innerHTML = renderMarkdown(content) + '<span class="caret"></span>';
+      }
     }
     pin();
   };

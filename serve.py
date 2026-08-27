@@ -801,8 +801,25 @@ def rg_rows(pattern: str):
     return rows
 
 
-def _tool_search_files(pattern: str, glob: str = "") -> str:
-    """在工作區裡找字串，只回命中的那幾行 —— 整檔讀進去會把 context 吃光。"""
+def _tool_search_files(pattern: str = "", glob: str = "") -> str:
+    """在工作區裡找字串，只回命中的那幾行 —— 整檔讀進去會把 context 吃光。
+
+    **只給 glob 不給 pattern＝照檔名找檔案。** 在這之前沒有這個能力：
+    search_files 一定要給內容 regex、list_dir 一次只看一層，所以
+    「這個專案的測試檔在哪」要走三四輪 list_dir。而每一輪都要模型重新吃
+    一次整份 context —— 那是這個介面最貴的東西。
+    """
+    if not pattern:
+        if not glob:
+            raise ValueError("要給 pattern（找內容）或 glob（找檔名），至少一個")
+        names = [ws_rel(f) for f in ws_walk() if glob_ok(f, glob)]
+        if not names:
+            return f"沒有檔名符合「{glob}」的檔案"
+        names.sort()
+        if len(names) > SEARCH_HITS:
+            return ("\n".join(names[:SEARCH_HITS])
+                    + f"\n…（共 {len(names)} 個，只顯示前 {SEARCH_HITS} 個，請縮小範圍）")
+        return "\n".join(names)
     try:
         rx = re.compile(pattern)
     except re.error as e:
