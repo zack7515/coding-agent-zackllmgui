@@ -2305,6 +2305,7 @@ function applyAgentState(info) {
   S.jobs = info.jobs || [];      // 重整頁面之後背景指令還在，這裡接得回來
   S.plan = !!info.plan;
   S.mcp = info.mcp || null;
+  S.agentTypes = info.agents || [];   // 子代理型別來自 agents/*.md，不是寫死的
   if (info.stream_tools) S.streamTools = info.stream_tools;
   renderTodos();
 }
@@ -4016,13 +4017,14 @@ async function setServerTools(patch) {
   if (data.sandbox !== undefined) S.srv.sandbox = !!data.sandbox;
   S.toolDefs = data.tool_defs || [];
   S.agentRules = data.agent_rules || '';
+  if (data.agents) S.agentTypes = data.agents;
   renderWriteBtn();
 }
 
 /* ══════════════════════ 串流執行 ══════════════════════ */
 // run_shell / run_tests 走 /run：同步版跑 pytest 時畫面整整卡住好幾分鐘，
 // 看不出來是在跑還是掛了。這裡邊跑邊把每一行貼出來，按停止就把連線斷掉。
-async function runStreamed(name, args) {
+async function runStreamed(name, args, agent) {
   const ctrl = new AbortController();
   const el = msgEl('assistant');
   el.innerHTML =
@@ -4043,7 +4045,8 @@ async function runStreamed(name, args) {
   try {
     const res = await fetch(apiUrl('/run'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args }), signal: ctrl.signal
+      body: JSON.stringify({ name: name, args: args, agent: agent || '' }),
+      signal: ctrl.signal
     });
     if (!res.ok) {
       const data = await res.json();
@@ -4856,6 +4859,7 @@ async function applyWorkspace(path) {
   S.atFiles = null;                    // 換了工作區，@ 的檔案清單就過期了
   S.toolDefs = data.tool_defs || [];
   S.agentRules = data.agent_rules || '';
+  if (data.agents) S.agentTypes = data.agents;
   renderWorkspace();
   ensureFileList();                    // 先拉起來：模型寫的「檔案:行號」要靠它才連得起來
   const c = current();                 // 工作區跟著對話走：下次點回這則就切回來
@@ -4883,13 +4887,13 @@ function renderDiff(text) {
 
 // 先跟後端要「這一次的預覽」：改檔案是 diff，跑指令是風險評估。
 // 自動模式要不要放行也看它的結論，所以一定要等它回來。
-async function toolPreview(name, args) {
+async function toolPreview(name, args, agent) {
   // 以前只有改檔案與跑指令要問後端。現在每一支都要問 —— 允許規則可能命中任何工具，
   // 而規則要在伺服器那一端算（那裡才是真的擋得住的地方）。
   try {
     const res = await fetch(apiUrl('/preview'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args })
+      body: JSON.stringify({ name: name, args: args, agent: agent || '' })
     });
     const data = await res.json();
     return { diff: data.diff || data.error || '', risk: data.risk || 'ok',
@@ -5071,7 +5075,8 @@ function callKey(name, args) {
 // 一次工具呼叫：預覽 → 確認（或自動放行）→ 執行，結果寫回 msg。
 // 主迴圈與子代理共用這一支 —— 兩份實作的話，「危險指令一定要問人」
 // 遲早會有一份忘了跟上。
-async function execTool(name, args, msg) {
+// agent：這一次要跑在哪個子代理的 worktree 裡（空字串＝主代理自己的工作區）
+async function execTool(name, args, msg, agent) {
   const key = callKey(name, args);
   S.run.fails = S.run.fails || {};
   if (S.run.fails[key] >= REPEAT_LIMIT) {
@@ -5082,7 +5087,7 @@ async function execTool(name, args, msg) {
     msg.blocked = true;
     return msg;
   }
-  const pre = await toolPreview(name, args);
+  const pre = await toolPreview(name, args, agent);
   if (pre.rule && pre.rule.action === 'deny') {
     // 規則說不行就不要問了。真正的擋在伺服器那一端，這裡只是不要白問一次。
     msg.content = '（允許規則擋下來了：' + pre.rule.tool + ' / ' + pre.rule.pattern
@@ -5106,7 +5111,7 @@ async function execTool(name, args, msg) {
   try {
     // 會跑很久的那兩支邊跑邊顯示；其他工具一次回來就好
     if (S.streamTools.indexOf(name) >= 0 && !args.background) {
-      msg.content = await runStreamed(name, args);
+      msg.content = await runStreamed(name, args, agent);
       msg.failed = msg.content.indexOf('錯誤：') === 0;
       msg.streamed = true;
       S.run.now = '';
@@ -5117,7 +5122,8 @@ async function execTool(name, args, msg) {
     }
     const res = await fetch(apiUrl('/tool'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args, chat: S.currentId })
+      body: JSON.stringify({ name: name, args: args, chat: S.currentId,
+                             agent: agent || '' })
     });
     const data = await res.json();
     if (data.jobs) { S.jobs = data.jobs; renderRunBar(); }
@@ -5148,78 +5154,142 @@ async function execTool(name, args, msg) {
 /* ══════════════════════ 子代理 ══════════════════════ */
 // 「掃過整個專案找出所有用到 X 的地方」這種事，自己做會把幾十個檔案的內容
 // 灌進主對話，之後每一輪都要重送。子代理有自己的 context，只有結論回來。
+//
+// 型別定義在 agents/*.md（照 Claude Code 的 .claude/agents/），由 serve.py 讀進來 ——
+// 加一種子代理是加一個檔案，不是改這裡的程式碼。
 
-// 跟 MAX_TOOL_ROUNDS 一樣是**失控煞車，不是預算**：交辦出去的事沒有人在旁邊看，
-// 8 輪根本不夠掃完一個真實專案 —— 原本那個值是「每次呼叫都要人確認」時代留下的。
+// 跟 MAX_TOOL_ROUNDS 一樣是**失控煞車不是預算**：交辦出去的事沒有人在旁邊看。
 const SUB_ROUNDS = 60;
+// 深度上限是硬的。Claude Code 用提示詞當成本煞車（「不要隨便開子代理」），
+// 那是因為有人在看帳單；這裡的前提是放著跑三十分鐘沒人看，所以要機制。
+const SUB_DEPTH_MAX = 2;
+// 這兩支永遠不給，型別檔寫了也沒用：問了沒人看得懂上下文、
+// 待辦是主代理那條線的東西（同一個 Session，寫進去會真的蓋掉）。
+const SUB_NEVER = ['ask_user_question', 'todo_write'];
 
-// explore 只給讀的，work 給全部。分兩種的理由不是「功能比較多」，是**全自動之後
-// 沒有人在看子代理做什麼** —— 交辦「找出所有用到 X 的地方」不需要寫檔案的權限，
-// 那就不要給。模型沒指定時當 explore：task 的描述本來就是在講調查。
-const SUB_TYPES = ['explore', 'work'];
+function agentTypes() { return S.agentTypes || []; }
 
-function subKind(args) {
-  const t = String(((args || {}).type) || '').toLowerCase();
-  return SUB_TYPES.indexOf(t) >= 0 ? t : 'explore';
+function agentType(name) {
+  const list = agentTypes();
+  const want = String((name === undefined || name === null) ? '' : name);
+  return list.filter(function (t) { return t.name === want; })[0] || list[0] || null;
 }
 
-function subTools(kind) {
-  // 不給 task：子代理再開子代理就沒有底了。
-  // 不給 ask_user_question：它問了也沒人看得懂上下文，該問就回報給主代理去問。
-  // 不給 todo_write：待辦是主代理那一條線的東西，子代理寫進去等於把它的清單蓋掉。
-  const never = ['task', 'ask_user_question', 'submit_plan', 'todo_write'];
+function subTools(type, depth) {
+  const pick = (type && type.tools) || ['*'];
+  const all = pick.indexOf('*') >= 0;
   return toolDefs().filter(function (d) {
     const n = (d.function || {}).name;
-    if (never.indexOf(n) >= 0) return false;
-    return kind === 'work' || READ_ONLY_TOOLS.indexOf(n) >= 0;
+    if (SUB_NEVER.indexOf(n) >= 0) return false;
+    if (n === 'task' && (depth || 1) >= SUB_DEPTH_MAX) return false;
+    return all || pick.indexOf(n) >= 0;
   });
 }
 
-async function runSubagent(args) {
+// 這種子代理會不會動到檔案？決定它能不能跟別人平行跑。
+function subWrites(type) {
+  const pick = (type && type.tools) || ['*'];
+  if (pick.indexOf('*') >= 0) return true;
+  return pick.filter(function (n) {
+    return WRITE_TOOLS.indexOf(n) >= 0 || n === 'run_shell' || n === 'setup_env';
+  }).length > 0;
+}
+
+async function agentCall(body) {
+  const res = await fetch(apiUrl('/agent'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+async function runSubagent(args, depth) {
+  const at = depth || 1;
+  const prev = S.subs && S.subs[String((args || {}).resume || '')];
   const task = String((args && (args.prompt || args.task)) || '').trim();
   if (!task) return '錯誤：task 要給 prompt';
-  const kind = subKind(args);
+  const type = prev ? prev.type : agentType((args || {}).type);
+  if (!type) return '錯誤：沒有任何子代理型別可用（agents/ 是空的）';
   const signal = S.abort ? S.abort.signal : null;
+  const stopped = function () { return signal && signal.aborted; };
 
   const el = msgEl('assistant');
   el.innerHTML =
     '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
-    '<div class="msg-col"><div class="tool-card"><div class="th">子代理' +
-    (kind === 'work' ? '（可改檔案）' : '（唯讀）') +
+    '<div class="msg-col"><div class="tool-card"><div class="th">子代理 ' + type.name +
     ' <span class="st">進行中</span></div><pre class="out" style="margin:0;"></pre></div></div>';
   const out = el.querySelector('.out');
   out.textContent = task;
   $('thread').appendChild(el);
   pin();
   const log = function (line) { out.textContent += '\n' + line; pin(); };
-  const stopped = function () { return signal && signal.aborted; };
 
-  const msgs = [{ role: 'system', content:
-    '你是子代理，只負責完成交辦的這一件事。你有跟主代理一樣的工具，但是：\n'
-    + '- 不能再開子代理，也問不到使用者，卡住就把卡在哪裡寫進結論。\n'
-    + (kind === 'work' ? '' : '- 你只有唯讀工具。要改檔案就把「該改什麼」寫進結論，讓主代理去改。\n')
+  // 隔離型的先要一份自己的 git worktree。開不起來（不是 git 儲存庫）就照實說 ——
+  // 靜靜退回共用工作區的話，平行跑的兩個子代理會開始互相蓋檔案。
+  // 再下一層的子代理跑在上一層的 worktree 裡：它是同一件工作的細分，不是另一個人。
+  // 各開一份的話，下一層是從 HEAD 開出來的，看不到上一層還沒提交的修改。
+  let agent = prev ? prev.agent : String((args || {})._agent || '');
+  if (!agent && type.isolation === 'worktree') {
+    try {
+      const w = await agentCall({ action: 'open' });
+      agent = w.id;
+      log('· worktree ' + w.branch);
+    } catch (e) {
+      el.querySelector('.st').textContent = '開不起來';
+      return '子代理失敗：要不到獨立的 worktree（' + e.message + '）';
+    }
+  }
+
+  const msgs = prev ? prev.msgs : [{ role: 'system', content:
+    (type.prompt || '') + '\n\n'
+    + '你是子代理，只負責完成交辦的這一件事：\n'
+    + '- 問不到使用者，卡住就把卡在哪裡寫進結論。\n'
     + '- 做完用不超過 15 行回報結論，帶上關鍵的檔案與行號。\n'
     + '- 你的過程不會被主代理看到，只有最後這段文字會，所以結論要能單獨讀懂。\n\n'
-    + (agentRules() || '') }, { role: 'user', content: task }];
+    + (agentRules() || '') }];
+  msgs.push({ role: 'user', content: task });
+
+  const owned = (!prev && !String((args || {})._agent || '')) ? agent : '';   // 誰開的誰收
+  const sid = prev ? prev.id : (agent || Math.random().toString(36).slice(2, 8));
+  S.subs = S.subs || {};
+  S.subs[sid] = { id: sid, type: type, msgs: msgs, agent: agent };
+
+  const finish = async function (text) {
+    // 有改動就留著 worktree 並且講清楚改在哪個分支 —— 子代理跑了十分鐘的結果，
+    // 不能因為主代理沒接住就靜靜刪掉。沒改動的才自動清掉（照它們的規則）。
+    let note = '';
+    if (agent && agent === owned) {
+      try {
+        const r = await agentCall({ action: 'close', id: agent });
+        if (r.kept) {
+          note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，留在分支 ' + r.branch
+            + '（' + r.path + '）。要收下就 git merge ' + r.branch + '，不要就 git worktree remove。';
+        }
+      } catch (e) { note = '\n[worktree] 收不掉：' + e.message; }
+      delete S.subs[sid];
+    }
+    return text + note + '\n[子代理 ' + sid + '] 要追問就用 task 帶 resume:"' + sid + '"';
+  };
 
   try {
     for (let i = 1; i <= SUB_ROUNDS; i++) {
-      // 停止鍵要停得住。原本子代理自己開 AbortController，按停止只停得了主迴圈，
-      // 子代理會繼續跑到輪數用完 —— 全自動之後那可能是好幾分鐘。
+      // 停止鍵要停得住。子代理原本自己開 AbortController，按停止只停得了主迴圈。
       if (stopped()) {
         el.querySelector('.st').textContent = '已停止';
-        return '（子代理被停止鍵停掉了，任務沒有完成）';
+        return await finish('（子代理被停止鍵停掉了，任務沒有完成）');
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
       let text = '';
       let calls = null;
-      const payload = { model: S.model, messages: msgs, tools: subTools(kind), stream: true };
+      const payload = { model: type.model || S.model, messages: msgs,
+                        tools: subTools(type, at), stream: true };
       const opts = buildOptions();
       if (Object.keys(opts).length) payload.options = opts;
       if (thinkValue() !== null) payload.think = false;   // 子代理不用思考，省時間
-      // 走 chatStream 而不是自己打 /api/chat：外部 API 那條路它已經處理好了，
-      // 子代理才跟著能用（原本 toolDefs() 在外部 API 模式下要把 task 濾掉）。
+      // 走 chatStream 而不是自己打 /api/chat：外部 API 那條路它已經處理好了。
       await chatStream(payload, signal, {
         think: function () { },
         images: function () { },
@@ -5237,44 +5307,52 @@ async function runSubagent(args) {
         el.querySelector('.tool-card').classList.add('done');
         el.querySelector('.st').textContent = '完成（' + i + ' 輪）';
         log('→ ' + (done || '（沒有結論）'));
-        return done || '（子代理沒有給出結論）';
+        return await finish(done || '（子代理沒有給出結論）');
       }
       for (let k = 0; k < calls.length; k++) {
         if (stopped()) break;
         const fn = calls[k].function || {};
-        let a = fn.arguments;
-        if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = {}; } }
-        log('· ' + fn.name + ' ' + JSON.stringify(a || {}).slice(0, 120));
-        const r = await execTool(fn.name || '', a || {},
-          { role: 'tool', tool_name: fn.name, content: '' });
+        const a = callArgs(calls[k]);
+        log('· ' + fn.name + ' ' + JSON.stringify(a).slice(0, 120));
+        // 再下一層的子代理跑在同一份 worktree 裡：它是這一層的分身，不是另一個人
+        const r = fn.name === 'task'
+          ? { content: await runSubagent(Object.assign({}, a, { _agent: agent }), at + 1) }
+          : await execTool(fn.name || '', a, { role: 'tool', tool_name: fn.name, content: '' },
+                           agent);
         msgs.push({ role: 'tool', tool_name: fn.name, content: String(r.content || '') });
       }
     }
     el.querySelector('.st').textContent = '輪數用完';
-    return '（子代理跑了 ' + SUB_ROUNDS + ' 輪還沒有結論，任務可能太大，拆小一點再交辦）';
+    return await finish('（子代理跑了 ' + SUB_ROUNDS + ' 輪還沒有結論，任務可能太大，拆小一點再交辦）');
   } catch (e) {
     if (stopped()) {
       el.querySelector('.st').textContent = '已停止';
-      return '（子代理被停止鍵停掉了，任務沒有完成）';
+      return await finish('（子代理被停止鍵停掉了，任務沒有完成）');
     }
     el.querySelector('.st').textContent = '失敗';
     log('→ ' + e.message);
-    return '子代理失敗：' + e.message;
+    return await finish('子代理失敗：' + e.message);
   }
 }
 
 // 同一輪來了好幾個 task 就一起發。**這是唯一值得平行化的東西**：每個子代理是一整條
 // 獨立的模型迴圈，平行省的是真正的牆鐘時間；三個 read_file 平行跑省的只有微秒級的
 // 本機 I/O，而同一輪一次送三個省的是兩輪 60k context 的 prefill（見 tech.md）。
-// 只平行 explore：兩個會寫檔案的子代理同時動同一個檔案，收拾起來比省下的時間貴。
-function startSubagents(calls) {
+//
+// 會動到檔案的型別**要有自己的 worktree 才准平行**。共用工作區的兩個寫入者同時
+// 動同一個檔案，收拾起來比省下的時間貴 —— 有了 isolation: worktree 之後，
+// 衝突變成 merge 問題，那個有現成工具可以處理。
+function startSubagents(calls, depth) {
   const running = {};
   const idx = [];
   for (let i = 0; i < calls.length; i++) {
-    if (((calls[i] || {}).function || {}).name === 'task'
-        && subKind(callArgs(calls[i])) === 'explore') idx.push(i);
+    if (((calls[i] || {}).function || {}).name !== 'task') continue;
+    const t = agentType(callArgs(calls[i]).type);
+    if (t && (t.isolation === 'worktree' || !subWrites(t))) idx.push(i);
   }
-  if (idx.length > 1) idx.forEach(function (i) { running[i] = runSubagent(callArgs(calls[i])); });
+  if (idx.length > 1) {
+    idx.forEach(function (i) { running[i] = runSubagent(callArgs(calls[i]), depth || 1); });
+  }
   return running;
 }
 

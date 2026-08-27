@@ -1785,6 +1785,96 @@ def test_sessions_are_capped():
         serve.SESSIONS.update(keep)
 
 
+def test_agent_types_come_from_files():
+    """子代理型別是 agents/ 裡的檔案，不是寫死的常數 —— 加一種不必改 serve.py。"""
+    types = {t["name"]: t for t in serve.agent_types()}
+    assert "explore" in types and "work" in types, list(types)
+    # 唯讀是靠工具清單擋的。這一條錯了，「只是要答案」的子代理就有了寫入權限
+    assert "write_file" not in types["explore"]["tools"], types["explore"]["tools"]
+    assert types["explore"]["isolation"] == "", "唯讀的不需要 worktree"
+    assert types["work"]["tools"] == ["*"], types["work"]["tools"]
+    assert types["work"]["isolation"] == "worktree", "會寫檔案的一定要隔離才敢平行跑"
+    for t in types.values():
+        assert t["description"] and t["prompt"], t["name"]
+
+
+def test_task_enum_follows_agent_files():
+    """task 的 type 是 enum，而且照 agents/ 裡有哪幾份產生。
+
+    寫在描述裡的「可以填 x 或 y」模型會看漏，enum 是協定層級的，看不漏。
+    """
+    with Workspace():
+        task = [d for d in serve.tool_defs()
+                if d["function"]["name"] == "task"][0]["function"]
+        enum = task["parameters"]["properties"]["type"]["enum"]
+        assert enum == [t["name"] for t in serve.agent_types()], enum
+        assert "resume" in task["parameters"]["properties"], "追問不到就只能重跑一次"
+
+
+def test_worktree_isolates_writes():
+    """隔離型子代理寫的檔案要落在自己的 worktree，主工作區看不到。
+
+    這是「兩個會改檔案的子代理可不可以平行跑」的全部依據。錯了的話兩個子代理
+    會同時動同一個檔案，而且沒有任何徵兆 —— 所以這裡驗的是**檔案在哪個資料夾**。
+    """
+    with Workspace() as ws:
+        shutil.rmtree(ws / ".git")
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"], ["add", "-A"],
+                  ["commit", "-qm", "base"]):
+            subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+        serve.cur().write = True
+        info = serve.worktree_open()
+        aid = info["id"]
+        try:
+            assert Path(info["path"]).is_dir(), info
+            with serve.as_agent(aid):
+                assert serve.cur().ws == Path(info["path"]).resolve()
+                serve.run_tool("write_file", {"path": "只在分支.txt", "content": "x"})
+            # 切回來之後主工作區不該有這個檔案
+            assert serve.cur().ws == ws.resolve(), "as_agent 沒有切回來"
+            assert not (ws / "只在分支.txt").exists(), "子代理的檔案寫進主工作區了"
+            assert (Path(info["path"]) / "只在分支.txt").is_file(), "檔案沒落在 worktree"
+
+            # 有改動就要留著並且講清楚 —— 跑了十分鐘的結果不能靜靜刪掉
+            out = serve.worktree_close(aid)
+            assert out["kept"] is True and out["changes"] >= 1, out
+            assert out["branch"] == info["branch"]
+        finally:
+            if aid in serve.cur().agents:
+                serve.worktree_close(aid, force=True)
+            subprocess.run(["git", "worktree", "remove", "--force", info["path"]],
+                           cwd=ws, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            serve.cur().write = False
+
+
+def test_worktree_cleans_up_when_untouched():
+    """沒改動的自動清掉。忘了收的 worktree 會在專案裡越積越多。"""
+    with Workspace() as ws:
+        shutil.rmtree(ws / ".git")
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"], ["add", "-A"],
+                  ["commit", "-qm", "base"]):
+            subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+        info = serve.worktree_open()
+        out = serve.worktree_close(info["id"])
+        assert out["kept"] is False, out
+        assert not Path(info["path"]).exists(), "沒改動卻留著"
+        assert info["id"] not in serve.cur().agents
+
+
+def test_bind_agent_rejects_unknown_id():
+    """路徑是伺服器產生的，請求只能指名一個開過的 id —— 不能靠這條路指到任意資料夾。"""
+    with Workspace():
+        try:
+            serve.bind_agent("../../etc")
+            assert False, "不認得的 id 應該要擋下來"
+        except ValueError as e:
+            assert "沒有這個子代理" in str(e), e
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

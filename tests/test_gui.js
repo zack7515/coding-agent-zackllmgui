@@ -1088,27 +1088,48 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   });
 })();
 
-// 子代理：自己的 context，只有結論回到主對話。跑得起來、不會遞迴、輪數用完會停、
-// 停止鍵停得住 —— 這四件事錯了都會變成無限迴圈或停不下來的背景任務。
+// 子代理：型別來自 agents/*.md、唯讀靠工具清單擋、停得住、輪數有底、
+// 會寫檔案的要有自己的 worktree 才准平行 —— 這幾件事錯了都會靜靜弄壞檔案。
 (async function () {
   const src = script.slice(script.indexOf('const SUB_ROUNDS'),
                            script.indexOf('async function runTools'));
-  const mk = (replies, aborted) => new Function(`
+  const TYPES = [
+    { name: 'explore', description: '唯讀調查', tools: ['read_file', 'search_files'],
+      isolation: '', model: '', prompt: '你負責找東西' },
+    { name: 'work', description: '會改檔案', tools: ['*'], isolation: 'worktree',
+      model: 'big', prompt: '你在自己的 worktree 裡工作' },
+    { name: 'messy', description: '會寫但沒隔離', tools: ['read_file', 'write_file'],
+      isolation: '', model: '', prompt: '' }];
+
+  const mk = (replies, opt) => new Function(`
+    const conf = ${JSON.stringify(opt || {})};
     const S = { model: 'm', srv: {}, run: { calls: 0 }, streamTools: [], toolDefs: [],
-                abort: { signal: { aborted: ${!!aborted} } } };
+                subs: {}, agentTypes: ${JSON.stringify(TYPES)},
+                abort: { signal: { aborted: !!conf.aborted } } };
     let turn = 0;
-    const calls = [];
-    const started = [];
-    // 子代理改走 chatStream：外部 API 那條路才跟著能用
+    const calls = [];       // [工具名, 跑在哪個 worktree]
+    const agentOps = [];
     const chatStream = async (payload, signal, on) => {
-      started.push(payload.tools.map((d) => d.function.name).join(','));
       const r = ${JSON.stringify(replies)}[turn++] || {};
       if (r.content) on.content(r.content);
       if (r.tools) on.tools(r.tools);
       on.done({});
     };
-    const execTool = async (n, a, msg) => { calls.push(n); msg.content = 'OK:' + n; return msg; };
-    const READ_ONLY_TOOLS = ['read_file', 'search_files'];
+    const execTool = async (n, a, msg, agent) => {
+      calls.push([n, agent || '']); msg.content = 'OK:' + n; return msg;
+    };
+    const apiUrl = (p) => p;
+    const fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      agentOps.push(body.action);
+      if (body.action === 'open') {
+        return { ok: true, json: async () => ({ id: 'wt1', branch: 'zackllmgui/wt1',
+                                                path: '/tmp/wt1' }) };
+      }
+      return { ok: true, json: async () => ({ kept: !!conf.dirty, changes: conf.dirty || 0,
+                                              branch: 'zackllmgui/wt1', path: '/tmp/wt1' }) };
+    };
+    const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
     const toolDefs = () => ['read_file', 'search_files', 'write_file', 'run_shell',
                             'task', 'ask_user_question', 'todo_write']
       .map((n) => ({ function: { name: n } }));
@@ -1116,7 +1137,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const buildOptions = () => ({});
     const thinkValue = () => null;
     const msgEl = () => {
-      const el = { cls: [], html: '' };
+      const el = { html: '' };
       el.querySelector = () => ({ textContent: '', classList: { add() {} } });
       Object.defineProperty(el, 'innerHTML', { set(v) { el.html = v; }, get() { return el.html; } });
       return el;
@@ -1125,67 +1146,97 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const $ = () => ({ appendChild() {} });
     const pin = () => {};
     ${src}
-    return { runSubagent, subTools, subKind, startSubagents, callArgs, calls, started,
-             rounds: SUB_ROUNDS };
+    return { runSubagent, subTools, subWrites, agentType, startSubagents, callArgs,
+             calls, agentOps, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
   `)();
 
-  // 唯讀子代理只能拿到唯讀工具。全自動之後沒有人在看子代理做什麼 ——
-  // 交辦「找出所有用到 X 的地方」不需要寫檔案的權限，那就不要給。
   const box = mk([]);
-  assert.deepStrictEqual(box.subTools('explore').map((d) => d.function.name),
-    ['read_file', 'search_files'], '唯讀子代理拿到了會改東西的工具');
-  assert.deepStrictEqual(box.subTools('work').map((d) => d.function.name),
-    ['read_file', 'search_files', 'write_file', 'run_shell'], 'work 少了該有的工具');
-  // task 會遞迴、ask_user_question 沒人看得懂上下文、
-  // todo_write 會把主代理那條線的待辦蓋掉 —— 兩種都不能給
-  ['explore', 'work'].forEach(function (k) {
-    const n = box.subTools(k).map((d) => d.function.name);
-    ['task', 'ask_user_question', 'todo_write'].forEach(function (bad) {
-      assert.ok(n.indexOf(bad) < 0, k + ' 拿到了不該有的 ' + bad);
-    });
+
+  // 型別來自 agents/*.md。認不得的名字要退回清單的第一種（最保守的那一種），
+  // 不能因為填錯就掉到「什麼都給」
+  assert.strictEqual(box.agentType('work').name, 'work');
+  assert.strictEqual(box.agentType('亂寫').name, 'explore', '認不得的型別沒有退回第一種');
+  assert.strictEqual(box.agentType().name, 'explore', '沒填型別要用第一種');
+
+  // 唯讀是靠**工具清單**擋的，不是靠提示詞求它別寫
+  assert.deepStrictEqual(box.subTools(TYPES[0], 1).map((d) => d.function.name),
+    ['read_file', 'search_files'], '唯讀型別拿到了會改東西的工具');
+  // tools: * 代表「除了永遠不給的以外都給」
+  assert.deepStrictEqual(box.subTools(TYPES[1], 1).map((d) => d.function.name),
+    ['read_file', 'search_files', 'write_file', 'run_shell', 'task'], '* 少了該有的工具');
+  // 這兩支永遠不給：問了沒人看得懂上下文、待辦會把主代理那條線的清單蓋掉
+  ['ask_user_question', 'todo_write'].forEach(function (bad) {
+    assert.ok(box.subTools(TYPES[1], 1).map((d) => d.function.name).indexOf(bad) < 0,
+      '型別檔寫什麼都不該拿到 ' + bad);
   });
-  assert.strictEqual(box.subKind({}), 'explore', '沒指定要當唯讀，不是預設放權限');
-  assert.strictEqual(box.subKind({ type: 'work' }), 'work');
-  assert.strictEqual(box.subKind({ type: '亂寫' }), 'explore', '認不得的值要退回唯讀');
+  // 深度上限是硬的：它們用提示詞當煞車（有人在看帳單），這裡放著跑沒人看
+  assert.ok(box.subTools(TYPES[1], box.depthMax).map((d) => d.function.name)
+    .indexOf('task') < 0, '到了深度上限還給 task，遞迴沒有底');
 
-  // 正常流程：呼叫一支工具 → 給結論
-  const ok = mk([
-    { tools: [{ function: { name: 'read_file', arguments: '{"path":"a"}' } }] },
-    { content: '結論：a.py 第 3 行' }]);
-  assert.strictEqual(await ok.runSubagent({ prompt: '看一下 a.py' }), '結論：a.py 第 3 行');
-  assert.deepStrictEqual(ok.calls, ['read_file']);
+  assert.strictEqual(box.subWrites(TYPES[0]), false);
+  assert.strictEqual(box.subWrites(TYPES[1]), true, 'tools: * 一定會寫');
+  assert.strictEqual(box.subWrites(TYPES[2]), true);
 
-  // 一直呼叫工具、永遠不給結論 → 要在輪數用完時停下來
-  const loop = mk(Array(200).fill(
-    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }));
-  const out = await loop.runSubagent({ prompt: '無限迴圈' });
-  assert.ok(/輪還沒有結論/.test(out), '輪數用完沒有停：' + out);
-  assert.strictEqual(loop.calls.length, loop.rounds, '應該剛好跑 SUB_ROUNDS 輪');
-
-  // 停止鍵要停得住。原本子代理自己開 AbortController，按停止只停得了主迴圈，
-  // 子代理會一路跑到輪數用完 —— 全自動之後那可能是好幾分鐘。
-  const stop = mk(Array(5).fill(
-    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }), true);
-  assert.ok(/停止/.test(await stop.runSubagent({ prompt: '停我' })), '停止鍵停不住子代理');
-  assert.strictEqual(stop.calls.length, 0, '按了停止還在呼叫工具');
-
-  // 沒給 prompt 就不要開一個什麼都不知道的子代理
-  assert.ok(/錯誤/.test(await mk([]).runSubagent({})));
-
-  // 同一輪好幾個 explore 要一起發。每個子代理是一整條獨立的模型迴圈，
-  // 平行省的是真正的牆鐘時間 —— 這跟平行跑 read_file 不是同一回事。
+  // 平行：唯讀的可以，有 worktree 的也可以（衝突變成 merge 問題），
+  // 會寫又共用工作區的不行 —— 兩個同時動同一個檔案，收拾比省下的時間貴
   const task = (t) => ({ function: { name: 'task', arguments: JSON.stringify(t) } });
   const par = mk([{ content: 'done' }]);
   assert.deepStrictEqual(Object.keys(par.startSubagents(
-    [task({ prompt: 'a' }), task({ prompt: 'b' }), { function: { name: 'read_file' } }])),
-    ['0', '1'], '兩個 explore 沒有一起發');
-  assert.deepStrictEqual(Object.keys(par.startSubagents([task({ prompt: 'a' })])), [],
-    '只有一個就不必先發，維持原本的順序');
-  // 兩個會寫檔案的子代理同時動同一個檔案，收拾起來比省下的時間貴
+    [task({ type: 'explore' }), task({ type: 'explore' })])), ['0', '1']);
   assert.deepStrictEqual(Object.keys(par.startSubagents(
-    [task({ prompt: 'a', type: 'work' }), task({ prompt: 'b', type: 'work' })])), [],
-    'work 型的子代理不可以平行跑');
-  console.log('ok   子代理：唯讀預設、停得住、輪數有底、explore 平行跑');
+    [task({ type: 'work' }), task({ type: 'work' })])), ['0', '1'],
+    'worktree 隔離之後，會寫檔案的子代理也可以平行跑');
+  assert.deepStrictEqual(Object.keys(par.startSubagents(
+    [task({ type: 'messy' }), task({ type: 'messy' })])), [],
+    '會寫又共用工作區的不可以平行');
+  assert.deepStrictEqual(Object.keys(par.startSubagents([task({ type: 'explore' })])), [],
+    '只有一個就不必先發');
+
+  // 隔離型：開 worktree → 工具都跑在裡面 → 沒改動就自動收掉
+  const wt = mk([{ tools: [{ function: { name: 'read_file', arguments: '{}' } }] },
+                 { content: '看完了' }]);
+  const clean = await wt.runSubagent({ prompt: '做事', type: 'work' });
+  assert.deepStrictEqual(wt.agentOps, ['open', 'close'], 'worktree 沒有開或沒有收');
+  assert.deepStrictEqual(wt.calls, [['read_file', 'wt1']], '工具沒有跑在子代理的 worktree 裡');
+  assert.ok(clean.indexOf('看完了') === 0 && clean.indexOf('[worktree]') < 0,
+    '沒改動就不該留 worktree：' + clean);
+
+  // 有改動就留著並且講清楚改在哪個分支 —— 跑了十分鐘的結果不能靜靜刪掉
+  const dirty = mk([{ content: '改好了' }], { dirty: 3 });
+  const kept = await dirty.runSubagent({ prompt: '做事', type: 'work' });
+  assert.ok(/zackllmgui\/wt1/.test(kept) && /3 個檔案改動/.test(kept),
+    '有改動卻沒說改在哪：' + kept);
+  assert.ok(/merge/.test(kept), '沒告訴主代理怎麼收下這些改動');
+
+  // 唯讀型別不開 worktree（沒東西要隔離，開了只是浪費）
+  const ro = mk([{ content: '找到了' }]);
+  await ro.runSubagent({ prompt: '找東西', type: 'explore' });
+  assert.deepStrictEqual(ro.agentOps, [], '唯讀子代理不該開 worktree');
+
+  // 結論最後要給得出 id，主代理才追問得下去
+  const res = mk([{ content: '第一段' }]);
+  const first = await res.runSubagent({ prompt: 'a', type: 'explore' });
+  const sid = (first.match(/\[子代理 (\S+)\]/) || [])[1];
+  assert.ok(sid, '結論沒有給 id，resume 就無從指起：' + first);
+  assert.ok(res.S.subs[sid], 'context 沒有留下來');
+
+  // 輪數用完會停
+  const loop = mk(Array(200).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }));
+  const out = await loop.runSubagent({ prompt: '無限迴圈', type: 'explore' });
+  assert.ok(/輪還沒有結論/.test(out), '輪數用完沒有停：' + out);
+  assert.strictEqual(loop.calls.length, loop.rounds, '應該剛好跑 SUB_ROUNDS 輪');
+
+  // 停止鍵停得住，而且**要把 worktree 收掉**，不然按一次停止就漏一份
+  const stop = mk(Array(5).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }), { aborted: true });
+  assert.ok(/停止/.test(await stop.runSubagent({ prompt: '停我', type: 'work' })));
+  assert.strictEqual(stop.calls.length, 0, '按了停止還在呼叫工具');
+  assert.deepStrictEqual(stop.agentOps, ['open', 'close'], '停止時 worktree 沒收掉');
+
+  // 沒給 prompt 就不要開一個什麼都不知道的子代理
+  assert.ok(/錯誤/.test(await mk([]).runSubagent({})));
+  console.log('ok   子代理：型別來自檔案、worktree 隔離、停得住、深度有底');
 })();
 
 // 4. 開關：要驗證伺服器真的照做，還有全自動與修改檔案的連動（都得 await）

@@ -98,6 +98,16 @@ if target != root and root not in target.parents:
 - `command_risk()` 擋掉最糟的那一類。
 - 確認卡讓人看見它到底要跑什麼。
 
+**子代理的 worktree 不是安全邊界。** `work` 型子代理跑在
+`工作區/.zackllmgui-worktrees/<id>/` 裡，改動落在獨立分支上 —— 那是為了讓兩個子代理
+可以平行跑而不互相蓋檔案，**不是為了把它關起來**。同一支 `ws_path()` 擋著它的檔案
+工具（root 換成 worktree），`run_shell` 一樣是逃生口，一樣要靠沙盒。
+
+有一點要知道：`work` 型宣告的是 `tools: *`，所以**它拿得到主代理有的每一支工具** ——
+包括 `run_shell`。放著跑之前，該問的是「主代理有沒有這個權限」，不是「子代理有沒有」。
+只想要答案就交辦 `explore`（工具清單裡只有讀類的），或自己在 `agents/` 寫一份
+工具更少的型別。
+
 **沒有做**：白名單模式（只准 `python -m pytest`、`git status` 這幾條）。
 做得到，但會犧牲掉大半實用性，目前判斷不划算。要做的話位置在 `_tool_run_shell()`。
 

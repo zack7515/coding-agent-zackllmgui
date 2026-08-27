@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import ast
 import collections
+import contextlib
 import difflib
 import fnmatch
 import io
@@ -78,10 +79,12 @@ ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁�
 
 # ── 工作區（改檔案／跑測試用，見 plan-agent.md） ──────────────────── #
 BACKUP_DIR = ".zackllmgui-backup"
+WORKTREE_DIR = ".zackllmgui-worktrees"   # 隔離型子代理各自的 git worktree
+WORKTREE_MAX = 8                   # 同時最多幾份，忘了收的不會無限長
 # 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
 DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
              "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", "dist",
-             "build", ".next", ".idea", ".vscode", BACKUP_DIR}
+             "build", ".next", ".idea", ".vscode", BACKUP_DIR, WORKTREE_DIR}
 # 這些檔案不讓模型讀，免得金鑰跟著進 context
 # 這裡也擋 .zackllmgui-*.json：那幾個檔案決定「什麼可以自動放行」，
 # 讓模型讀得到等於讓它知道怎麼繞，寫得到就等於自己給自己開權限。
@@ -106,7 +109,7 @@ class Session:
     其餘的（工具總開關、沙盒、連網、MCP、背景指令）仍然是整個行程一份：
     那些是使用者對「這台 serve.py」授的權，不是某個分頁的工作內容。
     """
-    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "seen")
+    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "agents", "seen")
 
     def __init__(self, base=None):
         self.ws = base.ws if base else None            # Path；沒設定就沒有任何檔案工具
@@ -115,6 +118,7 @@ class Session:
         self.todos = []                                # [{"text": ..., "done": bool}]
         self.todo_mtime = 0.0                          # 上次自己寫進去的時間戳，用來分辨「誰改的」
         self.plan = {"text": "", "approved": False}
+        self.agents = {}                               # 子代理 id -> {"ws", "branch"}
         self.seen = time.time()
 
 
@@ -210,6 +214,8 @@ JOURNAL = "journal.jsonl"          # 放在 BACKUP_DIR 底下
 #           所以夠用；真的要平行跑工具的話得改成傳參數穿到 journal_add。
 CURRENT_CHAT = ""
 SKILLS_DIR = "skills"              # serve.py 旁邊；工作區有自己的就用工作區的
+AGENTS_DIR = "agents"              # 子代理型別，一種一個 .md，規則同上
+AGENT_BODY_LIMIT = 4000
 SKILL_BODY_LIMIT = 8000
 
 
@@ -1626,9 +1632,21 @@ def tool_defs() -> list:
             continue
         if t["needs"] == "write" and (cur().ws is None or not cur().write or not plan_ok):
             continue
+        props = t["properties"]
+        if t["name"] == "task":
+            # 型別是 agents/ 裡的檔案，不是寫死的常數 —— 使用者加一份 md 就多一種。
+            # enum 直接送給模型：讓它從清單裡挑，比在描述裡寫「可以填 x 或 y」可靠。
+            kinds = agent_types()
+            if not kinds:
+                continue                   # 一種都沒有就不要送這支工具
+            props = dict(props)
+            props["type"] = dict(props.get("type", {}),
+                                 enum=[k["name"] for k in kinds],
+                                 description="；".join(
+                                     f'{k["name"]}：{k["description"]}' for k in kinds))
         out.append({"type": "function", "function": {
             "name": t["name"], "description": t["description"],
-            "parameters": {"type": "object", "properties": t["properties"],
+            "parameters": {"type": "object", "properties": props,
                            "required": t.get("required", [])}}})
     return out + mcp_tool_defs()
 
@@ -1958,6 +1976,173 @@ def skill_body(name: str) -> str:
         _, body = parse_skill((folder / "SKILL.md").read_text("utf-8", errors="replace"))
         return body[:SKILL_BODY_LIMIT]
     raise ValueError(f"沒有這個 skill：{name}")
+
+
+
+# ══════════════════════ 子代理型別 ══════════════════════ #
+# 照 Claude Code 的 `.claude/agents/*.md` 做：**一種子代理是一個檔案，不是一段程式碼**。
+# 加一種不必改 serve.py，寫一份 md 丟進 agents/ 就好。每一種自己宣告拿得到哪些工具 ——
+# 唯讀是靠工具清單擋的，不是靠提示詞求它別寫（Explore 那一支的做法也是這樣）。
+#
+# 跟它們不一樣的一點：這裡**一定要有深度上限**。它的煞車是提示詞（「不要隨便開子代理，
+# 那是這個方案上最貴的路徑」），因為有人在看著帳單；這裡的前提是放著跑三十分鐘沒人看，
+# 所以要機制。
+
+
+def agents_roots() -> list:
+    """要掃的 agents 資料夾，順序是 [內建, 工作區]。同名時工作區的贏，規則同 skills。"""
+    roots = [HERE / AGENTS_DIR]
+    if cur().ws is not None:
+        ws = cur().ws / AGENTS_DIR
+        if ws.is_dir() and ws.resolve() != (HERE / AGENTS_DIR).resolve():
+            roots.append(ws)
+    return [r for r in roots if r.is_dir()]
+
+
+def agent_types() -> list:
+    """可用的子代理型別。tools 是 ["*"] 代表「除了永遠不給的以外都給」。"""
+    found = {}
+    for root in agents_roots():
+        scope = "專案" if root.resolve() != (HERE / AGENTS_DIR).resolve() else "內建"
+        for f in sorted(root.glob("*.md")):
+            if f.name.startswith("_"):
+                continue
+            try:
+                meta, body = parse_skill(f.read_text("utf-8", errors="replace"))
+            except (ValueError, OSError):
+                continue
+            if not meta.get("description"):
+                continue
+            name = (meta.get("name") or f.stem).strip()
+            tools = [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]
+            found[name] = {
+                "name": name, "description": meta["description"], "scope": scope,
+                "tools": tools or ["*"],
+                "isolation": meta.get("isolation", "").strip(),
+                "model": meta.get("model", "").strip(),
+                "prompt": body[:AGENT_BODY_LIMIT],
+            }
+    return [found[k] for k in sorted(found)]
+
+
+def git_at(root: Path, *args) -> str:
+    """在指定的資料夾跑 git。跟 git_run() 不同：那一支固定跑在工作區根目錄，
+    這一支要能指到 worktree 或主 repo 兩邊。"""
+    p = subprocess.run(["git", "-C", str(root)] + list(args),
+                       capture_output=True, text=True, timeout=120)
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout).strip()[:400] or "git 失敗")
+    return p.stdout
+
+
+def worktree_open() -> dict:
+    """給子代理一份自己的 git worktree。
+
+    照 Claude Code 的 `isolation: "worktree"` 做。兩個會改檔案的子代理平行跑時，
+    原本只有「不要平行」一條路（同時動同一個檔案，收拾比省下的時間貴）；
+    各給一份 checkout 之後，衝突變成 merge 問題，而 merge 有現成工具。
+
+    放在工作區底下的 .zackllmgui-worktrees/：ws_walk() 本來就跳過 . 開頭的資料夾，
+    ws_path() 檢查的是「相對於自己那個 root 的路徑」，所以子代理的邊界照舊由
+    ws_path() 一支擋 —— 不必為了這個功能再寫第二個路徑檢查。
+    """
+    root = ws_root().resolve()
+    if not (root / ".git").exists():
+        raise RuntimeError("這個工作區不是 git 儲存庫，給不了獨立的 worktree")
+    s = cur()
+    if len(s.agents) >= WORKTREE_MAX:
+        raise RuntimeError(f"同時最多 {WORKTREE_MAX} 份 worktree，先收掉沒在用的")
+    aid = f"{int(time.time() * 1000) % 100000000:08d}{len(s.agents)}"
+    dst = root / WORKTREE_DIR / aid
+    branch = f"zackllmgui/{aid}"
+    # 主 worktree 不該把這個資料夾看成未追蹤的檔案。寫 .git/info/exclude 而不是
+    # .gitignore：那是使用者的檔案，我們不動它。
+    try:
+        ex = Path(git_at(root, "rev-parse", "--git-common-dir").strip())
+        if not ex.is_absolute():
+            ex = root / ex
+        ex = ex / "info" / "exclude"
+        ex.parent.mkdir(parents=True, exist_ok=True)
+        line = WORKTREE_DIR + "/\n"
+        had = ex.read_text("utf-8", errors="replace") if ex.is_file() else ""
+        if line not in had:
+            with ex.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+    except Exception:
+        pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
+    git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
+    s.agents[aid] = {"ws": dst.resolve(), "branch": branch, "root": root}
+    return {"id": aid, "path": str(dst.resolve()), "branch": branch}
+
+
+def worktree_close(aid: str, force: bool = False) -> dict:
+    """收掉一份 worktree。
+
+    照它們的規則：**沒有改動才自動清掉**。有改動就留著並且講清楚改在哪個分支 ——
+    子代理跑了十分鐘的結果，不能因為主代理沒接住就靜靜刪掉。
+    """
+    w = cur().agents.get(str(aid))
+    if w is None:
+        raise ValueError(f"沒有這個子代理：{aid}")
+    out = {"id": aid, "branch": w["branch"], "path": str(w["ws"]), "kept": False,
+           "changes": 0, "stat": ""}
+    try:
+        # 自己的備份目錄與巢狀 worktree 不算「子代理做的事」——
+        # 算進去的話每一份 worktree 都會回報有改動，那個訊號就沒有意義了
+        lines = [ln for ln in git_at(w["ws"], "status", "--porcelain").splitlines()
+                 if ln.strip()
+                 and not ln[3:].strip('"').startswith((BACKUP_DIR, WORKTREE_DIR))]
+    except Exception:
+        lines = []
+    if lines:
+        out["changes"] = len(lines)
+        out["stat"] = "\n".join(lines)[:2000]
+        if not force:
+            out["kept"] = True
+            cur().agents.pop(str(aid), None)
+            return out
+    try:
+        git_at(w["root"], "worktree", "remove", "--force", str(w["ws"]))
+        git_at(w["root"], "branch", "-D", w["branch"])
+    except Exception as e:
+        out["kept"] = True
+        out["error"] = str(e)
+    cur().agents.pop(str(aid), None)
+    return out
+
+
+@contextlib.contextmanager
+def as_agent(aid: str):
+    """只在**跑工具的那一段**切到子代理的 worktree。
+
+    回應裡的 todos／plan／tool_defs 仍然要是分頁自己的 —— 子代理的 Session 是新的，
+    待辦是空的，切過去不切回來會讓網頁上的待辦清單整個消失。
+    """
+    was = getattr(_CUR, "s", None)
+    try:
+        bind_agent(aid)
+        yield
+    finally:
+        _CUR.s = was
+
+
+def bind_agent(aid: str) -> None:
+    """把這個請求切到某個子代理的 worktree。
+
+    只認 Session 自己開過的 id —— 路徑是伺服器產生的，不是請求帶進來的，
+    所以網頁那端沒辦法靠這條路指到任意資料夾。
+    """
+    if not aid:
+        return
+    s = cur()
+    w = s.agents.get(str(aid))
+    if w is None:
+        raise ValueError(f"沒有這個子代理：{aid}（可能已經收掉了）")
+    sub = Session(s)                 # 繼承 write
+    sub.ws = w["ws"]
+    sub.auto = s.auto
+    sub.agents = s.agents            # 讓下一層還找得到（遞迴的深度由網頁那端管）
+    _CUR.s = sub
 
 
 # ══════════════════════ 允許規則 ══════════════════════ #
@@ -2417,6 +2602,7 @@ class Handler(BaseHTTPRequestHandler):
                         "plan": REQUIRE_PLAN, "browser": ALLOW_BROWSER,
                         "sandbox": ALLOW_SANDBOX, "sandbox_info": sandbox_state(),
                         "mcp": mcp_status(),
+                        "agents": agent_types(),
                         "stream_tools": sorted(STREAM_TOOLS),
                         # num_thread 的上限。只有 Ollama 跟這支服務同機時才算得準 ——
                         # Ollama 的 API 沒有任何一支回報主機的核心數。
@@ -2482,6 +2668,8 @@ class Handler(BaseHTTPRequestHandler):
             self._do_ls()
         elif self.path == "/skills":
             self._do_skills()
+        elif self.path == "/agent":
+            self._do_agent()
         elif self.path == "/rules":
             self._do_rules()
         elif self.path == "/restart":
@@ -2516,15 +2704,18 @@ class Handler(BaseHTTPRequestHandler):
             name = req.get("name", "")
             if name not in STREAM_TOOLS:
                 raise ValueError(f"{name} 不支援串流執行")
-            if cur().ws is None:
-                raise PermissionError("這個工具需要先設定工作區資料夾")
-            args = req.get("args") or {}
-            hit = rule_match(name, args)
-            if hit and hit["action"] == "deny":
-                raise PermissionError(
-                    f"規則擋下來了：{hit['tool']} / {hit['pattern']}"
-                    + (f"（{hit['note']}）" if hit["note"] else ""))
-            cmd, cwd, use_shell, head = build_command(name, args)
+            # 子代理有自己的 worktree 時，cwd 要跟著它 —— 這一段算完 cmd/cwd 就切回來，
+            # 後面的串流不需要（也不該）還掛在子代理的 Session 上
+            with as_agent(str(req.get("agent", ""))):
+                if cur().ws is None:
+                    raise PermissionError("這個工具需要先設定工作區資料夾")
+                args = req.get("args") or {}
+                hit = rule_match(name, args)
+                if hit and hit["action"] == "deny":
+                    raise PermissionError(
+                        f"規則擋下來了：{hit['tool']} / {hit['pattern']}"
+                        + (f"（{hit['note']}）" if hit["note"] else ""))
+                cmd, cwd, use_shell, head = build_command(name, args)
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
@@ -2798,7 +2989,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"tools": ALLOW_TOOLS, "write": cur().write, "plan": REQUIRE_PLAN,
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
                     "auto": cur().auto, "sandbox_info": sandbox_state(),
-                    "tool_defs": tool_defs(), "agent_rules": agent_rules()})
+                    "tool_defs": tool_defs(), "agent_rules": agent_rules(),
+                    "agents": agent_types()})
 
     # -- 工作區 ------------------------------------------------------ #
 
@@ -2819,6 +3011,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  工作區   {info.get('path') or '（未設定）'}")
         info["tool_defs"] = tool_defs()
         info["agent_rules"] = agent_rules()
+        info["agents"] = agent_types()      # 專案自己的 agents/ 會蓋掉內建的
         self._json(info)
 
     def _do_preview(self) -> None:
@@ -2830,11 +3023,12 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self._read_body(4 * 1024 * 1024) or b"{}")
             name = req.get("name", "")
             args = req.get("args") or {}
-            diff = preview_tool(name, args)
-            risk = command_risk(args.get("command", ""))[0] if name == "run_shell" else "ok"
-            # 只在風險指令上算一次：前端要用它決定「工作區內全自動」放不放行
-            scope = "ws" if risk == "risky" and ws_scoped(args.get("command", "")) else ""
-            hit = rule_match(name, args)
+            with as_agent(str(req.get("agent", ""))):
+                diff = preview_tool(name, args)
+                risk = command_risk(args.get("command", ""))[0] if name == "run_shell" else "ok"
+                # 只在風險指令上算一次：前端要用它決定「工作區內全自動」放不放行
+                scope = "ws" if risk == "risky" and ws_scoped(args.get("command", "")) else ""
+                hit = rule_match(name, args)
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
@@ -2882,6 +3076,27 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- 工具執行 ---------------------------------------------------- #
 
+    def _do_agent(self) -> None:
+        """開／收子代理的 worktree。只有本機能用：它會在這台機器上建資料夾。"""
+        if not ALLOW_TOOLS or not self._is_local():
+            self._json({"error": "工具未啟用"}, 403)
+            return
+        try:
+            req = json.loads(self._read_body(4096) or b"{}")
+            act = str(req.get("action", "open"))
+            if act == "open":
+                self._json(worktree_open())
+            elif act == "close":
+                self._json(worktree_close(str(req.get("id", "")), bool(req.get("force"))))
+            elif act == "list":
+                self._json({"agents": [{"id": k, "branch": v["branch"], "path": str(v["ws"])}
+                                       for k, v in cur().agents.items()],
+                            "types": agent_types()})
+            else:
+                raise ValueError(f"不認得的動作：{act}")
+        except Exception as e:
+            self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+
     def _do_tool(self) -> None:
         if not ALLOW_TOOLS:
             self._json({"error": "工具未啟用，請在右側面板打開「讓模型呼叫本機工具」。"}, 403)
@@ -2893,7 +3108,8 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self._read_body(1024 * 1024) or b"{}")
             global CURRENT_CHAT
             CURRENT_CHAT = str(req.get("chat", ""))[:64]
-            out = run_tool(req.get("name", ""), req.get("args") or {})
+            with as_agent(str(req.get("agent", ""))):
+                out = run_tool(req.get("name", ""), req.get("args") or {})
         except subprocess.TimeoutExpired:
             self._json({"error": f"執行超過 {SHELL_TIMEOUT} 秒已中止"}, 400)
             return

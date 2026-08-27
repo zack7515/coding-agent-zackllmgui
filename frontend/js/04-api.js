@@ -295,6 +295,7 @@ function applyAgentState(info) {
   S.jobs = info.jobs || [];      // 重整頁面之後背景指令還在，這裡接得回來
   S.plan = !!info.plan;
   S.mcp = info.mcp || null;
+  S.agentTypes = info.agents || [];   // 子代理型別來自 agents/*.md，不是寫死的
   if (info.stream_tools) S.streamTools = info.stream_tools;
   renderTodos();
 }

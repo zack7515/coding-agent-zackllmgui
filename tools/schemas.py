@@ -123,10 +123,12 @@ TOOL_SCHEMAS = [
                      "同一輪可以一次交辦好幾件 explore，它們會平行跑"),
      "properties": {"prompt": {"type": "string",
                                "description": "要子代理做的事，講清楚範圍與你要什麼結論"},
-                    "type": {"type": "string", "enum": ["explore", "work"],
-                             "description": ("explore（預設）只給唯讀工具，用來調查；"
-                                             "work 才給改檔案與跑指令的工具。"
-                                             "只是要答案就用 explore")}},
+                    "type": {"type": "string",
+                             "description": "要哪一種子代理；不填就是清單裡的第一種"},
+                    "resume": {"type": "string",
+                               "description": ("接續某個已經跑完的子代理（它的結論"
+                                               "最後一行會給你 id），它記得先前的過程，"
+                                               "不必把背景再講一次")}},
      "required": ["prompt"]},
     {"name": "load_skill", "needs": "skills",
      "description": ("把一份 skill 的完整步驟讀進來。系統提示裡只有名字與一行描述，"
