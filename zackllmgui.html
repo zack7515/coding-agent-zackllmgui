@@ -1968,6 +1968,37 @@ function apiUrl(path) {
   return S.host.replace(/\/+$/, '') + path;
 }
 
+/* ── 分頁身分 ───────────────────────────────────────────────────────
+   serve.py 的工作區、能不能改檔案、待辦、計畫都是**跟著分頁走**的。分頁靠這個
+   id 認回自己那一份；漏送的請求會落到「預設分頁」，而那正是原本兩個分頁互相
+   蓋掉工作區的行為 —— A 分頁的 write_file 靜靜寫進 B 的資料夾。
+   所以不在二十幾個 fetch 各補一次 header，而是包一層：新加的呼叫也不會漏。
+
+   每次載入都重新產生，不存 sessionStorage：瀏覽器的「複製分頁」會把
+   sessionStorage 一起複製，兩個分頁就會拿到同一個 id，等於沒修。
+   重新整理換一個 id 沒關係 —— 網頁本來就會在載入時把自己的工作區推回去。 */
+const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+// 只有**同源、而且是 serve.py 自己的端點**才掛 X-Tab。跨來源加自訂 header 會逼出
+// OPTIONS 預檢，Ollama 不見得接得住 —— 加錯地方的代價是整個頁面連不上。
+function isSrvUrl(url) {
+  if (!SAME_ORIGIN || String(url).indexOf(location.origin) !== 0) return false;
+  return SRV_PATHS.test(String(url).slice(location.origin.length).replace(/[?#].*$/, ''));
+}
+
+if (typeof window !== 'undefined' && window.fetch) {
+  const rawFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : ((input && input.url) || '');
+    if (!isSrvUrl(url)) return rawFetch(input, init);
+    const next = Object.assign({}, init);
+    next.headers = new Headers((init && init.headers)
+      || (typeof input !== 'string' && input ? input.headers : undefined));
+    next.headers.set('X-Tab', TAB_ID);
+    return rawFetch(input, next);
+  };
+}
+
 function friendlyError(err) {
   if (err && err.name === 'AbortError') return { msg: '（已停止）', abort: true };
   const raw = (err && err.message) || String(err);

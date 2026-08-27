@@ -77,8 +77,6 @@ SHELL_TIMEOUT = 30
 ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁上也隨時能切
 
 # ── 工作區（改檔案／跑測試用，見 plan-agent.md） ──────────────────── #
-WORKSPACE = None                   # Path；沒設定就沒有任何檔案工具
-ALLOW_WRITE = False                # 寫入類工具要再多一道開關
 BACKUP_DIR = ".zackllmgui-backup"
 # 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
 DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
@@ -96,8 +94,55 @@ AT_FILE_CAP = 3000                 # 輸入框打 @ 時最多列幾個檔案
 # 這裡三種都收，找到第一個就用。
 AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GROK.md", ".cursorrules")
 PROJECT_MD_LIMIT = 6000
-TODOS = []                         # [{"text": ..., "done": bool}]
-PLAN = {"text": "", "approved": False}
+
+
+class Session:
+    """一個瀏覽器分頁的狀態。
+
+    工作區、能不能改檔案、自動模式、待辦、計畫這五樣**不可以是全域的**——
+    兩個分頁各開一個專案時，全域一份會讓 A 分頁的 write_file 靜靜寫進 B 的
+    資料夾，連個徵兆都沒有。分頁每個請求都帶 X-Tab，這裡照它找回自己那一份。
+
+    其餘的（工具總開關、沙盒、連網、MCP、背景指令）仍然是整個行程一份：
+    那些是使用者對「這台 serve.py」授的權，不是某個分頁的工作內容。
+    """
+    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "seen")
+
+    def __init__(self, base=None):
+        self.ws = base.ws if base else None            # Path；沒設定就沒有任何檔案工具
+        self.write = base.write if base else False     # 寫入類工具要再多一道開關
+        self.auto = "off"                              # 只影響系統提示怎麼寫，不決定放不放行
+        self.todos = []                                # [{"text": ..., "done": bool}]
+        self.todo_mtime = 0.0                          # 上次自己寫進去的時間戳，用來分辨「誰改的」
+        self.plan = {"text": "", "approved": False}
+        self.seen = time.time()
+
+
+SESSIONS = {"": Session()}         # "" 是預設分頁：命令列 --workspace 設的就是它
+SESSIONS_MAX = 32                  # 分頁關掉不會通知伺服器，滿了就丟最久沒動的
+SESSIONS_LOCK = threading.Lock()
+_CUR = threading.local()
+
+
+def cur() -> "Session":
+    """這個請求屬於哪個分頁。沒帶 X-Tab（測試、curl）就是預設那一份。"""
+    return getattr(_CUR, "s", None) or SESSIONS[""]
+
+
+def session_for(tab: str) -> "Session":
+    tab = str(tab or "")[:64]
+    if not tab:
+        return SESSIONS[""]
+    with SESSIONS_LOCK:
+        s = SESSIONS.get(tab)
+        if s is None:
+            # 新分頁承接命令列給的工作區，否則 --workspace 開起來的分頁會是空的
+            s = SESSIONS[tab] = Session(SESSIONS[""])
+            if len(SESSIONS) > SESSIONS_MAX:
+                del SESSIONS[min(((v.seen, k) for k, v in SESSIONS.items() if k))[1]]
+        s.seen = time.time()
+        return s
+
 REQUIRE_PLAN = False               # 開了就要先送計畫、人核准之後才給寫入工具
 TRUST_REMOTE = False               # --trust-remote：非本機的瀏覽器也能開工具與設工作區
 # 連網瀏覽（搜尋 + 開頁 + 跟連結走）。預設關著：它會讓模型主動連出去，
@@ -113,7 +158,6 @@ ALLOW_BROWSER = False
 # 系統提示怎麼寫：原本一律寫「每一次呼叫都會先讓使用者確認，所以一次只叫一個
 # 工具」，那句話在自動模式下是假的，而且直接讓讀三個檔變成三輪。
 AUTO_MODES = ("off", "read", "edit", "full", "ws")
-AUTO_MODE = "off"
 ALLOW_SANDBOX = False
 
 SANDBOX_BACKEND = ""               # 空的＝照 sandbox/ 的偏好順序自己挑
@@ -286,9 +330,9 @@ def restart_self() -> None:
 
 
 def ws_root() -> Path:
-    if WORKSPACE is None:
+    if cur().ws is None:
         raise RuntimeError("還沒設定工作區資料夾（介面：設定 → 工作區）")
-    return WORKSPACE
+    return cur().ws
 
 
 def ws_path(rel: str, must_exist: bool = False) -> Path:
@@ -348,10 +392,10 @@ def detect_python() -> list:
 
 def project_md() -> tuple:
     """工作區根目錄的專案說明。回傳 (檔名, 內容)，沒有就是 ("", "")。"""
-    if WORKSPACE is None:
+    if cur().ws is None:
         return ("", "")
     for name in AGENT_FILES:
-        f = WORKSPACE / name
+        f = cur().ws / name
         if f.is_file():
             text = f.read_text("utf-8", errors="replace").strip()
             if len(text) > PROJECT_MD_LIMIT:
@@ -360,32 +404,30 @@ def project_md() -> tuple:
     return ("", "")
 
 
-TODO_MTIME = 0.0                   # 上一次自己寫進去的時間戳，用來分辨「誰改的」
 TODO_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s*\[([ xX])\]\s*(.+?)\s*$")
 
 
 def todo_file() -> Path | None:
-    return None if WORKSPACE is None else ws_root() / TODO_FILE
+    return None if cur().ws is None else ws_root() / TODO_FILE
 
 
 def write_todo_file() -> None:
     """把待辦寫成工作區裡的一份 markdown。寫失敗不算錯 —— 這只是個鏡像。"""
-    global TODO_MTIME
     f = todo_file()
     if f is None:
         return
     try:
-        if not TODOS:
+        if not cur().todos:
             if f.exists():
                 f.unlink()
-            TODO_MTIME = 0.0
+            cur().todo_mtime = 0.0
             return
         body = ("# 待辦（跑的時候可以直接改這個檔，改完存檔，下一輪就會同步進去）\n\n"
                 + render_todos(sync=False) + "\n")
         f.write_text(body, "utf-8")
-        TODO_MTIME = f.stat().st_mtime
+        cur().todo_mtime = f.stat().st_mtime
     except Exception:
-        TODO_MTIME = 0.0
+        cur().todo_mtime = 0.0
 
 
 def sync_todo_file() -> str:
@@ -395,17 +437,16 @@ def sync_todo_file() -> str:
     只認 [x]／[ ] 與文字，相依關係靠文字比對接回去 ——
     使用者手打的行本來就不會帶編號，硬解析只會解出一堆垃圾。
     """
-    global TODOS, TODO_MTIME
     f = todo_file()
-    if f is None or not TODOS:
+    if f is None or not cur().todos:
         return ""
     try:
-        if not f.exists() or abs(f.stat().st_mtime - TODO_MTIME) < 0.001:
+        if not f.exists() or abs(f.stat().st_mtime - cur().todo_mtime) < 0.001:
             return ""
         lines = f.read_text("utf-8", errors="replace").splitlines()
     except Exception:
         return ""
-    was = {t["text"]: t.get("blocked_by", []) for t in TODOS}
+    was = {t["text"]: t.get("blocked_by", []) for t in cur().todos}
     fresh = []
     for ln in lines:
         m = TODO_LINE.match(ln)
@@ -415,12 +456,12 @@ def sync_todo_file() -> str:
         if text:
             fresh.append({"text": text, "done": m.group(1).lower() == "x",
                           "blocked_by": [n for n in was.get(text, []) if n <= len(fresh)]})
-    if not fresh or fresh == TODOS:
-        TODO_MTIME = f.stat().st_mtime
+    if not fresh or fresh == cur().todos:
+        cur().todo_mtime = f.stat().st_mtime
         return ""
-    TODOS = fresh[:20]
+    cur().todos = fresh[:20]
     write_todo_file()          # 重新編號之後寫回去，檔案跟清單才是同一份
-    left = sum(1 for t in TODOS if not t["done"])
+    left = sum(1 for t in cur().todos if not t["done"])
     return (f"[待辦清單] 使用者剛剛手動改了 {TODO_FILE}，這是現在的版本（還剩 {left} 項）："
             f"\n{render_todos(sync=False)}\n照這份做，不要用你記得的舊版本。")
 
@@ -428,14 +469,14 @@ def sync_todo_file() -> str:
 def render_todos(sync: bool = True) -> str:
     if sync:
         sync_todo_file()
-    if not TODOS:
+    if not cur().todos:
         return "（清單是空的）"
     out = []
-    for i, t in enumerate(TODOS, start=1):
+    for i, t in enumerate(cur().todos, start=1):
         # 編號要給模型看得到，不然它下一次沒辦法用 blocked_by 指回來
         line = f"{i}. " + ("[x] " if t["done"] else "[ ] ") + t["text"]
         blocked = [n for n in t.get("blocked_by", [])
-                   if 1 <= n <= len(TODOS) and not TODOS[n - 1]["done"]]
+                   if 1 <= n <= len(cur().todos) and not cur().todos[n - 1]["done"]]
         if blocked:
             line += "（要等 " + "、".join("#" + str(n) for n in blocked) + "）"
         out.append(line)
@@ -443,9 +484,9 @@ def render_todos(sync: bool = True) -> str:
 
 
 def workspace_info() -> dict:
-    if WORKSPACE is None:
+    if cur().ws is None:
         return {"path": "", "write": False}
-    root = WORKSPACE.resolve()
+    root = cur().ws.resolve()
     files = 0
     for _ in ws_walk():
         files += 1
@@ -457,7 +498,7 @@ def workspace_info() -> dict:
         "git": (root / ".git").exists(),
         "python": " ".join(detect_python()),
         "files": files,
-        "write": ALLOW_WRITE,
+        "write": cur().write,
         "project_md": name,
         "git_state": git_state(),
     }
@@ -531,9 +572,8 @@ def list_entries(rel: str = "") -> list:
 
 
 def set_workspace(path: str) -> dict:
-    global WORKSPACE
     if not str(path or "").strip():
-        WORKSPACE = None
+        cur().ws = None
         return workspace_info()
     p = Path(path).expanduser().resolve()
     if not p.is_dir():
@@ -541,7 +581,7 @@ def set_workspace(path: str) -> dict:
     if p == Path.home().resolve() or p == Path(p.anchor):
         # 整個家目錄或磁碟根目錄當工作區等於沒有邊界
         raise PermissionError("請指定專案資料夾，不要用家目錄或根目錄")
-    WORKSPACE = p
+    cur().ws = p
     return workspace_info()
 
 
@@ -1062,7 +1102,7 @@ def ws_scoped(command: str) -> bool:
     # pip install、`a && b` 這種原本掃不動的寫法在沙盒裡也不用問。
     if ALLOW_SANDBOX:
         return True
-    if WORKSPACE is None or CHAINED.search(cmd):
+    if cur().ws is None or CHAINED.search(cmd):
         return False
     for pattern, why, *rest in RISKY_CMDS:
         if re.search(pattern, cmd, re.I):
@@ -1381,7 +1421,7 @@ def build_command(name: str, args: dict):
             # cwd 一樣是工作區，指令本身一個字都不用改。
             return (sandbox.wrap(command, ws_root(), backend=SANDBOX_BACKEND),
                     str(ws_root()), False, f"$ {command}")
-        return command, (str(WORKSPACE) if WORKSPACE else None), True, f"$ {command}"
+        return command, (str(cur().ws) if cur().ws else None), True, f"$ {command}"
     if name == "run_tests":
         if ALLOW_SANDBOX:
             line = sandbox_python() + " -m pytest -q --color=no"
@@ -1515,7 +1555,7 @@ def agent_rules() -> str:
     """
     if not ALLOW_TOOLS:
         return ""
-    if AUTO_MODE == "off":
+    if cur().auto == "off":
         r = ["你可以呼叫工具。每一次呼叫都會先讓使用者確認，所以：",
              "- 一次只呼叫一個工具，看到結果再決定下一步。"]
     else:
@@ -1526,12 +1566,12 @@ def agent_rules() -> str:
              "- 讀檔、搜尋、列目錄這種唯讀的呼叫，同一輪可以一次送好幾個，"
              "不要一輪讀一個檔；改檔案與跑指令一次一個，看到結果再決定下一步。"]
     r += ["- 工具失敗時先讀懂錯誤訊息，不要用一模一樣的參數重試。"]
-    if WORKSPACE is not None:
-        r += [f"- 工作區是 {WORKSPACE}，所有路徑都相對於它，不要用絕對路徑或 ..。",
+    if cur().ws is not None:
+        r += [f"- 工作區是 {cur().ws}，所有路徑都相對於它，不要用絕對路徑或 ..。",
               "- 找東西先用 search_files 或 list_dir 定位，再用 read_file 讀那一段；"
               "不要整個檔案讀進來。",
               "- read_file 每行開頭的「行號→」是為了讓你引用位置，不是檔案內容。"]
-    if ALLOW_WRITE:
+    if cur().write:
         r += ["- 修改既有檔案一律用 edit_file：old 要與檔案內容完全一致（含縮排），"
               "並帶足前後文讓它在檔案裡唯一；write_file 只用來建立新檔案。",
               "- 同一個檔案要改好幾處時用 edits 一次送完，不要一輪改一處。",
@@ -1539,7 +1579,7 @@ def agent_rules() -> str:
               "delete_file 會先備份、還原得回來，rm 不會。",
               "- 一次做完一件事就用 run_tests 驗證，不要改一整輪才驗。",
               "- 測試失敗時修的是程式，不是測試。真的認為測試寫錯，先說出來讓使用者決定。"]
-    if WORKSPACE is not None:
+    if cur().ws is not None:
         r.append("- 缺套件時用 setup_env 裝進工作區的 .venv，不要用 run_shell 下 pip install。")
     if ALLOW_SANDBOX:
         r.append("- run_shell 與 run_tests 在容器裡跑：只看得到工作區、**沒有網路**。"
@@ -1550,7 +1590,7 @@ def agent_rules() -> str:
     if len(TOOL_SCHEMAS) and ALLOW_TOOLS:
         r.append("- 多步驟的工作先用 todo_write 列出待辦，每完成一項就整份重送並標成完成。")
         r.append("- 需要使用者決定的事用 ask_user_question 問，不要自己猜。")
-    if REQUIRE_PLAN and not PLAN["approved"]:
+    if REQUIRE_PLAN and not cur().plan["approved"]:
         r.append("- 目前是計畫模式：先用 submit_plan 送出計畫，"
                  "使用者核准之前不會有修改檔案的工具可用。")
     r.append("- 做完後用三到五行說明你改了什麼、驗證結果如何，不要複述工具輸出。")
@@ -1574,9 +1614,9 @@ def tool_defs() -> list:
     沒開放的工具不會出現在清單裡 —— 不是讓模型呼叫了再拒絕。小模型看到工具就會想用。
     """
     out = []
-    plan_ok = PLAN["approved"] or not REQUIRE_PLAN
+    plan_ok = cur().plan["approved"] or not REQUIRE_PLAN
     for t in TOOL_SCHEMAS:
-        if t["needs"] == "ws" and WORKSPACE is None:
+        if t["needs"] == "ws" and cur().ws is None:
             continue
         if t["needs"] == "plan" and not REQUIRE_PLAN:
             continue
@@ -1584,7 +1624,7 @@ def tool_defs() -> list:
             continue
         if t["needs"] == "skills" and not skills_list():
             continue
-        if t["needs"] == "write" and (WORKSPACE is None or not ALLOW_WRITE or not plan_ok):
+        if t["needs"] == "write" and (cur().ws is None or not cur().write or not plan_ok):
             continue
         out.append({"type": "function", "function": {
             "name": t["name"], "description": t["description"],
@@ -1599,7 +1639,6 @@ def _tool_todo_write(items) -> str:
     Claude Code 與 grok-build 都有這個工具，理由一樣：跑十幾輪之後，
     模型會忘記最初的目標。把清單寫出來、每輪重看一次，它才記得自己在做什麼。
     """
-    global TODOS
     if isinstance(items, str):
         items = [line.strip("-* ") for line in items.splitlines() if line.strip()]
     if not isinstance(items, list):
@@ -1631,19 +1670,18 @@ def _tool_todo_write(items) -> str:
     # 互相等待的清單，那種清單畫面上會顯示成「全部都被擋住」，看起來像壞掉。
     for i, t in enumerate(fresh, start=1):
         t["blocked_by"] = sorted(set(n for n in t["blocked_by"] if n < i))
-    TODOS = fresh
+    cur().todos = fresh
     write_todo_file()          # 同步那份 markdown，使用者才改得到
-    left = sum(1 for t in TODOS if not t["done"])
+    left = sum(1 for t in cur().todos if not t["done"])
     return f"待辦清單已更新（還剩 {left} 項）：\n{render_todos(sync=False)}"
 
 
 def _tool_submit_plan(plan: str) -> str:
     """先講計畫、人核准了才動手。核准的動作在網頁上，不在這裡。"""
-    global PLAN
     text = str(plan or "").strip()
     if not text:
         raise ValueError("plan 是空的")
-    PLAN = {"text": text[:8000], "approved": True}   # 網頁按下「核准」才會送到這裡
+    cur().plan = {"text": text[:8000], "approved": True}   # 網頁按下「核准」才會送到這裡
     return "計畫已核准，可以開始執行。動手前再確認一次每一步都在計畫裡。"
 
 
@@ -1676,8 +1714,8 @@ WS_TOOLS = {"read_file", "list_dir", "search_files", "run_shell", "run_tests",
 
 def mcp_config_path() -> Path:
     """設定檔位置：工作區優先，其次是 serve.py 旁邊。"""
-    if WORKSPACE is not None and (WORKSPACE / MCP_CONFIG).is_file():
-        return WORKSPACE / MCP_CONFIG
+    if cur().ws is not None and (cur().ws / MCP_CONFIG).is_file():
+        return cur().ws / MCP_CONFIG
     return HERE / MCP_CONFIG
 
 
@@ -1720,7 +1758,7 @@ def mcp_start(name: str, spec: dict) -> None:
     proc = subprocess.Popen(
         [spec["command"]] + list(spec.get("args") or []),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        cwd=str(WORKSPACE) if WORKSPACE else None,
+        cwd=str(cur().ws) if cur().ws else None,
         env={**os.environ, **(spec.get("env") or {})},
         text=True, encoding="utf-8", bufsize=1)
     MCP[name] = {"proc": proc, "tools": [], "lock": threading.Lock(), "id": 0, "error": ""}
@@ -1811,7 +1849,7 @@ def git_run(*a, timeout: int = 60):
 
 def git_state() -> dict:
     """工作區的 git 狀態。不是 repo 就回 {"repo": False}。"""
-    if WORKSPACE is None or not (WORKSPACE / ".git").exists():
+    if cur().ws is None or not (cur().ws / ".git").exists():
         return {"repo": False}
     try:
         branch = git_run("rev-parse", "--abbrev-ref", "HEAD").stdout.decode("utf-8", "replace").strip()
@@ -1826,7 +1864,7 @@ def git_state() -> dict:
 
 def git_action(action: str, message: str = "") -> dict:
     """commit：全部加進去再 commit。discard：改成 stash，丟掉的東西還救得回來。"""
-    if WORKSPACE is None or not (WORKSPACE / ".git").exists():
+    if cur().ws is None or not (cur().ws / ".git").exists():
         raise ValueError("工作區不是 git repo")
     if action == "status":
         return git_state()
@@ -1863,8 +1901,8 @@ def skills_roots() -> list:
     內建那六份會全部從清單上消失（踩過）。
     """
     roots = [HERE / SKILLS_DIR]
-    if WORKSPACE is not None:
-        ws = WORKSPACE / SKILLS_DIR
+    if cur().ws is not None:
+        ws = cur().ws / SKILLS_DIR
         if ws.is_dir() and ws.resolve() != (HERE / SKILLS_DIR).resolve():
             roots.append(ws)
     return [r for r in roots if r.is_dir()]
@@ -1940,8 +1978,8 @@ def rules_files() -> list:
     全域那份就整個消失 —— 使用者加了一條專案規則，結果全域的 deny 全部失效。
     """
     out = []
-    if WORKSPACE is not None:
-        out.append(("專案", WORKSPACE / RULES_FILE))
+    if cur().ws is not None:
+        out.append(("專案", cur().ws / RULES_FILE))
     here = HERE / RULES_FILE
     if not out or out[0][1].resolve() != here.resolve():
         out.append(("全域", here))
@@ -2144,9 +2182,9 @@ def run_tool(name: str, args: dict) -> str:
         raise ValueError(f"沒有這個工具：{name}")
     if not isinstance(args, dict):
         raise ValueError("args 必須是物件")
-    if name in WS_TOOLS and WORKSPACE is None:
+    if name in WS_TOOLS and cur().ws is None:
         raise PermissionError("這個工具需要先設定工作區資料夾")
-    if name in WRITE_TOOLS and not ALLOW_WRITE:
+    if name in WRITE_TOOLS and not cur().write:
         raise PermissionError("檔案修改沒有開啟（介面：功能與工具 → 修改檔案）")
     # deny 規則在伺服器這一端擋。只在瀏覽器擋的話，那不是邊界是提醒。
     hit = rule_match(name, args)
@@ -2185,6 +2223,14 @@ class Handler(BaseHTTPRequestHandler):
         # 只在出事時說話，正常請求不洗畫面
         if not str(args[1] if len(args) > 1 else "").startswith("2"):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def parse_request(self) -> bool:
+        # 掛在這裡而不是每支 do_* 開頭：headers 解析完、do_* 還沒跑，而且只有一處
+        # 會漏。keep-alive 同一條連線來的第二個請求也會重新跑，所以綁定不會殘留。
+        ok = super().parse_request()
+        if ok:
+            _CUR.s = session_for(self.headers.get("X-Tab", ""))
+        return ok
 
     # -- 回應工具 ---------------------------------------------------- #
 
@@ -2367,7 +2413,7 @@ class Handler(BaseHTTPRequestHandler):
                         "workspace": workspace_info(),
                         "tool_defs": tool_defs(),
                         "agent_rules": agent_rules(),
-                        "todos": TODOS, "jobs": jobs_state(),
+                        "todos": cur().todos, "jobs": jobs_state(),
                         "plan": REQUIRE_PLAN, "browser": ALLOW_BROWSER,
                         "sandbox": ALLOW_SANDBOX, "sandbox_info": sandbox_state(),
                         "mcp": mcp_status(),
@@ -2470,7 +2516,7 @@ class Handler(BaseHTTPRequestHandler):
             name = req.get("name", "")
             if name not in STREAM_TOOLS:
                 raise ValueError(f"{name} 不支援串流執行")
-            if WORKSPACE is None:
+            if cur().ws is None:
                 raise PermissionError("這個工具需要先設定工作區資料夾")
             args = req.get("args") or {}
             hit = rule_match(name, args)
@@ -2558,7 +2604,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(8192) or b"{}")
-            if WORKSPACE is None:
+            if cur().ws is None:
                 raise PermissionError("還沒設定工作區")
             rel = req.get("path", "") if isinstance(req, dict) else ""
             # flat：輸入框打 @ 要挑檔案，那需要一份平的清單而不是一層一層點。
@@ -2586,7 +2632,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("body 要是物件")
             action = req.get("action", "list")
             if action == "add":
-                scope = "專案" if WORKSPACE is not None else "全域"
+                scope = "專案" if cur().ws is not None else "全域"
                 r = {"tool": str(req.get("tool", "*")) or "*",
                      "pattern": str(req.get("pattern", "*")) or "*",
                      "action": str(req.get("rule", "allow")).lower(),
@@ -2644,7 +2690,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(8192) or b"{}")
-            if WORKSPACE is None:
+            if cur().ws is None:
                 self._json({"entries": []})
                 return
             chat = req.get("chat", "") if isinstance(req, dict) else ""
@@ -2661,7 +2707,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self._read_body(8192) or b"{}")
             if not isinstance(req, dict) or not req.get("id"):
                 raise ValueError("要指定還原點 id")
-            if WORKSPACE is None:
+            if cur().ws is None:
                 raise PermissionError("還沒設定工作區")
             self._json(rewind_to(req["id"]))
         except Exception as e:
@@ -2721,11 +2767,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 400)
             return
-        global ALLOW_WRITE
         if "enabled" in req:
             ALLOW_TOOLS = bool(req.get("enabled"))
         if "write" in req:
-            ALLOW_WRITE = bool(req.get("write")) and WORKSPACE is not None
+            cur().write = bool(req.get("write")) and cur().ws is not None
         if "browser" in req:
             global ALLOW_BROWSER
             ALLOW_BROWSER = bool(req.get("browser"))
@@ -2739,36 +2784,34 @@ class Handler(BaseHTTPRequestHandler):
                 SANDBOX_BACKEND = str(req.get("backend", "") or SANDBOX_BACKEND)
             ALLOW_SANDBOX = want
         if "auto" in req:
-            global AUTO_MODE
             want = str(req.get("auto") or "off")
             if want not in AUTO_MODES:
                 self._json({"error": f"不認得的自動模式：{want}"}, 400)
                 return
-            AUTO_MODE = want
+            cur().auto = want
         if "plan" in req:
             global REQUIRE_PLAN
             REQUIRE_PLAN = bool(req.get("plan"))
-            PLAN["approved"] = not REQUIRE_PLAN
+            cur().plan["approved"] = not REQUIRE_PLAN
         print(f"  工具     {'已啟用' if ALLOW_TOOLS else '已關閉'}"
-              f"{'，可修改檔案' if ALLOW_WRITE else ''}（由網頁切換）")
-        self._json({"tools": ALLOW_TOOLS, "write": ALLOW_WRITE, "plan": REQUIRE_PLAN,
+              f"{'，可修改檔案' if cur().write else ''}（由網頁切換）")
+        self._json({"tools": ALLOW_TOOLS, "write": cur().write, "plan": REQUIRE_PLAN,
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
-                    "auto": AUTO_MODE, "sandbox_info": sandbox_state(),
+                    "auto": cur().auto, "sandbox_info": sandbox_state(),
                     "tool_defs": tool_defs(), "agent_rules": agent_rules()})
 
     # -- 工作區 ------------------------------------------------------ #
 
     def _do_workspace(self) -> None:
         """設定 / 查詢工作區。只有本機能改：工具會在這台機器上動檔案。"""
-        global ALLOW_WRITE
         if not self._is_local():
             self._json({"error": "只有本機可以設定工作區。"}, 403)
             return
         try:
             req = json.loads(self._read_body(8192) or b"{}")
             info = set_workspace(req.get("path", ""))
-            if WORKSPACE is None:
-                ALLOW_WRITE = False
+            if cur().ws is None:
+                cur().write = False
                 info = workspace_info()
         except Exception as e:
             self._json({"error": str(e)}, 400)
@@ -2857,7 +2900,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
-        self._json({"result": out, "todos": TODOS, "plan": PLAN,
+        self._json({"result": out, "todos": cur().todos, "plan": cur().plan,
                     "jobs": jobs_state(), "tool_defs": tool_defs()})
 
     def do_DELETE(self):
@@ -2902,7 +2945,7 @@ def main() -> int:
                              "預設關，網頁上隨時能開。")
     args = parser.parse_args()
 
-    global ALLOW_TOOLS, ALLOW_WRITE, TRUST_REMOTE, ALLOW_SANDBOX, SANDBOX_BACKEND
+    global ALLOW_TOOLS, TRUST_REMOTE, ALLOW_SANDBOX, SANDBOX_BACKEND
     ALLOW_TOOLS = not args.no_tools
     if args.sandbox:
         want = "" if args.sandbox == "auto" else args.sandbox
@@ -2917,7 +2960,7 @@ def main() -> int:
     # 家目錄或根目錄會被 set_workspace 擋掉，那就留空讓使用者自己在網頁上選。
     try:
         set_workspace(args.workspace or os.getcwd())
-        ALLOW_WRITE = args.allow_write
+        cur().write = args.allow_write
     except Exception as e:
         if args.workspace:
             print(f"工作區設定失敗：{e}", file=sys.stderr)
@@ -2947,8 +2990,8 @@ def main() -> int:
         print("  已綁定 0.0.0.0，同網段的其他裝置也能開這個網址")
     print("  工具     " + ("已啟用（預設）" if ALLOW_TOOLS else "已關閉（--no-tools）") +
           "，只接受本機請求，每次執行前網頁都會先問你")
-    if WORKSPACE:
-        print(f"  工作區   {WORKSPACE}" + ("（可修改檔案）" if ALLOW_WRITE else "（唯讀）"))
+    if cur().ws:
+        print(f"  工作區   {cur().ws}" + ("（可修改檔案）" if cur().write else "（唯讀）"))
     if TRUST_REMOTE:
         print("  注意     --trust-remote：連得到這個網頁的人都能在這台機器上執行指令")
     try:

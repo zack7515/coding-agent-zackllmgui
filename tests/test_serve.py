@@ -39,8 +39,9 @@ def post(url, data, headers=None):
         return e.code, json.loads(e.read())
 
 
-def get(url):
-    with urllib.request.urlopen(url, timeout=10) as res:
+def get(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=10) as res:
         return res.status, json.loads(res.read())
 
 
@@ -114,7 +115,7 @@ def test_tool_gate_and_run():
         assert body["text"] == "哈囉\nworld", body
     finally:
         serve.ALLOW_TOOLS = False
-        serve.WORKSPACE = None
+        serve.cur().ws = None
         server.shutdown()
         server.server_close()
 
@@ -144,7 +145,7 @@ def test_tools_toggle_over_http():
         assert code == 403, (code, body)
     finally:
         serve.ALLOW_TOOLS = False
-        serve.WORKSPACE = None
+        serve.cur().ws = None
         server.shutdown()
         server.server_close()
 
@@ -213,7 +214,7 @@ def test_tool_output_truncated():
     out = serve.run_tool("run_shell", {"command": "printf 'x%.0s' $(seq 1 20000)"})
     assert len(out) < serve.TOOL_OUTPUT_LIMIT + 200 and "已截斷" in out
     serve.ALLOW_TOOLS = False
-    serve.WORKSPACE = None
+    serve.cur().ws = None
 
 
 # ══════════════════════ 工作區 ══════════════════════ #
@@ -232,13 +233,13 @@ class Workspace:
         (self.dir / ".git" / "config").write_text("[core]\n", encoding="utf-8")
         serve.set_workspace(str(self.dir))
         serve.ALLOW_TOOLS = True
-        serve.ALLOW_WRITE = True
+        serve.cur().write = True
         return self.dir
 
     def __exit__(self, *a):
-        serve.WORKSPACE = None
+        serve.cur().ws = None
         serve.ALLOW_TOOLS = False
-        serve.ALLOW_WRITE = False
+        serve.cur().write = False
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -319,20 +320,20 @@ def test_edit_and_backup():
 
 def test_tool_defs_layers():
     """工具要依「有沒有工作區／有沒有開放修改」逐級開放，沒開放的不能出現在定義裡。"""
-    serve.WORKSPACE = None
-    serve.ALLOW_WRITE = False
+    serve.cur().ws = None
+    serve.cur().write = False
     serve.REQUIRE_PLAN = False
     names = [t["function"]["name"] for t in serve.tool_defs()]
     # 不需要檔案系統的永遠在（load_skill 只要有 skills 資料夾就算）
     assert names == ["fetch_url", "todo_write", "ask_user_question", "load_skill"], names
 
     with Workspace():
-        serve.ALLOW_WRITE = False
+        serve.cur().write = False
         ro = [t["function"]["name"] for t in serve.tool_defs()]
         assert "read_file" in ro and "run_tests" in ro
         assert "write_file" not in ro and "edit_file" not in ro, ro
 
-        serve.ALLOW_WRITE = True
+        serve.cur().write = True
         rw = [t["function"]["name"] for t in serve.tool_defs()]
         assert "write_file" in rw and "edit_file" in rw
         # 每支工具都要有描述與參數，否則模型會亂帶
@@ -348,16 +349,16 @@ def test_todo_write():
     assert "還剩 1 項" in out, out
     # 整份重送會取代舊的，不是累加
     serve.run_tool("todo_write", {"items": ["只剩這一項"]})
-    assert len(serve.TODOS) == 1 and serve.TODOS[0]["text"] == "只剩這一項"
-    serve.TODOS.clear()
+    assert len(serve.cur().todos) == 1 and serve.cur().todos[0]["text"] == "只剩這一項"
+    serve.cur().todos.clear()
 
 
 def test_plan_gate():
     """計畫模式：核准之前不給修改檔案的工具。"""
     with Workspace():
-        serve.ALLOW_WRITE = True
+        serve.cur().write = True
         serve.REQUIRE_PLAN = True
-        serve.PLAN["approved"] = False
+        serve.cur().plan["approved"] = False
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "submit_plan" in names, names
         assert "edit_file" not in names and "write_file" not in names, names
@@ -366,7 +367,7 @@ def test_plan_gate():
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "edit_file" in names, names
         serve.REQUIRE_PLAN = False
-        serve.PLAN["approved"] = False
+        serve.cur().plan["approved"] = False
 
 
 def test_project_md():
@@ -587,15 +588,15 @@ def test_agent_rules_follow_auto_mode():
     那句話是假的（沒有人在按），而且它帶著的「一次只呼叫一個工具」直接把
     「讀三個檔」變成三輪 —— 每一輪都要重新吃一次整份 context。
     """
-    was_tools, was_auto = serve.ALLOW_TOOLS, serve.AUTO_MODE
+    was_tools, was_auto = serve.ALLOW_TOOLS, serve.cur().auto
     try:
         serve.ALLOW_TOOLS = True
-        serve.AUTO_MODE = "off"
+        serve.cur().auto = "off"
         off = serve.agent_rules()
         assert "每一次呼叫都會先讓使用者確認" in off
         assert "一次只呼叫一個工具" in off
         for mode in ("read", "edit", "full", "ws"):
-            serve.AUTO_MODE = mode
+            serve.cur().auto = mode
             auto = serve.agent_rules()
             assert "每一次呼叫都會先讓使用者確認" not in auto, mode
             assert "一次只呼叫一個工具" not in auto, mode
@@ -604,15 +605,15 @@ def test_agent_rules_follow_auto_mode():
             assert "改檔案與跑指令一次一個" in auto, mode
         # 兩種寫法共用的規則不能因此掉了
         for mode in ("off", "ws"):
-            serve.AUTO_MODE = mode
+            serve.cur().auto = mode
             assert "不要用一模一樣的參數重試" in serve.agent_rules(), mode
     finally:
-        serve.ALLOW_TOOLS, serve.AUTO_MODE = was_tools, was_auto
+        serve.ALLOW_TOOLS, serve.cur().auto = was_tools, was_auto
 
 
 def test_auto_mode_over_http():
     """/tools 收得到自動模式，而且不認得的值要擋下來。"""
-    was_auto, was_tools = serve.AUTO_MODE, serve.ALLOW_TOOLS
+    was_auto, was_tools = serve.cur().auto, serve.ALLOW_TOOLS
     serve.ALLOW_TOOLS = True
     server = serve.build_server("http://localhost:11434", "127.0.0.1", 8798)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -625,10 +626,10 @@ def test_auto_mode_over_http():
 
         code, body = post(base + "/tools", json.dumps({"auto": "全開"}).encode())
         assert code == 400, (code, body)
-        assert serve.AUTO_MODE == "ws", "擋下來之後不能把狀態改掉"
+        assert serve.cur().auto == "ws", "擋下來之後不能把狀態改掉"
     finally:
         server.shutdown()
-        serve.AUTO_MODE, serve.ALLOW_TOOLS = was_auto, was_tools
+        serve.cur().auto, serve.ALLOW_TOOLS = was_auto, was_tools
 
 
 def test_ws_scoped_with_sandbox():
@@ -687,7 +688,7 @@ def test_tools_toggle_rejects_non_object():
 def test_write_gate():
     """工具開著、但沒開檔案修改時，寫入類工具必須拒絕。"""
     with Workspace():
-        serve.ALLOW_WRITE = False
+        serve.cur().write = False
         try:
             serve.run_tool("write_file", {"path": "x.txt", "content": "1"})
             raise AssertionError("沒開修改卻寫得進去")
@@ -1131,7 +1132,7 @@ def test_journal_per_chat():
     「其中幾筆是別的對話」。
     """
     with Workspace() as ws:
-        serve.ALLOW_WRITE = True
+        serve.cur().write = True
         target = ws / "pkg" / "calc.py"
 
         # 三次改動故意在同一秒內完成：備份的時間戳只到秒，這是會撞的
@@ -1273,7 +1274,7 @@ def test_rules_allow_deny():
     只在瀏覽器擋的話，那不是邊界，是提醒。
     """
     with Workspace() as ws:
-        serve.ALLOW_WRITE = True
+        serve.cur().write = True
         (ws / "secrets").mkdir()
         (ws / "secrets" / "prod.txt").write_text("token=abc\n", encoding="utf-8")
         (ws / RULES).write_text(json.dumps({"rules": [
@@ -1349,7 +1350,7 @@ def test_edit_error_says_which_kind_of_failure():
     是**錯誤訊息分得出是哪一種**。
     """
     with Workspace() as ws:
-        serve.ALLOW_TOOLS = serve.ALLOW_WRITE = True
+        serve.ALLOW_TOOLS = serve.cur().write = True
         serve.READ_STATE.clear()
         try:
             f = ws / "a.py"
@@ -1406,7 +1407,7 @@ def test_edit_error_says_which_kind_of_failure():
             except ValueError as e:
                 assert "行號→" in str(e), e
         finally:
-            serve.ALLOW_TOOLS = serve.ALLOW_WRITE = False
+            serve.ALLOW_TOOLS = serve.cur().write = False
 
 
 def test_source_stamp_notices_edits():
@@ -1446,7 +1447,7 @@ def test_todo_dependencies():
         {"text": "跑測試", "blocked_by": [2, "#1"]},          # 字串型的 #1 也要收
         {"text": "亂指", "blocked_by": [4, 99, "abc", -3]},   # 自己、超界、非數字全部丟掉
     ])
-    got = [t["blocked_by"] for t in serve.TODOS]
+    got = [t["blocked_by"] for t in serve.cur().todos]
     assert got == [[], [1], [1, 2], []], got
 
     out = serve.render_todos()
@@ -1476,7 +1477,7 @@ def test_lint_after_write():
     知道它存在的人用得到。
     """
     with Workspace() as ws:
-        serve.ALLOW_TOOLS = serve.ALLOW_WRITE = True
+        serve.ALLOW_TOOLS = serve.cur().write = True
         try:
             # 語法壞掉的 .py：ruff 沒裝也要抓得到，因為退回去用標準函式庫的 ast
             out = serve.run_tool("write_file", {"path": "broken.py",
@@ -1499,7 +1500,7 @@ def test_lint_after_write():
                                                "old": "x = 1", "new": "x = ("})
             assert "語法" in out or "ruff" in out, out
         finally:
-            serve.ALLOW_TOOLS = serve.ALLOW_WRITE = False
+            serve.ALLOW_TOOLS = serve.cur().write = False
 
 
 def test_lint_output_has_no_absolute_paths():
@@ -1517,7 +1518,7 @@ def test_lint_output_has_no_absolute_paths():
             json.dumps({"parserOptions": {"ecmaVersion": 2018},
                         "rules": {"no-unused-vars": "error", "no-undef": "off"}}),
             encoding="utf-8")
-        serve.ALLOW_TOOLS = serve.ALLOW_WRITE = True
+        serve.ALLOW_TOOLS = serve.cur().write = True
         try:
             out = serve.run_tool("write_file", {"path": "a.js",
                                                 "content": "var unused = 1;\n"})
@@ -1525,7 +1526,7 @@ def test_lint_output_has_no_absolute_paths():
             assert str(ws) not in out, f"輸出裡有絕對路徑：{out}"
             assert "a.js" in out, out
         finally:
-            serve.ALLOW_TOOLS = serve.ALLOW_WRITE = False
+            serve.ALLOW_TOOLS = serve.cur().write = False
 
 
 def test_lint_never_rewrites_the_file():
@@ -1533,7 +1534,7 @@ def test_lint_never_rewrites_the_file():
     下一次 edit_file 的 old 會對不上 —— 這正是把 black 設成 after hook 的下場。
     """
     with Workspace() as ws:
-        serve.ALLOW_TOOLS = serve.ALLOW_WRITE = True
+        serve.ALLOW_TOOLS = serve.cur().write = True
         try:
             ugly = "import os,sys\nx    =  1\n"      # 任何格式化工具都會想動它
             serve.run_tool("write_file", {"path": "ugly.py", "content": ugly})
@@ -1542,7 +1543,7 @@ def test_lint_never_rewrites_the_file():
             serve.run_tool("edit_file", {"path": "ugly.py",
                                          "old": "x    =  1", "new": "x = 1"})
         finally:
-            serve.ALLOW_TOOLS = serve.ALLOW_WRITE = False
+            serve.ALLOW_TOOLS = serve.cur().write = False
 
 
 def test_keepalive_body_is_always_drained():
@@ -1559,7 +1560,7 @@ def test_keepalive_body_is_always_drained():
     srv = serve.build_server("http://localhost:11434", "127.0.0.1", port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     time.sleep(0.3)
-    keep, serve.WORKSPACE = serve.WORKSPACE, None
+    keep, serve.cur().ws = serve.cur().ws, None
     try:
         # 這幾條都是「不會讀 body 就回應」的路徑
         for path, body in (("/journal", "{}"),                    # WORKSPACE is None 提早 return
@@ -1577,7 +1578,7 @@ def test_keepalive_body_is_always_drained():
             assert res.status == 200, f"{path} 之後的下一個請求變成 {res.status}（body 沒吃掉）"
             conn.close()
     finally:
-        serve.WORKSPACE = keep
+        serve.cur().ws = keep
         srv.shutdown()
 
 
@@ -1698,9 +1699,9 @@ def test_focus_chain_syncs_hand_edits():
         out = serve.run_tool("list_dir", {"path": "."})
         assert "使用者剛剛手動改了" in out, out
         assert "順便寫 README" in out, out
-        assert [t["text"] for t in serve.TODOS] == ["寫解析器", "跑測試", "順便寫 README"]
-        assert serve.TODOS[0]["done"] is True
-        assert serve.TODOS[1]["blocked_by"] == [1], "文字沒變的項目要留住原本的相依"
+        assert [t["text"] for t in serve.cur().todos] == ["寫解析器", "跑測試", "順便寫 README"]
+        assert serve.cur().todos[0]["done"] is True
+        assert serve.cur().todos[1]["blocked_by"] == [1], "文字沒變的項目要留住原本的相依"
 
         # 只提醒一次。每一輪都講一遍的話，模型會以為使用者一直在改
         assert "使用者剛剛手動改了" not in serve.run_tool("list_dir", {"path": "."})
@@ -1710,6 +1711,78 @@ def test_focus_chain_syncs_hand_edits():
         assert f.read_text("utf-8").count("[ ]") == 1, f.read_text("utf-8")
         serve._tool_todo_write([])
         assert not f.exists(), "清空了檔案還留著"
+
+
+def test_tabs_keep_separate_workspaces():
+    """兩個分頁各開一個專案時不可以互相蓋掉。
+
+    這是這支服務最貴的一個 bug：原本工作區是全域一份，B 分頁載入時把它換掉，
+    A 分頁接下來的 write_file 就靜靜寫進 B 的資料夾 —— 沒有錯誤、沒有提示，
+    要等到看見檔案長在別的專案裡才會發現。所以這裡驗的不是「設定值對不對」，
+    是**檔案真的落在哪個資料夾**。
+    """
+    was_tools = serve.ALLOW_TOOLS
+    serve.ALLOW_TOOLS = True
+    a_dir = tempfile.mkdtemp(prefix="zack-tab-a-")
+    b_dir = tempfile.mkdtemp(prefix="zack-tab-b-")
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 8799)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    base = "http://127.0.0.1:8799"
+
+    def hdr(tab):
+        return {"Content-Type": "application/json", "X-Tab": tab}
+
+    try:
+        for tab, path in (("tab-A", a_dir), ("tab-B", b_dir)):
+            code, body = post(base + "/workspace",
+                              json.dumps({"path": path}).encode(), hdr(tab))
+            assert code == 200 and body["path"] == str(Path(path).resolve()), body
+            code, body = post(base + "/tools",
+                              json.dumps({"write": True}).encode(), hdr(tab))
+            assert code == 200 and body["write"] is True, body
+
+        # B 是後設定的那一個，但 A 問回來還要是 A
+        code, body = get(base + "/upstream", hdr("tab-A"))
+        assert body["workspace"]["path"] == str(Path(a_dir).resolve()), body["workspace"]
+
+        # 真正的證據：A 寫的檔案要落在 A，而且 B 那邊看不到
+        code, body = post(base + "/tool", json.dumps(
+            {"name": "write_file", "args": {"path": "只屬於A.txt", "content": "a"}}
+        ).encode(), hdr("tab-A"))
+        assert code == 200, body
+        assert (Path(a_dir) / "只屬於A.txt").is_file(), "A 的檔案沒寫進 A"
+        assert not (Path(b_dir) / "只屬於A.txt").exists(), "A 的檔案寫進 B 了"
+
+        # 沒帶 X-Tab 的請求落到預設分頁，不會撿到任何一邊的工作區
+        code, body = get(base + "/upstream")
+        assert body["workspace"]["path"] != str(Path(a_dir).resolve()), body["workspace"]
+
+        # 自動模式與待辦也各自一份
+        post(base + "/tools", json.dumps({"auto": "ws"}).encode(), hdr("tab-A"))
+        assert serve.SESSIONS["tab-A"].auto == "ws"
+        assert serve.SESSIONS["tab-B"].auto == "off", "自動模式跨分頁漏過去了"
+    finally:
+        server.shutdown()
+        serve.ALLOW_TOOLS = was_tools
+        for k in ("tab-A", "tab-B"):
+            serve.SESSIONS.pop(k, None)
+        shutil.rmtree(a_dir, ignore_errors=True)
+        shutil.rmtree(b_dir, ignore_errors=True)
+
+
+def test_sessions_are_capped():
+    """分頁關掉不會通知伺服器，所以 SESSIONS 一定要有上限，否則就是慢性洩漏。"""
+    keep = dict(serve.SESSIONS)
+    try:
+        for i in range(serve.SESSIONS_MAX + 10):
+            serve.session_for(f"t{i}")
+        assert len(serve.SESSIONS) <= serve.SESSIONS_MAX + 1, len(serve.SESSIONS)
+        assert "" in serve.SESSIONS, "預設分頁不可以被擠掉"
+        assert f"t{serve.SESSIONS_MAX + 9}" in serve.SESSIONS, "留下的該是最近用過的"
+    finally:
+        serve.SESSIONS.clear()
+        serve.SESSIONS.update(keep)
 
 
 if __name__ == "__main__":

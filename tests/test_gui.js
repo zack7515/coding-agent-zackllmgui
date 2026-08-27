@@ -469,11 +469,12 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const SAME_ORIGIN = ${sameOrigin};
     const location = { origin: 'http://localhost:5678' };
     ${script.slice(script.indexOf('const SRV_PATHS'), script.indexOf('function friendlyError'))}
-    return apiUrl;
+    return { apiUrl: apiUrl, isSrvUrl: isSrvUrl, tab: TAB_ID };
   `)();
 
   // 把 Ollama 指到別台：serve.py 的端點不可以跟著跑掉
-  const remote = mk('http://gpu-box:11434', true);
+  const both = mk('http://gpu-box:11434', true);
+  const remote = both.apiUrl;
   assert.strictEqual(remote('/ls'), 'http://localhost:5678/ls', '/ls 跟著 Ollama 跑掉了');
   assert.strictEqual(remote('/tool'), 'http://localhost:5678/tool');
   assert.strictEqual(remote('/upstream'), 'http://localhost:5678/upstream');
@@ -482,9 +483,19 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual(remote('/api/chat'), 'http://gpu-box:11434/api/chat');
 
   // 直接開 HTML 檔（file://）時沒有 serve.py，只能全部走 S.host
-  const file = mk('http://localhost:11434', false);
+  const file = mk('http://localhost:11434', false).apiUrl;
   assert.strictEqual(file('/ls'), 'http://localhost:11434/ls');
   console.log('ok   serve.py 的端點不跟著 Ollama 位址跑');
+
+  // X-Tab 只能掛在 serve.py 自己的端點上。掛到 Ollama 去會逼出 OPTIONS 預檢，
+  // 對方接不住就整頁連不上 —— 這比原本要修的 bug 還嚴重。
+  assert.ok(both.isSrvUrl('http://localhost:5678/tool'), '/tool 沒有帶上分頁 id');
+  assert.ok(both.isSrvUrl('http://localhost:5678/ls?path=a'), 'query string 擋掉了判斷');
+  assert.ok(!both.isSrvUrl('http://gpu-box:11434/api/chat'), 'X-Tab 掛到 Ollama 去了');
+  assert.ok(!both.isSrvUrl('http://localhost:5678/api/chat'), '同源的 Ollama 路徑也不必掛');
+  assert.ok(!mk('x', false).isSrvUrl('http://localhost:5678/tool'), 'file:// 下沒有 serve.py');
+  assert.ok(both.tab && both.tab.length > 6, '分頁 id 太短，兩個分頁會撞在一起');
+  console.log('ok   分頁 id 只掛在 serve.py 的端點上');
 })();
 
 // 允許規則：deny > 危險指令一律問 > allow > 自動模式。
