@@ -1261,10 +1261,16 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 同一個分頁裡，還原點的「屬於哪則對話」可能標錯 | 工作區已經跟著分頁走了（`Session`），但 chat id 還是行程一份。要準就把它移進 `Session` |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |
 | **「繼續」不是真的 resume** | 沒有 resume token 這種東西 | 就是拿同一份訊息再送一次，模型從最後那則接下去。Ollama 本來就這樣運作，沒有更好的做法 |
-| **子代理不能再開子代理** | 深一層的分工做不到 | 遞迴沒有底，成本也沒有底。要拆更細就由主代理拆成好幾件平行交辦 |
+| **子代理的深度上限是寫死的 2 層**（[serve.py](serve.py) `SUB_DEPTH_MAX`） | 更深的分工做不到 | Claude Code 用提示詞當煞車（有人在看帳單），這裡放著跑沒人看，所以是硬的。要放寬先想清楚「誰來收」 |
+| **`Session.agents` 活在行程裡，worktree 活在磁碟上**（[serve.py](serve.py) `agent_open`） | `serve.py` 重啟之後，磁碟上的 worktree 沒有人認得，變成孤兒 | 分支還在，`git worktree list` 找得回來。要自動收就在啟動時掃一次，見 [plan-agent.md](plan-agent.md) 2.12 |
+| **`/agents` 只看得到自己這個分頁的子代理** | 從別的分頁拿到 id 就追不到 | `Session` 之間刻意不互通（那正是多分頁隔離的意思）。要跨分頁查就得再開一支不分 Session 的端點，那會把隔離開一個洞 |
+| **worktree 的改動要人自己 merge** | 子代理改完，主代理只拿到一句「在這個分支上」 | 自動合會撞衝突，而衝突要人看。見 [plan-agent.md](plan-agent.md) 2.13 |
+| **`.git/info/exclude` 寫不進去就算了**（[serve.py](serve.py) `worktree_add`） | 主目錄會多一筆未追蹤的 `.zackllmgui-worktrees/` | 不影響隔離本身，所以不讓它把整個開 worktree 的動作弄失敗 |
+| **子代理的 context 最多留 20 則**（[07-tools.js](frontend/js/07-tools.js) `SUB_KEEP`） | 更早的 `resume` id 會失效 | 每一則都是一整條對話，不能無限留。失效時模型重新交辦一次就好 |
+| **`SESSIONS` 上限 32，滿了丟最久沒動的**（[serve.py](serve.py) `SESSIONS_MAX`） | 開超過 32 個分頁時，最舊的那個要重新設定工作區 | 分頁關掉不會通知伺服器，沒有上限就是慢性洩漏。要準就讓網頁在 `unload` 時說一聲，但那個訊號本來就不可靠 |
 | **背景指令沒有 `GET /job/{id}` 串流** | 看不到即時輸出，只能整段收 | 收結果走既有的 `/tool`，因為 `check_job` 是工具不是路由。要即時看再補一條 SSE |
 | **`check_job` 用輪詢 `time.sleep(0.2)` 等**（[serve.py](serve.py) `BG_WAIT`） | 一條指令佔住一條 HTTP 執行緒 | `ThreadingHTTPServer` 一條指令一條執行緒，上限 `BG_MAX = 8`。要更省就換 `threading.Event` |
-| **focus chain 靠 mtime 判斷「誰改的」**（[serve.py](serve.py) `TODO_MTIME`） | 同一秒內連改兩次可能漏掉一次 | 人手動編輯不會有這種頻率。真的要準就存內容的 hash |
+| **focus chain 靠 mtime 判斷「誰改的」**（[serve.py](serve.py) `Session.todo_mtime`） | 同一秒內連改兩次可能漏掉一次 | 人手動編輯不會有這種頻率。真的要準就存內容的 hash |
 | **外部 API 的預算是寫死的常數**（[02-const.js](frontend/js/02-const.js) `OA_TOKEN_BUDGET`） | 使用者改不了，而且是 token 數不是金額 | 撞到只是停下來給一顆「繼續」，不是失敗。要換算成錢得維護一張各家價目表，那個會過期得比程式碼快 |
 | **背景先算的摘要一次只留一份**（`S.pre`） | 切對話就作廢 | 多留幾份要處理「哪一份對得上現在的訊息」，那個判斷比省下來的時間貴 |
 
@@ -1290,14 +1296,18 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 - 附加檔案是整份塞進 context，沒有 RAG。大檔案請自己節錄，用量條會警告。
 - `regenerate` 只作用在對話結尾（會把結尾的 assistant / tool 訊息一起退掉），
   中間某則的重新產生請用分支。
-- 工具在 `serve.py` 的工作目錄下執行，相對路徑以那裡為準。
-- **沒有沙箱**。`setup_env` 建的是 venv 不是容器；`run_shell` 能做的事跟終端機一樣多。
-  要真的隔離，把整支 `serve.py` 放進容器再把專案掛進去 ——
-  自己開的沙箱在自己手上，不算隔離。詳見 `plan-agent.md` 第 5 節。
+- 工具跑在**那個分頁的工作區**底下（子代理則是它自己的 worktree），相對路徑以那裡為準。
+- **`--sandbox` 包的是 `run_shell` / `run_tests` / `setup_env`，不是整支 `serve.py`。**
+  沒開沙盒時 `run_shell` 能做的事跟終端機一樣多。要連 `serve.py` 一起隔離，
+  得從外面把整支放進容器再把專案掛進去 —— 自己開的牆在自己手上，不算牆。
+  詳見 [safety/README.md](safety/README.md) 與 `plan-agent.md` 第 5 節。
+- 子代理的 worktree **不是安全邊界**，是為了讓兩個會寫檔案的子代理平行跑而不互相蓋。
+  它的檔案工具一樣由 `ws_path()` 擋，`run_shell` 一樣是逃生口。
 - `/run` 的串流斷線就沒了：關掉分頁看不到同一次執行的輸出。
   要跨分頁存活的指令請用 `run_shell` 的 `background`，那條有 id、活在 serve.py 的行程裡。
 - **工具迴圈跑在瀏覽器裡。** 背景指令活得過關分頁，模型迴圈活不過 ——
-  關掉分頁再打開，背景指令還在跑，但要按「繼續」才會接著推進。
+  關掉分頁再打開，背景指令還在跑，但要按「繼續」才會接著推進。子代理也一樣：
+  它的登記活在 `serve.py` 的行程裡，但推進它的迴圈在瀏覽器。
 - `num_thread` 的上限只有在 Ollama 也跑在本機時才算得出來。那個參數是套用在
   **跑 Ollama 的機器**上，而 Ollama 的 API 沒有任何一支回報主機的核心數 ——
   所以遠端時欄位不設上限，說明裡直接講明讀不到。
@@ -1311,8 +1321,10 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 54 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、產出同步
-node tests/test_gui.js       # 51 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行
+python tests/test_serve.py   # 75 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+                             #        多分頁隔離、子代理白名單與連根中斷、產出同步
+node tests/test_gui.js       # 63 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+                             #        對話存取、子代理型別與 worktree
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
 python tests/test_skills.py  # 驗 skills/ 的格式，順便回答「這個 skill 要的工具有沒有」
 ```

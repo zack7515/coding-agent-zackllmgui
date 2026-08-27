@@ -968,11 +968,14 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
 
 | 東西 | 存在哪 | 誰的 |
 |---|---|---|
-| 對話、設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**，不落地成檔案（**存不下時會 toast 提醒**，別忽略它 —— 重整就沒了） | 你這台瀏覽器的 |
+| 對話 | **瀏覽器的 IndexedDB**（一則一筆），不落地成檔案。舊版存在 `localStorage`，第一次開會自動搬過去 | 你這台瀏覽器的 |
+| 設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**（小，不會撞到配額） | 同上 |
 | 改檔案前的備份 | `<工作區>/.zackllmgui-backup/<時間戳>/<相對路徑>` | 你的專案裡 |
 | 還原點的順序紀錄 | `<工作區>/.zackllmgui-backup/journal.jsonl` | 同上 |
 | MCP 設定 | `<工作區>/.zackllmgui-mcp.json`，或 `serve.py` 旁邊 | 同上 |
 | skills | `serve.py` 旁邊的 `skills/`（內建）＋ `<工作區>/skills/`（你自己的） | 兩邊都讀 |
+| 子代理型別 | `serve.py` 旁邊的 `agents/`＋`<工作區>/agents/`，規則同 skills | 兩邊都讀 |
+| 子代理的 worktree | `<工作區>/.zackllmgui-worktrees/<id>/`，改動在 `zackllmgui/<id>` 分支上 | 你的專案裡（沒改動就自動清掉） |
 | git 紀錄 | `<工作區>/.git` | **完全是你的**，這支程式只讀狀態與下 commit／stash |
 
 **為什麼不統一收進一個資料夾？** 因為它們的擁有者不一樣。備份與 journal 是這支程式
@@ -980,11 +983,14 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
 版控；而對話存在瀏覽器裡是刻意的 —— 一旦落地成檔案，「誰讀得到這些對話」就變成
 另一個要處理的問題（多人共用一台 `serve.py` 的情況下尤其麻煩）。
 
-代價是**換瀏覽器或清除瀏覽資料，對話就會不見**。共用電腦請留意金鑰也在同一個地方
+換成 IndexedDB 是因為 `localStorage` 只有 5–10MB，而一場長的 agent 任務光工具輸出就
+400KB 上下 —— 十幾場就滿，而且滿了之後每一次存都會無聲失敗。IndexedDB 的配額按磁碟算。
+
+代價一樣是**換瀏覽器或清除網站資料，對話就會不見**。共用電腦請留意金鑰也在同一個地方
 （只會送給你填的那個服務）。重要對話用右上角「⋯ → 匯出對話」存成 HTML / Markdown / JSON。
 
-用 `file://` 開啟時，少數瀏覽器會禁用 `localStorage`；程式有處理這種情況，
-只是關掉分頁後對話不會留著。在意的話就用 `serve.py`。
+用 `file://` 開啟時，Firefox 不給用 IndexedDB（少數瀏覽器連 `localStorage` 都禁）；
+程式會退回 `localStorage` 並且**講出來**，不會靜靜掉資料。在意的話就用 `serve.py`。
 
 ## 專案結構
 
@@ -1013,8 +1019,8 @@ ollamaGUI/
 │       └── 09-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 51 項： python tests/test_serve.py
-│   ├── test_gui.js         網頁 44 項： node tests/test_gui.js
+│   ├── test_serve.py       後端 75 項： python tests/test_serve.py
+│   ├── test_gui.js         網頁 63 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │
@@ -1038,6 +1044,11 @@ ollamaGUI/
 │   ├── explain-code/       解釋一段程式在做什麼
 │   ├── write-tests/        幫既有程式補測試
 │   └── release-checklist/  出版前檢查
+│
+├── agents/               子代理型別，一種一個 .md（工作區有自己的 agents/ 就用那份）
+│   ├── README.md           格式規格：tools 怎麼寫、哪幾支永遠不給
+│   ├── explore.md          唯讀的調查用（預設）
+│   └── work.md             會改檔案的，跑在自己的 git worktree 裡
 │
 ├── legacy/               舊的 PySide6 / tkinter 桌面版與視覺規格
 │                         現行程式完全不引用它，刪掉也不會壞
