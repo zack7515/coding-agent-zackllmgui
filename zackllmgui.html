@@ -3756,6 +3756,11 @@ function autoMenuItem() {
           action: async function () {
             S.auto = m[0];
             saveConfig();
+            // 後端要知道現在哪一檔，agent_rules() 才寫得出實話 ——
+            // 「每一次呼叫都會先讓使用者確認」在自動模式下是假的，
+            // 而且那句話直接讓「讀三個檔」變成三輪。
+            try { await setServerTools({ auto: m[0] }); }
+            catch (e) { /* 舊版 serve.py 不認得，系統提示照舊，不影響放行 */ }
             // 放開之後就不再一個一個問，但「能不能改檔案」是另一道開關。
             // 兩個不連動的話，使用者以為放著讓它自己跑，結果模型連檔案都動不了。
             let extra = '';
@@ -3836,7 +3841,10 @@ async function setServerTools(patch) {
     if (got === undefined) {
       throw new Error('這份 serve.py 沒有「' + k + '」這個開關，重新啟動 serve.py 就有了');
     }
-    if (!!got !== !!patch[k]) throw new Error('伺服器沒有套用這個開關');
+    // auto 是字串（off／read／…），其餘是開關。字串用相等比 ——
+    // !!'off' 跟 !!'ws' 都是 true，用 !! 比等於什麼都沒驗到。
+    const ok = typeof patch[k] === 'string' ? got === patch[k] : !!got === !!patch[k];
+    if (!ok) throw new Error('伺服器沒有套用這個開關');
   }
   S.srv.tools = !!data.tools;
   S.tools = !!data.tools;
@@ -4653,11 +4661,15 @@ async function restoreServerState(conf) {
   if (saved.write !== undefined && !!saved.write !== !!S.ws.write) patch.write = !!saved.write;
   if (saved.browser !== undefined && !!saved.browser !== !!S.srv.browser) patch.browser = !!saved.browser;
   if (saved.sandbox !== undefined && !!saved.sandbox !== !!S.srv.sandbox) patch.sandbox = !!saved.sandbox;
+  // 自動模式存在瀏覽器、serve.py 重啟就回到 off。不推回去的話系統提示會停在
+  // 「每一次都會問你」，而實際上沒有人在按 —— 模型會一輪讀一個檔。
+  if (S.auto && S.auto !== 'off') patch.auto = S.auto;
   if (Object.keys(patch).length) {
     const label = { enabled: '本機工具', write: '修改檔案', browser: '連網瀏覽', sandbox: '沙盒' };
     try {
       await setServerTools(patch);
-      Object.keys(patch).forEach(function (k) { done.push(label[k] + (patch[k] ? '' : '（關）')); });
+      Object.keys(patch).filter(function (k) { return label[k]; })
+        .forEach(function (k) { done.push(label[k] + (patch[k] ? '' : '（關）')); });
     } catch (e) {
       // 非本機的瀏覽器會被 serve.py 擋掉（403），那是對的，不要吵
       if (S.srv.toolsLocal !== false) toast('開關接不回來：' + e.message);

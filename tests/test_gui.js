@@ -921,7 +921,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   function run(conf, server) {
     const calls = [];
     const box = new AsyncFunction('log', 'conf', 'server', `
-      const S = { ws: { path: server.wsPath || '', write: !!server.write },
+      const S = { auto: conf.auto || 'off',
+                  ws: { path: server.wsPath || '', write: !!server.write },
                   srv: { tools: !!server.tools, browser: !!server.browser,
                          sandbox: !!server.sandbox, toolsLocal: true } };
       const current = () => server.chatWs !== undefined ? { ws: server.chatWs } : null;
@@ -934,6 +935,20 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       ` + 'async ' + grab('restoreServerState') + `
       return restoreServerState(conf);`);
     return box(calls, conf, server).then(() => calls);
+  }
+
+  {
+    // serve.py 重啟就回到 off，瀏覽器記得的那一檔要推回去，
+    // 不然系統提示會停在「每一次都會問你」而實際上沒有人在按
+    const calls = await run(
+      { wsPath: '/w', auto: 'ws', srv: { tools: true, write: true, browser: false, sandbox: false } },
+      { wsPath: '/w', tools: true, write: true, browser: false, sandbox: false });
+    const patch = (calls.filter(function (c) { return c[0] === 'tools'; })[0] || [])[1];
+    assert.deepStrictEqual(patch, { auto: 'ws' }, '自動模式沒有推回去：' + JSON.stringify(calls));
+    // 但那不是「伺服器的開關」，不該出現在「接回上次的設定」那行 toast 裡
+    const said = calls.filter(function (c) { return c[0] === 'toast'; }).map(function (c) { return c[1]; });
+    assert.ok(!said.some(function (t) { return /自動模式/.test(t); }),
+      '自動模式是瀏覽器的設定，不必再報一次：' + said.join('|'));
   }
 
   // 一、什麼都沒變就什麼都不做（不要每次開頁面都跳一個 toast）
@@ -1464,6 +1479,17 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     box.saveChats();
     assert.strictEqual(box.said.length, 2, '好了之後再壞要再講一次');
     console.log('ok   對話存不進去會講');
+  }
+
+  // ── 自動模式要傳到後端 ────────────────────────────────
+  assert.ok(/setServerTools\(\{ auto: m\[0\] \}\)/.test(script),
+    '切自動模式沒有同步到後端，系統提示會停在「每一次都會問你」');
+  {
+    // 驗證迴圈本來只會 !!，而 !!'off' 跟 !!'ws' 都是 true —— 等於沒驗
+    const src = grab('setServerTools');
+    assert.ok(/typeof patch\[k\] === 'string' \? got === patch\[k\]/.test(src),
+      '字串開關要用相等比，用 !! 比等於什麼都沒驗到：' + src.slice(0, 200));
+    console.log('ok   自動模式會同步到後端');
   }
 
   console.log('\n全部通過');

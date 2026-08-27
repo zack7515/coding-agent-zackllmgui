@@ -108,6 +108,12 @@ ALLOW_BROWSER = False
 # run_shell 是唯一跑得出工作區的工具 —— 檔案工具有 ws_path() 擋著，它沒有。
 # 預設關的理由跟連網瀏覽一樣，但更硬：要先裝 docker 或 podman，
 # 而這個專案的賣點是零相依。開得起來才顯示得出來，開不起來會講原因。
+# 網頁那一端的自動模式（off／read／edit／full／ws）。後端**不用它決定放不放行**
+# —— 那一層在瀏覽器（autoApprove）與允許規則（rule_match）。這裡只用來決定
+# 系統提示怎麼寫：原本一律寫「每一次呼叫都會先讓使用者確認，所以一次只叫一個
+# 工具」，那句話在自動模式下是假的，而且直接讓讀三個檔變成三輪。
+AUTO_MODES = ("off", "read", "edit", "full", "ws")
+AUTO_MODE = "off"
 ALLOW_SANDBOX = False
 
 SANDBOX_BACKEND = ""               # 空的＝照 sandbox/ 的偏好順序自己挑
@@ -1469,9 +1475,17 @@ def agent_rules() -> str:
     """
     if not ALLOW_TOOLS:
         return ""
-    r = ["你可以呼叫工具。每一次呼叫都會先讓使用者確認，所以：",
-         "- 一次只呼叫一個工具，看到結果再決定下一步。",
-         "- 工具失敗時先讀懂錯誤訊息，不要用一模一樣的參數重試。"]
+    if AUTO_MODE == "off":
+        r = ["你可以呼叫工具。每一次呼叫都會先讓使用者確認，所以：",
+             "- 一次只呼叫一個工具，看到結果再決定下一步。"]
+    else:
+        # 自動模式下唯讀呼叫不會停下來等人，所以同一輪多送幾個是免費的。
+        # 省下來的不是工具執行時間（讀本機檔案是微秒），是**模型的來回**——
+        # 每多一輪就要重新吃一次整份 context，那才是幾秒鐘的東西。
+        r = ["你可以呼叫工具。多數呼叫會自動放行，不會停下來等人，所以：",
+             "- 讀檔、搜尋、列目錄這種唯讀的呼叫，同一輪可以一次送好幾個，"
+             "不要一輪讀一個檔；改檔案與跑指令一次一個，看到結果再決定下一步。"]
+    r += ["- 工具失敗時先讀懂錯誤訊息，不要用一模一樣的參數重試。"]
     if WORKSPACE is not None:
         r += [f"- 工作區是 {WORKSPACE}，所有路徑都相對於它，不要用絕對路徑或 ..。",
               "- 找東西先用 search_files 或 list_dir 定位，再用 read_file 讀那一段；"
@@ -2674,6 +2688,13 @@ class Handler(BaseHTTPRequestHandler):
                 sandbox.pick(str(req.get("backend", "") or SANDBOX_BACKEND))
                 SANDBOX_BACKEND = str(req.get("backend", "") or SANDBOX_BACKEND)
             ALLOW_SANDBOX = want
+        if "auto" in req:
+            global AUTO_MODE
+            want = str(req.get("auto") or "off")
+            if want not in AUTO_MODES:
+                self._json({"error": f"不認得的自動模式：{want}"}, 400)
+                return
+            AUTO_MODE = want
         if "plan" in req:
             global REQUIRE_PLAN
             REQUIRE_PLAN = bool(req.get("plan"))
@@ -2682,7 +2703,7 @@ class Handler(BaseHTTPRequestHandler):
               f"{'，可修改檔案' if ALLOW_WRITE else ''}（由網頁切換）")
         self._json({"tools": ALLOW_TOOLS, "write": ALLOW_WRITE, "plan": REQUIRE_PLAN,
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
-                    "sandbox_info": sandbox_state(),
+                    "auto": AUTO_MODE, "sandbox_info": sandbox_state(),
                     "tool_defs": tool_defs(), "agent_rules": agent_rules()})
 
     # -- 工作區 ------------------------------------------------------ #

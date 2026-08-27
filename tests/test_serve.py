@@ -510,6 +510,56 @@ def test_ws_scoped():
         assert serve.ws_scoped("rm -rf pkg") is False
 
 
+def test_agent_rules_follow_auto_mode():
+    """自動模式下不能再跟模型說「每一次呼叫都會先讓使用者確認」。
+
+    那句話是假的（沒有人在按），而且它帶著的「一次只呼叫一個工具」直接把
+    「讀三個檔」變成三輪 —— 每一輪都要重新吃一次整份 context。
+    """
+    was_tools, was_auto = serve.ALLOW_TOOLS, serve.AUTO_MODE
+    try:
+        serve.ALLOW_TOOLS = True
+        serve.AUTO_MODE = "off"
+        off = serve.agent_rules()
+        assert "每一次呼叫都會先讓使用者確認" in off
+        assert "一次只呼叫一個工具" in off
+        for mode in ("read", "edit", "full", "ws"):
+            serve.AUTO_MODE = mode
+            auto = serve.agent_rules()
+            assert "每一次呼叫都會先讓使用者確認" not in auto, mode
+            assert "一次只呼叫一個工具" not in auto, mode
+            assert "一次可以送好幾個" in auto or "一次送好幾個" in auto, mode
+            # 改檔案與跑指令仍然是一次一個：那兩類真的有可能跳確認卡
+            assert "改檔案與跑指令一次一個" in auto, mode
+        # 兩種寫法共用的規則不能因此掉了
+        for mode in ("off", "ws"):
+            serve.AUTO_MODE = mode
+            assert "不要用一模一樣的參數重試" in serve.agent_rules(), mode
+    finally:
+        serve.ALLOW_TOOLS, serve.AUTO_MODE = was_tools, was_auto
+
+
+def test_auto_mode_over_http():
+    """/tools 收得到自動模式，而且不認得的值要擋下來。"""
+    was_auto, was_tools = serve.AUTO_MODE, serve.ALLOW_TOOLS
+    serve.ALLOW_TOOLS = True
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 8798)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    base = "http://127.0.0.1:8798"
+    try:
+        code, body = post(base + "/tools", json.dumps({"auto": "ws"}).encode())
+        assert code == 200 and body["auto"] == "ws", body
+        assert "每一次呼叫都會先讓使用者確認" not in body["agent_rules"]
+
+        code, body = post(base + "/tools", json.dumps({"auto": "全開"}).encode())
+        assert code == 400, (code, body)
+        assert serve.AUTO_MODE == "ws", "擋下來之後不能把狀態改掉"
+    finally:
+        server.shutdown()
+        serve.AUTO_MODE, serve.ALLOW_TOOLS = was_auto, was_tools
+
+
 def test_ws_scoped_with_sandbox():
     """沙盒開著時，「動不動得到工作區外」不必從指令去猜 —— 沙盒本身就出不去。
 
