@@ -129,6 +129,12 @@ TOOL_SCHEMAS = [
      "properties": {"path": {"type": "string", "description": "相對於工作區的檔案路徑"},
                     "content": {"type": "string", "description": "完整內容"}},
      "required": ["path", "content"]},
+    {"name": "delete_file", "needs": "write",
+     "description": ("刪掉工作區裡的一個檔案。會先備份，所以還原得回來 —— "
+                     "**要刪檔案一律用這支，不要用 run_shell 下 rm**（那條沒有備份）。"
+                     "只刪單一檔案，不刪資料夾"),
+     "properties": {"path": {"type": "string", "description": "相對於工作區的檔案路徑"}},
+     "required": ["path"]},
     {"name": "edit_file", "needs": "write",
      "description": ("把檔案裡的一段文字換成另一段。old 必須與檔案內容完全一致（含縮排）"
                      "且在檔案裡只出現一次；出現多次就多帶幾行前後文，或設 replace_all。"

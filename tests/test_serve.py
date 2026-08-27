@@ -510,6 +510,48 @@ def test_ws_scoped():
         assert serve.ws_scoped("rm -rf pkg") is False
 
 
+def test_delete_file_is_undoable():
+    """刪檔案要有還原點 —— 在這支之前，模型唯一的刪檔手段是 rm，而 rm 沒有備份。"""
+    with Workspace() as ws:
+        target = ws / "pkg" / "calc.py"
+        before = target.read_text("utf-8")
+        out = serve.TOOLS["delete_file"]("pkg/calc.py")
+        assert not target.exists(), "沒有真的刪掉"
+        assert "[backup]" in out, out
+
+        entries = serve.journal_read()
+        last = entries[-1]
+        assert last["tool"] == "delete_file" and last["path"] == "pkg/calc.py", last
+        assert last["backup"] and not last["created"], last
+
+        # 還原點真的倒得回來，而且內容一個字都沒變
+        serve.rewind_to(last["id"])
+        assert target.exists(), "還原點沒有把檔案救回來"
+        assert target.read_text("utf-8") == before
+
+        # 資料夾不給刪：整包沒辦法一份一份備份
+        try:
+            serve.TOOLS["delete_file"]("pkg")
+            assert False, "資料夾應該要被擋下來"
+        except IsADirectoryError:
+            pass
+
+        # 工作區邊界跟其他檔案工具同一支，沒有第二份判斷
+        for bad in ["../outside.py", "/etc/hosts", ".git/config"]:
+            try:
+                serve.TOOLS["delete_file"](bad)
+                assert False, f"{bad} 應該要被擋下來"
+            except (PermissionError, FileNotFoundError):
+                pass
+
+
+def test_delete_file_preview_shows_what_goes():
+    """確認卡要看得到刪的是什麼，不是只有一個檔名。"""
+    with Workspace():
+        diff = serve.preview_tool("delete_file", {"path": "pkg/calc.py"})
+        assert "-" in diff and "刪除後" in diff, diff
+
+
 def test_agent_rules_follow_auto_mode():
     """自動模式下不能再跟模型說「每一次呼叫都會先讓使用者確認」。
 

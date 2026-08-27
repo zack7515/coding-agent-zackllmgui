@@ -150,7 +150,10 @@ const DOC_EXT = ['pdf', 'docx', 'odt', 'pptx'];
 
 // 工具定義由 serve.py 供給（/upstream、/tools、/workspace 都會回傳目前這一份）。
 // 前端不自己維護一份 schema：兩邊各寫一次，遲早會對不上。
-const WRITE_TOOLS = ['write_file', 'edit_file'];
+// delete_file 也在這一級：它跟 edit_file 一樣走 ws_path()、一樣先備份、
+// 一樣進 journal，所以一樣倒得回來。歸在別級的話模型就會退回去用 rm ——
+// 而 rm 是三者之中唯一沒有還原點的。
+const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
 
 // 工具迴圈跑到一半時輸入框的提示。**同時當成「現在可以排隊」的判斷依據** ——
 // blockComposer 也用在「尚未連線」「沒有可用模型」，那兩種情況排隊沒有意義

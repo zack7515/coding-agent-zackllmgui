@@ -1405,7 +1405,10 @@ const DOC_EXT = ['pdf', 'docx', 'odt', 'pptx'];
 
 // 工具定義由 serve.py 供給（/upstream、/tools、/workspace 都會回傳目前這一份）。
 // 前端不自己維護一份 schema：兩邊各寫一次，遲早會對不上。
-const WRITE_TOOLS = ['write_file', 'edit_file'];
+// delete_file 也在這一級：它跟 edit_file 一樣走 ws_path()、一樣先備份、
+// 一樣進 journal，所以一樣倒得回來。歸在別級的話模型就會退回去用 rm ——
+// 而 rm 是三者之中唯一沒有還原點的。
+const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
 
 // 工具迴圈跑到一半時輸入框的提示。**同時當成「現在可以排隊」的判斷依據** ——
 // blockComposer 也用在「尚未連線」「沒有可用模型」，那兩種情況排隊沒有意義
@@ -5059,7 +5062,10 @@ async function runSubagent(args) {
 // 寫失敗的測試檔不算寫過，跑失敗的測試倒是算跑過（跑了就會看到紅字）。
 function noteFinishSignals(name, args) {
   if (looksLikeTestRun(name, args)) S.run.ranTests = true;
-  else if (WRITE_TOOLS.indexOf(name) >= 0 && looksLikeTestFile((args || {}).path)) {
+  // delete_file 也在 WRITE_TOOLS 裡，但**刪掉一個測試檔不算寫了測試** ——
+  // 算進去的話「寫了測試沒跑」會對著一個已經不存在的檔案叫
+  else if (name !== 'delete_file' && WRITE_TOOLS.indexOf(name) >= 0
+           && looksLikeTestFile((args || {}).path)) {
     S.run.wroteTests = String(args.path);
   }
 }

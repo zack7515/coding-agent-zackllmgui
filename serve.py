@@ -841,6 +841,29 @@ def _tool_search_files(pattern: str, glob: str = "") -> str:
     return "\n".join(hits)
 
 
+def _tool_delete_file(path: str) -> str:
+    """刪掉工作區裡的一個檔案。**先備份、記進 journal，所以倒得回來。**
+
+    為什麼要有這一支：在它之前，模型唯一的刪檔手段是 run_shell 的 rm ——
+    而那條路沒有備份、沒有 journal、還原點救不回來。也就是說**最該有還原點
+    的操作，剛好是唯一沒有的那一個**。順便讓「工作區內全自動」少一個存在的
+    理由：rm 那條風險路徑模型現在根本不必走。
+
+    只刪檔案不刪資料夾：整包刪掉沒辦法一份一份備份，那種事請自己在終端機做。
+    """
+    p = ws_path(path, must_exist=True)
+    if p.is_dir():
+        raise IsADirectoryError(
+            f"{ws_rel(p)} 是資料夾。這支只刪單一檔案 —— 整包刪掉沒有還原點，"
+            f"請自己在終端機處理。")
+    mark = backup_file(p)
+    journal_add("delete_file", ws_rel(p), mark, False)
+    size = p.stat().st_size
+    p.unlink()
+    READ_STATE.pop(str(p), None)      # 刪掉了，之前讀過的狀態不算數
+    return f"已刪除 {ws_rel(p)}（{size} bytes，已備份，可以還原）\n[backup]{mark}"
+
+
 def _tool_write_file(path: str, content: str) -> str:
     p = ws_path(path)
     existed = p.exists()
@@ -1495,6 +1518,8 @@ def agent_rules() -> str:
         r += ["- 修改既有檔案一律用 edit_file：old 要與檔案內容完全一致（含縮排），"
               "並帶足前後文讓它在檔案裡唯一；write_file 只用來建立新檔案。",
               "- 同一個檔案要改好幾處時用 edits 一次送完，不要一輪改一處。",
+              "- 要刪檔案用 delete_file，不要用 run_shell 下 rm —— "
+              "delete_file 會先備份、還原得回來，rm 不會。",
               "- 一次做完一件事就用 run_tests 驗證，不要改一整輪才驗。",
               "- 測試失敗時修的是程式，不是測試。真的認為測試寫錯，先說出來讓使用者決定。"]
     if WORKSPACE is not None:
@@ -1607,6 +1632,7 @@ def _tool_submit_plan(plan: str) -> str:
 
 TOOLS = {
     "read_file": _tool_read_file,
+    "delete_file": _tool_delete_file,
     "list_dir": _tool_list_dir,
     "search_files": _tool_search_files,
     "run_shell": _tool_run_shell,
@@ -2060,6 +2086,13 @@ def preview_tool(name: str, args: dict) -> str:
             return box
         head = "⛔ 這行指令會被拒絕執行" if level == "block" else "⚠ 這行指令會改動環境"
         return f"{head}：{why}" + ("\n" + box if box else "")
+    if name == "delete_file":
+        p = ws_path(args.get("path", ""), must_exist=True)
+        if p.is_dir():
+            return f"（{ws_rel(p)} 是資料夾，這支只刪單一檔案）"
+        old = p.read_text("utf-8", errors="replace")
+        # 整個檔案當成「全部刪掉」的 diff：要按下去的人得看得到刪的是什麼
+        return unified(old, "", ws_rel(p), ("現在", "刪除後"))
     if name == "write_file":
         p = ws_path(args.get("path", ""))
         old = p.read_text("utf-8", errors="replace") if p.exists() else ""

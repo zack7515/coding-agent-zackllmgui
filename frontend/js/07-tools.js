@@ -1383,7 +1383,10 @@ async function runSubagent(args) {
 // 寫失敗的測試檔不算寫過，跑失敗的測試倒是算跑過（跑了就會看到紅字）。
 function noteFinishSignals(name, args) {
   if (looksLikeTestRun(name, args)) S.run.ranTests = true;
-  else if (WRITE_TOOLS.indexOf(name) >= 0 && looksLikeTestFile((args || {}).path)) {
+  // delete_file 也在 WRITE_TOOLS 裡，但**刪掉一個測試檔不算寫了測試** ——
+  // 算進去的話「寫了測試沒跑」會對著一個已經不存在的檔案叫
+  else if (name !== 'delete_file' && WRITE_TOOLS.indexOf(name) >= 0
+           && looksLikeTestFile((args || {}).path)) {
     S.run.wroteTests = String(args.path);
   }
 }
