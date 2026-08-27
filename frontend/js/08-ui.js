@@ -5,7 +5,8 @@ function forkChat(idx) {
   const upto = idx < 0 ? c.messages.length : idx + 1;
   const copy = {
     id: uid(), title: c.title.replace(/（分支.*）$/, '') + '（分支）', model: c.model,
-    renamed: true, messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
+    renamed: true, created: Date.now(),
+    messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
   };
   S.chats.unshift(copy);
   S.currentId = copy.id;
@@ -23,7 +24,8 @@ function renameChat(id) {
   c.title = name;
   c.renamed = true;          // 別再被第一則訊息蓋掉
   renderChatList();
-  saveChats();
+  saveChats(c);              // 改的不一定是當下開著的那則，要指名
+
 }
 
 /* ══════════════════════ 模型管理 ══════════════════════ */

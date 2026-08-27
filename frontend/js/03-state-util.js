@@ -54,6 +54,63 @@ function lsSet(key, value) {
     return false;
   }
 }
+
+/* ══════════════════════ 對話存哪裡 ══════════════════════
+   結論：**IndexedDB，一則對話一筆紀錄**，完全不出這台瀏覽器。
+
+   為什麼不是 localStorage（原本的做法）：配額只有 5–10MB，而一場長的 agent 任務
+   光工具輸出就 400KB 上下 —— 十幾場就滿。滿了之後 setItem 丟 QuotaExceededError，
+   整份對話存不進去。而且它是同步的：每次存都要把「全部」對話 JSON.stringify 一遍，
+   串流中一秒好幾次，那是主執行緒上實打實的停頓。
+
+   為什麼不是寫進 serve.py 那一端：對話裡有專案路徑與程式碼，一旦落地就得回答
+   「同一台 serve.py 上誰讀得到誰的對話」。伺服器只出算力，資料留在瀏覽器，
+   這句話才講得清楚。
+
+   IndexedDB 給的是：配額按磁碟算（GB 級）、非同步、structured clone 不必先轉字串、
+   而且**一則對話一筆**，所以存的時候只寫改動的那一則，兩個分頁也不會整包蓋掉對方。 */
+const DB_NAME = 'zackllmgui';
+const DB_STORE = 'chats';
+let dbPromise = null;
+
+function chatDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise(function (ok, bad) {
+    let req;
+    // file:// 下 Firefox 直接不給用，無痕模式也可能擋 —— 這裡失敗就回頭走 localStorage
+    try { req = indexedDB.open(DB_NAME, 1); } catch (e) { bad(e); return; }
+    req.onupgradeneeded = function () {
+      req.result.createObjectStore(DB_STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = function () { ok(req.result); };
+    req.onerror = function () { bad(req.error || new Error('IndexedDB 開不起來')); };
+    req.onblocked = function () { bad(new Error('IndexedDB 被其他分頁擋住')); };
+  });
+  return dbPromise;
+}
+
+function dbRun(mode, fn) {
+  return chatDb().then(function (d) {
+    return new Promise(function (ok, bad) {
+      const tx = d.transaction(DB_STORE, mode);
+      const req = fn(tx.objectStore(DB_STORE));
+      // 等 tx 完成而不是等 req.success：readwrite 要交易真的落地才算存到
+      tx.oncomplete = function () { ok(req ? req.result : undefined); };
+      tx.onerror = function () { bad(tx.error); };
+      tx.onabort = function () { bad(tx.error || new Error('交易被中止')); };
+    });
+  });
+}
+
+// 新的排在前面。用 created 而不是陣列順序：兩個分頁各自寫自己的那幾則時，
+// 「第幾個」會打架，「什麼時候建的」不會。
+function chatsLoad() {
+  return dbRun('readonly', function (st) { return st.getAll(); }).then(function (list) {
+    return (list || []).sort(function (a, b) { return (b.created || 0) - (a.created || 0); });
+  });
+}
+function chatPut(c) { return dbRun('readwrite', function (st) { return st.put(c); }); }
+function chatDrop(id) { return dbRun('readwrite', function (st) { return st.delete(id); }); }
 let toastTimer = null;
 function toast(msg) {
   const el = $('toast');

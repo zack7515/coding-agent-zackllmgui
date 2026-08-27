@@ -1461,35 +1461,65 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual((script.match(/tailLines\(out\.textContent/g) || []).length, 2,
     '兩條路都要截');
 
-  // ── localStorage 存不進去要講 ──────────────────────────
+  // ── 對話存哪裡：IndexedDB 為主，localStorage 是退路 ──────────
   {
-    const box = new Function(`
-      const store = { fail: false, n: 0 };
-      const localStorage = { setItem: () => { if (store.fail) throw new Error('quota'); store.n++; } };
+    const mk = (idb) => new Function(`
+      const store = { fail: false, put: [], drop: [] };
+      const localStorage = { setItem: () => { if (store.fail) throw new Error('quota'); } };
       const said = [];
       const toast = (m) => said.push(m);
       const LS_CHATS = 'c';
-      const S = { chats: [] };
+      const S = { chats: [{ id: 'a', t: 1 }, { id: 'b', t: 2 }] };
+      const current = () => S.chats[0];
+      const chatPut = (c) => store.fail
+        ? Promise.reject(new Error('idb 壞了')) : (store.put.push(c.id), Promise.resolve());
+      const chatDrop = (id) => (store.drop.push(id), Promise.resolve());
       let saveWarned = false;
+      let useIdb = ${idb};
+      let flushTimer = null;
+      const dirtyChats = new Set();
       ${grab('lsSet')}
+      ${grab('lsSave')}
       ${grab('saveChats')}
-      return { store, said, saveChats, lsSet };
+      ${grab('flushChats')}
+      return { store, said, S, saveChats, flushChats, lsSet, dirtyChats,
+               idbOn: () => useIdb };
     `)();
-    assert.strictEqual(box.lsSet('k', 1), true, '存成功要回 true');
-    box.store.fail = true;
-    assert.strictEqual(box.lsSet('k', 1), false, '存失敗要回 false，不能靜靜吞掉');
-    box.saveChats();
-    assert.strictEqual(box.said.length, 1, '滿了要講一次：' + JSON.stringify(box.said));
-    assert.ok(/匯出|滿/.test(box.said[0]), '要說得出怎麼辦：' + box.said[0]);
-    box.saveChats();
-    box.saveChats();
-    assert.strictEqual(box.said.length, 1, '每次呼叫都 toast 會洗版');
-    box.store.fail = false;
-    box.saveChats();
-    box.store.fail = true;
-    box.saveChats();
-    assert.strictEqual(box.said.length, 2, '好了之後再壞要再講一次');
-    console.log('ok   對話存不進去會講');
+
+    // 退路：IndexedDB 開不起來時就是舊行為，滿了要講、而且只講一次
+    const ls = mk(false);
+    assert.strictEqual(ls.lsSet('k', 1), true, '存成功要回 true');
+    ls.store.fail = true;
+    assert.strictEqual(ls.lsSet('k', 1), false, '存失敗要回 false，不能靜靜吞掉');
+    ls.saveChats();
+    assert.strictEqual(ls.said.length, 1, '滿了要講一次：' + JSON.stringify(ls.said));
+    assert.ok(/匯出|滿/.test(ls.said[0]), '要說得出怎麼辦：' + ls.said[0]);
+    ls.saveChats(); ls.saveChats();
+    assert.strictEqual(ls.said.length, 1, '每次呼叫都 toast 會洗版');
+    ls.store.fail = false; ls.saveChats();
+    ls.store.fail = true; ls.saveChats();
+    assert.strictEqual(ls.said.length, 2, '好了之後再壞要再講一次');
+
+    // 主線：只寫改動的那一則。整包重寫的話兩個分頁會互相蓋掉，而且串流時每秒好幾 MB
+    const db = mk(true);
+    db.saveChats();
+    assert.deepStrictEqual(db.store.put, [], 'saveChats 不該當場寫，要收成一批');
+    assert.deepStrictEqual(Array.from(db.dirtyChats), ['a'], '髒的只有動過的那一則');
+    await db.flushChats();
+    assert.deepStrictEqual(db.store.put, ['a'], '只寫改動的那一則：' + db.store.put);
+
+    // 陣列裡已經沒有的，flush 時要從資料庫刪掉，不然重整又冒出來
+    db.dirtyChats.add('沒了的');
+    await db.flushChats();
+    assert.deepStrictEqual(db.store.drop, ['沒了的'], '刪掉的對話沒有從資料庫清掉');
+
+    // 寫失敗要退回 localStorage 並且講出來 —— 靜靜掉一整場任務是最糟的失敗方式
+    db.store.fail = true;
+    db.saveChats();
+    await db.flushChats();
+    assert.strictEqual(db.idbOn(), false, 'IndexedDB 壞了要退回 localStorage');
+    assert.ok(/匯出/.test(db.said[db.said.length - 1]), '要叫人先匯出：' + db.said);
+    console.log('ok   對話存進 IndexedDB，壞了退回 localStorage 並且講');
   }
 
   // ── 自動模式要傳到後端 ────────────────────────────────

@@ -4,7 +4,7 @@ function current() {
   return S.chats[0];
 }
 function newChat(focus) {
-  const c = { id: uid(), title: '新對話', model: S.model, messages: [] };
+  const c = { id: uid(), title: '新對話', model: S.model, messages: [], created: Date.now() };
   S.chats.unshift(c);
   S.currentId = c.id;
   renderChatList();
@@ -25,17 +25,71 @@ function autoTitle(c) {
   }
   c.title = '新對話';
 }
-// 存不進去就講。一場長任務大約 400KB，配額 5–10MB —— 十幾場之後就會滿，
-// 而 saveChats() 有十九個呼叫點，沒有一個會知道自己失敗了。
-// 只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
+// 存不進去就講。只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
 let saveWarned = false;
+let useIdb = true;          // IndexedDB 開不起來（file:// 的 Firefox、無痕）就退回 localStorage
 
-function saveChats() {
+// saveChats() 有二十一個呼叫點，全部是「改完就叫一次」的同步寫法，而 IndexedDB
+// 是非同步的。所以這裡不改呼叫端：標記哪幾則髒了，收成一批在下一個空檔寫。
+// 400ms 是因為串流時一秒會叫好幾次 —— 每次都開一個交易只是在浪費。
+const dirtyChats = new Set();
+let flushTimer = null;
+
+// 開場只做一次。舊版存在 localStorage，搬進 IndexedDB 之後把那 5–10MB 讓出來 ——
+// 留著的話它只是佔位子，而且下次載入還要判斷該信哪一份。
+async function loadChats() {
+  const old = lsGet(LS_CHATS);
+  try {
+    let list = await chatsLoad();
+    if (!list.length && old && old.length) {
+      // 原本的順序就是「新的在前」，用遞減的時間戳把它保住
+      let t = Date.now();
+      old.forEach(function (c) { if (!c.created) c.created = t--; });
+      await Promise.all(old.map(chatPut));
+      list = old;
+      try { localStorage.removeItem(LS_CHATS); } catch (e) { /* 沒搬掉也不影響 */ }
+      toast('對話已搬進 IndexedDB（' + list.length + ' 則），不再卡在 5MB');
+    }
+    return list;
+  } catch (e) {
+    useIdb = false;
+    return old || [];
+  }
+}
+
+function saveChats(chat) {
+  const c = chat || current();
+  if (c) dirtyChats.add(c.id);
+  if (!useIdb) { lsSave(); return; }
+  if (flushTimer === null) flushTimer = setTimeout(flushChats, 400);
+}
+
+function lsSave() {
   if (lsSet(LS_CHATS, S.chats.slice(0, 100))) { saveWarned = false; return; }
   if (saveWarned) return;
   saveWarned = true;
   toast('對話存不進瀏覽器了（空間滿了）——'
     + '請先匯出這個對話，或刪掉幾個舊對話，否則重整就會不見');
+}
+
+// 寫失敗**一定要說**：靜靜掉一整場任務是這裡最不能接受的失敗方式。
+function flushChats() {
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  if (!dirtyChats.size) return Promise.resolve();
+  const ids = Array.from(dirtyChats);
+  dirtyChats.clear();
+  const jobs = ids.map(function (id) {
+    const c = S.chats.filter(function (x) { return x.id === id; })[0];
+    return c ? chatPut(c) : chatDrop(id);
+  });
+  return Promise.all(jobs).then(function () { saveWarned = false; }, function (e) {
+    useIdb = false;                       // 退回去，至少還存得下最近幾場
+    lsSave();
+    if (saveWarned) return;
+    saveWarned = true;
+    toast('對話存不進 IndexedDB（' + e.message + '），已改用瀏覽器的小空間，請盡快匯出');
+  });
 }
 
 // 一輪結束（最外層的 runStream 回來了）。有跑過工具才通知 ——
@@ -149,6 +203,7 @@ function deleteChat(id) {
     if (S.tab === 'hist') loadHistory();
   }
   renderChatList();
+  if (useIdb) chatDrop(id).catch(function () { });   // 陣列裡沒了，資料庫裡也要沒
   saveChats();
 }
 

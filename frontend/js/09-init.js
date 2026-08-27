@@ -1,5 +1,5 @@
 /* ══════════════════════ 啟動 ══════════════════════ */
-function init() {
+async function init() {
   // 靜態圖示
   $('newChatIcon').innerHTML = ico('plus', 15, 2);
   $('searchIcon').innerHTML = ico('search', 14, 2);
@@ -57,9 +57,10 @@ function init() {
   paramsToUi();
   renderFeatBtn();
 
-  const chats = lsGet(LS_CHATS);
-  S.chats = (chats && chats.length) ? chats : [];
-  if (!S.chats.length) S.chats.push({ id: uid(), title: '新對話', model: '', messages: [] });
+  S.chats = await loadChats();
+  if (!S.chats.length) {
+    S.chats.push({ id: uid(), title: '新對話', model: '', messages: [], created: Date.now() });
+  }
   S.currentId = S.chats[0].id;
 
   renderChatList();
@@ -357,7 +358,12 @@ function init() {
     }
   });
 
-  window.addEventListener('beforeunload', function () { saveChats(); saveConfig(); });
+  // flushChats() 而不是 saveChats()：後者只是排一個 400ms 的計時器，關分頁時它不會再響。
+  // visibilitychange 才是真正可靠的那一個 —— 手機上 beforeunload 常常根本不觸發。
+  window.addEventListener('beforeunload', function () { flushChats(); saveConfig(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') { flushChats(); saveConfig(); }
+  });
 
   loadUpstream().then(function () {
     refreshModels();

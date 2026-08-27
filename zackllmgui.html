@@ -1807,6 +1807,63 @@ function lsSet(key, value) {
     return false;
   }
 }
+
+/* ══════════════════════ 對話存哪裡 ══════════════════════
+   結論：**IndexedDB，一則對話一筆紀錄**，完全不出這台瀏覽器。
+
+   為什麼不是 localStorage（原本的做法）：配額只有 5–10MB，而一場長的 agent 任務
+   光工具輸出就 400KB 上下 —— 十幾場就滿。滿了之後 setItem 丟 QuotaExceededError，
+   整份對話存不進去。而且它是同步的：每次存都要把「全部」對話 JSON.stringify 一遍，
+   串流中一秒好幾次，那是主執行緒上實打實的停頓。
+
+   為什麼不是寫進 serve.py 那一端：對話裡有專案路徑與程式碼，一旦落地就得回答
+   「同一台 serve.py 上誰讀得到誰的對話」。伺服器只出算力，資料留在瀏覽器，
+   這句話才講得清楚。
+
+   IndexedDB 給的是：配額按磁碟算（GB 級）、非同步、structured clone 不必先轉字串、
+   而且**一則對話一筆**，所以存的時候只寫改動的那一則，兩個分頁也不會整包蓋掉對方。 */
+const DB_NAME = 'zackllmgui';
+const DB_STORE = 'chats';
+let dbPromise = null;
+
+function chatDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise(function (ok, bad) {
+    let req;
+    // file:// 下 Firefox 直接不給用，無痕模式也可能擋 —— 這裡失敗就回頭走 localStorage
+    try { req = indexedDB.open(DB_NAME, 1); } catch (e) { bad(e); return; }
+    req.onupgradeneeded = function () {
+      req.result.createObjectStore(DB_STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = function () { ok(req.result); };
+    req.onerror = function () { bad(req.error || new Error('IndexedDB 開不起來')); };
+    req.onblocked = function () { bad(new Error('IndexedDB 被其他分頁擋住')); };
+  });
+  return dbPromise;
+}
+
+function dbRun(mode, fn) {
+  return chatDb().then(function (d) {
+    return new Promise(function (ok, bad) {
+      const tx = d.transaction(DB_STORE, mode);
+      const req = fn(tx.objectStore(DB_STORE));
+      // 等 tx 完成而不是等 req.success：readwrite 要交易真的落地才算存到
+      tx.oncomplete = function () { ok(req ? req.result : undefined); };
+      tx.onerror = function () { bad(tx.error); };
+      tx.onabort = function () { bad(tx.error || new Error('交易被中止')); };
+    });
+  });
+}
+
+// 新的排在前面。用 created 而不是陣列順序：兩個分頁各自寫自己的那幾則時，
+// 「第幾個」會打架，「什麼時候建的」不會。
+function chatsLoad() {
+  return dbRun('readonly', function (st) { return st.getAll(); }).then(function (list) {
+    return (list || []).sort(function (a, b) { return (b.created || 0) - (a.created || 0); });
+  });
+}
+function chatPut(c) { return dbRun('readwrite', function (st) { return st.put(c); }); }
+function chatDrop(id) { return dbRun('readwrite', function (st) { return st.delete(id); }); }
 let toastTimer = null;
 function toast(msg) {
   const el = $('toast');
@@ -2627,7 +2684,7 @@ function current() {
   return S.chats[0];
 }
 function newChat(focus) {
-  const c = { id: uid(), title: '新對話', model: S.model, messages: [] };
+  const c = { id: uid(), title: '新對話', model: S.model, messages: [], created: Date.now() };
   S.chats.unshift(c);
   S.currentId = c.id;
   renderChatList();
@@ -2648,17 +2705,71 @@ function autoTitle(c) {
   }
   c.title = '新對話';
 }
-// 存不進去就講。一場長任務大約 400KB，配額 5–10MB —— 十幾場之後就會滿，
-// 而 saveChats() 有十九個呼叫點，沒有一個會知道自己失敗了。
-// 只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
+// 存不進去就講。只講一次：工具迴圈裡每次呼叫都會存一次，每次都 toast 等於洗版。
 let saveWarned = false;
+let useIdb = true;          // IndexedDB 開不起來（file:// 的 Firefox、無痕）就退回 localStorage
 
-function saveChats() {
+// saveChats() 有二十一個呼叫點，全部是「改完就叫一次」的同步寫法，而 IndexedDB
+// 是非同步的。所以這裡不改呼叫端：標記哪幾則髒了，收成一批在下一個空檔寫。
+// 400ms 是因為串流時一秒會叫好幾次 —— 每次都開一個交易只是在浪費。
+const dirtyChats = new Set();
+let flushTimer = null;
+
+// 開場只做一次。舊版存在 localStorage，搬進 IndexedDB 之後把那 5–10MB 讓出來 ——
+// 留著的話它只是佔位子，而且下次載入還要判斷該信哪一份。
+async function loadChats() {
+  const old = lsGet(LS_CHATS);
+  try {
+    let list = await chatsLoad();
+    if (!list.length && old && old.length) {
+      // 原本的順序就是「新的在前」，用遞減的時間戳把它保住
+      let t = Date.now();
+      old.forEach(function (c) { if (!c.created) c.created = t--; });
+      await Promise.all(old.map(chatPut));
+      list = old;
+      try { localStorage.removeItem(LS_CHATS); } catch (e) { /* 沒搬掉也不影響 */ }
+      toast('對話已搬進 IndexedDB（' + list.length + ' 則），不再卡在 5MB');
+    }
+    return list;
+  } catch (e) {
+    useIdb = false;
+    return old || [];
+  }
+}
+
+function saveChats(chat) {
+  const c = chat || current();
+  if (c) dirtyChats.add(c.id);
+  if (!useIdb) { lsSave(); return; }
+  if (flushTimer === null) flushTimer = setTimeout(flushChats, 400);
+}
+
+function lsSave() {
   if (lsSet(LS_CHATS, S.chats.slice(0, 100))) { saveWarned = false; return; }
   if (saveWarned) return;
   saveWarned = true;
   toast('對話存不進瀏覽器了（空間滿了）——'
     + '請先匯出這個對話，或刪掉幾個舊對話，否則重整就會不見');
+}
+
+// 寫失敗**一定要說**：靜靜掉一整場任務是這裡最不能接受的失敗方式。
+function flushChats() {
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  if (!dirtyChats.size) return Promise.resolve();
+  const ids = Array.from(dirtyChats);
+  dirtyChats.clear();
+  const jobs = ids.map(function (id) {
+    const c = S.chats.filter(function (x) { return x.id === id; })[0];
+    return c ? chatPut(c) : chatDrop(id);
+  });
+  return Promise.all(jobs).then(function () { saveWarned = false; }, function (e) {
+    useIdb = false;                       // 退回去，至少還存得下最近幾場
+    lsSave();
+    if (saveWarned) return;
+    saveWarned = true;
+    toast('對話存不進 IndexedDB（' + e.message + '），已改用瀏覽器的小空間，請盡快匯出');
+  });
 }
 
 // 一輪結束（最外層的 runStream 回來了）。有跑過工具才通知 ——
@@ -2772,6 +2883,7 @@ function deleteChat(id) {
     if (S.tab === 'hist') loadHistory();
   }
   renderChatList();
+  if (useIdb) chatDrop(id).catch(function () { });   // 陣列裡沒了，資料庫裡也要沒
   saveChats();
 }
 
@@ -5181,7 +5293,8 @@ function forkChat(idx) {
   const upto = idx < 0 ? c.messages.length : idx + 1;
   const copy = {
     id: uid(), title: c.title.replace(/（分支.*）$/, '') + '（分支）', model: c.model,
-    renamed: true, messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
+    renamed: true, created: Date.now(),
+    messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
   };
   S.chats.unshift(copy);
   S.currentId = copy.id;
@@ -5199,7 +5312,8 @@ function renameChat(id) {
   c.title = name;
   c.renamed = true;          // 別再被第一則訊息蓋掉
   renderChatList();
-  saveChats();
+  saveChats(c);              // 改的不一定是當下開著的那則，要指名
+
 }
 
 /* ══════════════════════ 模型管理 ══════════════════════ */
@@ -6383,7 +6497,7 @@ async function openSys() {
   renderSysFull();
 }
 /* ══════════════════════ 啟動 ══════════════════════ */
-function init() {
+async function init() {
   // 靜態圖示
   $('newChatIcon').innerHTML = ico('plus', 15, 2);
   $('searchIcon').innerHTML = ico('search', 14, 2);
@@ -6441,9 +6555,10 @@ function init() {
   paramsToUi();
   renderFeatBtn();
 
-  const chats = lsGet(LS_CHATS);
-  S.chats = (chats && chats.length) ? chats : [];
-  if (!S.chats.length) S.chats.push({ id: uid(), title: '新對話', model: '', messages: [] });
+  S.chats = await loadChats();
+  if (!S.chats.length) {
+    S.chats.push({ id: uid(), title: '新對話', model: '', messages: [], created: Date.now() });
+  }
   S.currentId = S.chats[0].id;
 
   renderChatList();
@@ -6741,7 +6856,12 @@ function init() {
     }
   });
 
-  window.addEventListener('beforeunload', function () { saveChats(); saveConfig(); });
+  // flushChats() 而不是 saveChats()：後者只是排一個 400ms 的計時器，關分頁時它不會再響。
+  // visibilitychange 才是真正可靠的那一個 —— 手機上 beforeunload 常常根本不觸發。
+  window.addEventListener('beforeunload', function () { flushChats(); saveConfig(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') { flushChats(); saveConfig(); }
+  });
 
   loadUpstream().then(function () {
     refreshModels();
