@@ -1,0 +1,819 @@
+/* ═══════════════ 色票 ═══════════════ */
+:root{
+  /* 閱讀區的字體倍率。一定要放在 :root —— 放 body 的話，body 自己的宣告
+     會贏過從 :root 繼承下來的值，JS 怎麼設都沒有用（踩過）。 */
+  --fs:1;
+  --ground:#0d0f12; --surface:#141619; --raised:#1b1e23; --hover:#22262d;
+  --line:#23272e; --line2:#31363e;
+  --ink:#e9ebee; --ink2:#a3aab4; --ink3:#6d7580;
+  --accent:#5b95f7; --accent-ink:#0d0f12;
+  --think:#a78bff; --think-bg:#17151f; --think-line:#2c2640; --think-ink:#b9a6f5;
+  --think-dim:#8b8399; --think-sel:#2f2a45; --think-sel-ink:#c4b5fd;
+  --ok:#3ddc97; --warn:#f5b544; --err:#ff6b6b;
+  --err-bg:#1a1315; --err-line:#3a2529; --err-ink:#ffc4c4;
+  --code-bg:#0a0c0e; --code-head:#111417; --code-ink:#c8cdd4; --inline-bg:#20242b;
+  --composer-bg:#16191e; --composer-line:#2c313a; --scroll:#2a2f37;
+  --syn-kw:#c792ea; --syn-str:#9ece6a; --syn-fn:#7aa2f7; --syn-com:#565f6b; --syn-num:#f5b544;
+  --ui:'Segoe UI Variable Text','Segoe UI','Microsoft JhengHei UI',system-ui,sans-serif;
+  --mono:'Cascadia Code','Cascadia Mono',Consolas,'Courier New',monospace;
+}
+[data-theme="light"]{
+  --ground:#ffffff; --surface:#f7f8fa; --raised:#eef0f3; --hover:#e4e7ec;
+  --line:#dcdfe4; --line2:#c9ced6;
+  --ink:#1a1d21; --ink2:#4d545d; --ink3:#7b828c;
+  --accent:#2f6fe0; --accent-ink:#ffffff;
+  --think:#7c5cf0; --think-bg:#f5f2fe; --think-line:#ddd4fb; --think-ink:#5b3fc4;
+  --think-dim:#6f6689; --think-sel:#e5dcfd; --think-sel-ink:#4c2fb8;
+  --ok:#12a05f; --warn:#a8700a; --err:#d13b3b;
+  --err-bg:#fdf3f3; --err-line:#f0cfcf; --err-ink:#8f2626;
+  --code-bg:#f5f6f8; --code-head:#eceef2; --code-ink:#2b2f36; --inline-bg:#eceef2;
+  --composer-bg:#ffffff; --composer-line:#c9ced6; --scroll:#c9ced6;
+  --syn-kw:#8b34c4; --syn-str:#1f7a3d; --syn-fn:#2255c7; --syn-com:#8b929b; --syn-num:#a8700a;
+}
+
+*{box-sizing:border-box;}
+/* class 上的 display 會蓋掉瀏覽器預設的 [hidden]{display:none}，要補回來 */
+[hidden]{display:none !important;}
+html,body{height:100%;}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--ui); font-size:13px; line-height:1.5;
+  -webkit-font-smoothing:antialiased; overflow:hidden;
+}
+button{font-family:inherit; font-size:inherit; color:inherit; cursor:pointer;}
+input,textarea{font-family:inherit; font-size:inherit; color:inherit;}
+svg{display:block; flex:none;}
+::-webkit-scrollbar{width:10px; height:10px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--scroll); border-radius:5px;}
+::-webkit-scrollbar-thumb:hover{background:var(--line2);}
+:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+
+#app{display:flex; height:100%; position:relative;}
+
+/* ═══════════════ 側欄 ═══════════════ */
+#sidebar{
+  width:var(--side-w,260px); flex:0 0 var(--side-w,260px);
+  min-width:190px; max-width:70vw; position:relative;
+  background:var(--surface);
+  border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden;
+}
+.side-head{
+  height:56px; flex:0 0 56px; display:flex; align-items:center; gap:10px;
+  padding:0 10px 0 14px; border-bottom:1px solid var(--line);
+}
+.app-name{font-size:14px; font-weight:600; letter-spacing:-.01em; flex:1; min-width:0;}
+.side-top{padding:12px; display:flex; flex-direction:column; gap:8px;}
+.btn-new{
+  height:36px; border-radius:10px; background:var(--raised); border:1px solid var(--line2);
+  display:flex; align-items:center; gap:8px; padding:0 12px; font-weight:500; width:100%;
+}
+.btn-new:hover{background:var(--hover);}
+.btn-new .kbd{margin-left:auto; font-family:var(--mono); font-size:10.5px; color:var(--ink3);}
+.search{
+  height:32px; border-radius:8px; background:var(--ground); border:1px solid var(--line);
+  padding:0 10px 0 32px; width:100%; outline:none;
+}
+.search:focus{border-color:var(--accent);}
+.search-wrap{position:relative;}
+.search-wrap svg{position:absolute; left:10px; top:9px; color:var(--ink3);}
+.side-label{
+  padding:10px 20px 6px; font-size:11px; font-weight:600; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--ink3);
+}
+#chatList{flex:1; min-height:0; overflow-y:auto; padding:0 8px 8px; display:flex; flex-direction:column; gap:2px;}
+.chat-item{
+  min-height:34px; border-radius:8px; display:flex; align-items:center; gap:8px;
+  padding:6px 8px 6px 10px; color:var(--ink2); border-left:3px solid transparent;
+  cursor:pointer; background:none; border-top:0; border-right:0; border-bottom:0; text-align:left; width:100%;
+}
+.chat-item:hover{background:var(--hover);}
+.chat-item.active{background:var(--hover); color:var(--ink); border-left-color:var(--accent);}
+.chat-item .t{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.chat-item .del,.chat-item .ren{
+  opacity:0; color:var(--ink3); display:flex; padding:2px; border-radius:4px;
+}
+.chat-item:hover .del,.chat-item:hover .ren{opacity:1;}
+.chat-item .del:hover{color:var(--err);}
+.chat-item .ren:hover{color:var(--accent);}
+.side-foot{
+  border-top:1px solid var(--line); padding:10px 10px 10px 12px;
+  display:flex; align-items:center; gap:10px;
+}
+.avatar{
+  width:26px; height:26px; border-radius:999px; background:var(--hover); color:var(--ink2);
+  display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; flex:none;
+  border:1px solid transparent; cursor:pointer; padding:0;
+}
+.avatar:hover{border-color:var(--line2); color:var(--ink);}
+.side-foot .meta{flex:1; min-width:0;}
+.side-foot .h{font-size:12.5px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.side-foot .s{font-size:11px; color:var(--ink3); font-family:var(--mono);}
+
+/* ═══════════════ 主區 ═══════════════ */
+#main{flex:1; min-width:0; display:flex; flex-direction:column; background:var(--ground);}
+#topbar{
+  height:56px; flex:0 0 56px; display:flex; align-items:center; gap:12px;
+  padding:0 16px 0 20px; border-bottom:1px solid var(--line); min-width:0;
+}
+/* 空間不夠時先犧牲模型名與狀態列的細節，最後才輪到按鈕；
+   ⋯ 與狀態燈是出口，被擠掉就沒辦法設定了 */
+#topbar > .icon-btn{flex:none;}
+#topbar .cap{display:none;}
+@media (min-width:880px){ #topbar .cap{display:flex;} }
+.model-btn{
+  height:32px; border-radius:8px; background:var(--raised); border:1px solid var(--line2);
+  display:flex; align-items:center; gap:9px; padding:0 10px 0 12px; font-weight:600;
+  letter-spacing:-.01em; max-width:360px; color:var(--ink);
+  min-width:80px; flex:0 1 auto; overflow:hidden;
+}
+.model-btn:hover{background:var(--hover);}
+.model-btn .n{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.size-chip{
+  height:18px; padding:0 6px; border-radius:5px; background:var(--line2); color:var(--ink2);
+  font-size:10.5px; font-weight:600; display:flex; align-items:center; flex:none;
+}
+.cap{
+  height:22px; padding:0 8px; border-radius:6px; font-size:11px; font-weight:600;
+  display:flex; align-items:center; gap:5px; flex:none;
+}
+/* 修飾詞刻意加 cap- 前綴：叫 .think 會和下面思考區塊的 .think 撞名，
+   單一 class 選擇器權重相同，後面那條的 border-radius 與 border 會蓋過來。 */
+.cap.cap-think{background:var(--think-bg); color:var(--think);}
+.cap.cap-tools{background:var(--surface); color:var(--ok);}
+.cap.cap-vision{background:var(--surface); color:var(--accent);}
+.spacer{flex:1;}
+
+/* 連線狀態 */
+#statusPill{
+  height:30px; border-radius:999px; background:var(--surface); border:1px solid var(--line);
+  display:flex; align-items:center; gap:8px; padding:0 12px 0 11px;
+  flex:0 1 auto; min-width:0; overflow:hidden;
+}
+@media (max-width:700px){
+  #statusHost, .pill-sep{display:none;}      /* 位址讓位，燈號與狀態字留著 */
+  .size-chip{display:none;}
+}
+#statusPill:hover{border-color:var(--line2);}
+#statusPill.error{background:var(--err-bg); border-color:var(--err-line); padding-right:5px;}
+.dot{width:7px; height:7px; border-radius:999px; flex:none;}
+.dot.ok{background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);}
+.dot.connecting{background:var(--warn); box-shadow:0 0 0 4px color-mix(in srgb, var(--warn) 16%, transparent); animation:breathe 1.4s ease-in-out infinite;}
+.dot.error{background:var(--err); box-shadow:0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent);}
+.dot.idle{background:var(--ink3);}
+@keyframes breathe{0%,100%{opacity:.45;}50%{opacity:1;}}
+@media (prefers-reduced-motion:reduce){.dot.connecting{animation:none;}}
+#statusText{font-size:12px; font-weight:500; white-space:nowrap;}
+#statusPill.error #statusText{color:var(--err-ink);}
+.pill-sep{width:1px; height:13px; background:var(--line2); flex:none;}
+#statusHost{font-size:11px; color:var(--ink3); font-family:var(--mono); white-space:nowrap;}
+#retryBtn{
+  height:22px; border-radius:999px; background:color-mix(in srgb, var(--err) 22%, transparent);
+  border:0; color:var(--err-ink); font-size:11px; font-weight:600;
+  display:none; align-items:center; gap:5px; padding:0 9px; flex:none;
+}
+#statusPill.error #retryBtn{display:flex;}
+
+.icon-btn{
+  width:32px; height:32px; border-radius:8px; background:none; border:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; color:var(--ink2); flex:none;
+}
+.icon-btn:hover{background:var(--hover);}
+.icon-btn.flat{border-color:transparent;}
+.icon-btn:disabled{color:var(--ink3); opacity:.5; cursor:not-allowed;}
+
+/* 訊息串 */
+#scroll{flex:1; min-height:0; overflow-y:auto; overflow-x:hidden;}
+#thread{max-width:720px; margin:0 auto; padding:24px 24px 8px; display:flex; flex-direction:column; gap:22px;}
+.msg{display:flex; gap:12px;}
+.msg.user{justify-content:flex-end;}
+.bubble{
+  max-width:76%; background:var(--hover); border-radius:18px 18px 4px 18px;
+  padding:10px 15px; font-size:calc(14px * var(--fs)); line-height:1.6;
+  white-space:pre-wrap; overflow-wrap:anywhere;
+}
+.msg-avatar{
+  width:28px; height:28px; flex:0 0 28px; border-radius:999px; background:var(--raised);
+  border:1px solid var(--line2); display:flex; align-items:center; justify-content:center;
+  color:var(--accent); margin-top:2px;
+}
+.msg-col{flex:1; min-width:0; display:flex; flex-direction:column; gap:9px;}
+.msg-name{font-size:12.5px; font-weight:600;}
+.msg-body{font-size:calc(14px * var(--fs)); line-height:1.7; color:var(--ink); overflow-wrap:anywhere;}
+.msg-body p{margin:0 0 .7em;}
+.msg-body p:last-child{margin-bottom:0;}
+.msg-body h1,.msg-body h2,.msg-body h3{font-size:15px; margin:.2em 0 .5em;}
+.msg-body ul,.msg-body ol{margin:.2em 0 .7em; padding-left:1.4em;}
+.msg-body li{margin:.15em 0;}
+.msg-body a{color:var(--accent);}
+.msg-body code{
+  font-family:var(--mono); font-size:calc(12.5px * var(--fs)); background:var(--inline-bg);
+  border-radius:4px; padding:1px 5px;
+}
+.msg-foot{display:flex; align-items:center; gap:10px; min-height:24px;}
+.stats{font-size:11px; color:var(--ink3); font-family:var(--mono); overflow-wrap:anywhere;}
+.msg-actions{margin-left:auto; display:flex; gap:4px;}
+.msg-actions .icon-btn{width:24px; height:24px; border-color:transparent; color:var(--ink3);}
+.caret{
+  display:inline-block; width:2px; height:15px; background:var(--accent);
+  vertical-align:-3px; margin-left:2px; animation:blink 1s steps(2) infinite;
+}
+@keyframes blink{50%{opacity:0;}}
+
+/* 程式碼區塊 */
+.code{border-radius:12px; border:1px solid var(--line); overflow:hidden; background:var(--code-bg); margin:.2em 0;}
+.code-head{
+  height:30px; background:var(--code-head); border-bottom:1px solid var(--line);
+  display:flex; align-items:center; padding:0 8px 0 12px; gap:8px;
+}
+.code-lang{font-size:11px; color:var(--ink3); font-family:var(--mono); flex:1;}
+.code-copy{width:24px; height:24px; border:0; background:none; border-radius:6px; color:var(--ink3); display:flex; align-items:center; justify-content:center;}
+.code-copy:hover{background:var(--hover);}
+.code pre{
+  margin:0; padding:12px 14px; overflow-x:auto; font-family:var(--mono);
+  font-size:calc(12.5px * var(--fs)); line-height:1.75; color:var(--code-ink);
+}
+.k{color:var(--syn-kw);} .s{color:var(--syn-str);} .f{color:var(--syn-fn);}
+.c{color:var(--syn-com);} .n{color:var(--syn-num);}
+
+/* 思考區塊 */
+.think{border-radius:12px; background:var(--think-bg); border:1px solid var(--think-line); overflow:hidden; align-self:flex-start; max-width:100%;}
+.think.open{align-self:stretch;}
+.think-head{
+  height:32px; display:flex; align-items:center; gap:7px; padding:0 12px;
+  color:var(--think-ink); font-size:11.5px; font-weight:500; background:none; border:0; width:100%;
+}
+.think-head svg:first-child{color:var(--think);}
+.think-head .chev{color:var(--think-dim); margin-left:auto;}
+.think.open .think-head{border-bottom:1px solid var(--think-line);}
+.think-dots{display:flex; gap:3px; align-items:center;}
+.think-dots i{width:3px; height:3px; border-radius:999px; background:var(--think-dim); animation:pulse 1.2s ease-in-out infinite;}
+.think-dots i:nth-child(2){animation-delay:.2s;} .think-dots i:nth-child(3){animation-delay:.4s;}
+@keyframes pulse{0%,100%{opacity:.35;}50%{opacity:1;}}
+.think-body{
+  padding:11px 14px; font-size:calc(12.5px * var(--fs)); line-height:1.75; color:var(--think-dim);
+  font-style:italic; white-space:pre-wrap; overflow-wrap:anywhere; display:none;
+}
+.think.open .think-body{display:block;}
+
+/* 錯誤卡 */
+.err-card{
+  background:var(--err-bg); border:1px solid var(--err-line); border-radius:12px;
+  padding:13px 15px; display:flex; gap:13px;
+}
+.err-card .ic{color:var(--err); margin-top:1px;}
+.err-card .t{font-size:13px; font-weight:600; color:var(--err-ink); overflow-wrap:anywhere;}
+.err-card .d{font-size:12px; color:var(--ink2); margin-top:3px; white-space:pre-wrap;}
+
+.empty{color:var(--ink3); text-align:center; padding:60px 20px; font-size:13.5px; line-height:1.9;}
+
+/* 輸入區 */
+#composerWrap{flex:none; padding:8px 0 18px;}
+#composer{
+  max-width:720px; margin:0 auto; background:var(--composer-bg); border:1px solid var(--composer-line);
+  border-radius:20px; padding:12px 12px 10px 16px; display:flex; flex-direction:column; gap:10px;
+}
+#composerWrap{padding-left:24px; padding-right:24px;}
+#input{
+  background:none; border:0; outline:none; resize:none; width:100%;
+  font-size:calc(14px * var(--fs)); line-height:1.5; min-height:24px;
+  max-height:170px; overflow-y:auto; color:var(--ink);
+}
+#input::placeholder{color:var(--ink3);}
+#input:disabled{color:var(--ink3);}
+.comp-row{display:flex; align-items:center; gap:8px;}
+.comp-row .icon-btn{width:30px; height:30px; border-color:var(--composer-line);}
+.comp-row .icon-btn.on{
+  background:var(--think-sel); border-color:var(--think-line); color:var(--think-ink);
+}
+/* 自動模式開著就換成警告色：這件事必須一眼看得到 */
+.comp-row .icon-btn.warn{
+  background:var(--err-bg); border-color:var(--err-line); color:var(--err);
+}
+.hint{font-size:11px; color:var(--ink3); margin-left:auto; white-space:nowrap;}
+#sendBtn{
+  width:34px; height:34px; border-radius:999px; background:var(--accent); border:0;
+  color:var(--accent-ink); display:flex; align-items:center; justify-content:center; flex:none;
+}
+#sendBtn:disabled{background:var(--line); color:var(--ink3); cursor:not-allowed;}
+#sendBtn.stop{background:var(--err); color:var(--err-bg);}
+#attachBar{font-size:11px; color:var(--ink3); display:none; gap:8px; align-items:center;}
+#attachBar.show{display:flex;}
+#attachBar button{background:none; border:0; color:var(--ink3); text-decoration:underline;}
+
+/* ═══════════════ 參數面板 ═══════════════ */
+#params{
+  width:var(--params-w,320px); flex:0 0 var(--params-w,320px);
+  /* 280 是量出來的：#pBody 是兩欄格線，最長的參數名 draft_num_predict
+     在這個寬度以下會撐出欄外。下面 .f-label 的 overflow-wrap 是保險，
+     擋的是以後冒出更長的名字 —— 兩道都要，一道是好看、一道是保證。 */
+  min-width:280px; max-width:70vw; position:relative;
+  background:var(--surface); border-left:1px solid var(--line);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+.p-head{
+  height:56px; flex:0 0 56px; display:flex; align-items:center; gap:8px;
+  padding:0 12px 0 16px; border-bottom:1px solid var(--line);
+}
+.p-title{font-size:14px; font-weight:600; flex:1;}
+.ghost{
+  height:26px; border-radius:7px; background:none; border:1px solid var(--line2);
+  color:var(--ink2); font-size:11.5px; display:flex; align-items:center; gap:6px; padding:0 9px;
+}
+.ghost:hover{background:var(--hover);}
+#pBody{flex:1; min-height:0; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:18px;}
+.sec{display:flex; flex-direction:column; gap:9px;}
+.sec-label{
+  font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink3); display:flex; align-items:center; gap:7px;
+}
+.sec-label svg{color:var(--think);}
+.divider{height:1px; background:var(--line);}
+.note{font-size:11px; line-height:1.55; color:var(--ink3);}
+
+.seg{
+  height:32px; border-radius:9px; background:var(--ground); border:1px solid var(--line);
+  padding:3px; display:flex; gap:3px;
+}
+.seg button{
+  flex:1; border-radius:6px; background:none; border:0; color:var(--ink2);
+  font-size:12px; display:flex; align-items:center; justify-content:center;
+}
+.seg button:hover:not(.on):not(:disabled){background:var(--hover);}
+.seg button.on{background:var(--think-sel); color:var(--think-sel-ink); font-weight:600;}
+.seg button:disabled{color:var(--ink3); cursor:not-allowed;}
+.seg.disabled{opacity:.55;}
+
+.check{display:flex; align-items:center; gap:9px; font-size:12.5px; color:var(--ink2); cursor:pointer;}
+.check input{
+  appearance:none; width:16px; height:16px; border-radius:4px; border:1px solid var(--line2);
+  background:var(--ground); flex:none; position:relative; cursor:pointer; margin:0;
+}
+.check input:checked{background:var(--think); border-color:var(--think);}
+.check input:checked::after{
+  content:''; position:absolute; left:5px; top:2px; width:4px; height:8px;
+  border:solid var(--accent-ink); border-width:0 2px 2px 0; transform:rotate(45deg);
+}
+[data-theme="light"] .check input:checked::after{border-color:#fff;}
+
+textarea.field{
+  background:var(--ground); border:1px solid var(--line); border-radius:10px;
+  padding:9px 11px; font-size:12.5px; line-height:1.6; resize:vertical; min-height:68px; outline:none; width:100%;
+}
+textarea.field:focus,input.field:focus{border-color:var(--accent);}
+input.field{
+  height:30px; background:var(--ground); border:1px solid var(--line); border-radius:8px;
+  padding:0 10px; font-family:var(--mono); font-size:12px; outline:none; width:100%;
+}
+.slider-row{display:flex; flex-direction:column; gap:7px;}
+.slider-top{display:flex; align-items:center;}
+.slider-top .l{flex:1; font-size:12.5px; color:var(--ink2);}
+.badge{
+  height:20px; width:52px; padding:0 6px; border-radius:5px; background:var(--raised);
+  border:1px solid var(--line2); color:var(--ink); text-align:center;
+  font-family:var(--mono); font-size:11px; font-variant-numeric:tabular-nums;
+  outline:none; flex:none;
+}
+.badge:hover{border-color:var(--ink3);}
+.badge:focus{border-color:var(--accent);}
+input[type=range]{
+  appearance:none; width:100%; height:4px; border-radius:999px; background:var(--line); outline:none; margin:4px 0;
+}
+input[type=range]::-webkit-slider-thumb{
+  appearance:none; width:13px; height:13px; border-radius:999px;
+  background:var(--ink); border:3px solid var(--accent); cursor:pointer;
+}
+input[type=range]::-moz-range-thumb{
+  width:13px; height:13px; border-radius:999px; background:var(--ink);
+  border:3px solid var(--accent); cursor:pointer;
+}
+.grid2{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px;}
+.f-label{font-size:11px; color:var(--ink3); font-family:var(--mono); margin-bottom:5px; display:block; overflow-wrap:anywhere;}
+
+/* ═══════════════ 對話框 ═══════════════ */
+.overlay{
+  position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
+  align-items:center; justify-content:center; z-index:50; padding:20px;
+}
+.overlay.hidden{display:none;}
+/* 說明是從別的對話框裡點開的，DOM 順序在它們前面，不墊高就會被蓋住 */
+#phOverlay{z-index:60;}
+.dialog{
+  width:100%; max-width:440px; background:var(--surface); border:1px solid var(--line2);
+  border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:12px;
+  box-shadow:0 18px 48px rgba(0,0,0,.45);
+}
+.dialog h2{margin:0; font-size:15px; font-weight:600;}
+/* 路徑、模型名這類長字串沒有空白可以斷行，不強制斷就會把對話框撐爆 */
+.dialog, .dialog .note, .dialog-row span{min-width:0; overflow-wrap:anywhere;}
+.dialog .note code{overflow-wrap:anywhere;}
+.dialog-row > span{flex:1 1 auto;}
+.dialog input:not([type="checkbox"]){
+  height:34px; background:var(--ground); border:1px solid var(--line2); border-radius:9px;
+  padding:0 11px; font-family:var(--mono); font-size:12.5px; outline:none; width:100%;
+}
+.dialog input:not([type="checkbox"]):focus{border-color:var(--accent);}
+/* 核取方塊沿用 .check 的樣式，不要被上面那條吃掉 */
+.dialog .check{align-items:flex-start; line-height:1.55;}
+.dialog .check input{margin-top:2px;}
+.primary{
+  height:30px; border-radius:8px; background:var(--accent); border:0; color:var(--accent-ink);
+  font-size:12px; font-weight:600; padding:0 14px; display:flex; align-items:center; gap:6px;
+}
+.dialog-row{display:flex; align-items:center; gap:9px; flex-wrap:wrap;}
+#hostResult{font-size:12px;}
+.dialog-actions{display:flex; justify-content:flex-end; gap:9px; margin-top:2px;}
+.menu{
+  position:absolute; z-index:60; background:var(--surface); border:1px solid var(--line2);
+  border-radius:10px; padding:5px; min-width:230px; max-height:400px; overflow-y:auto;
+  box-shadow:0 12px 32px rgba(0,0,0,.4);
+}
+.menu button{
+  display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none;
+  border:0; border-radius:6px; padding:7px 10px; font-size:12.5px; color:var(--ink);
+}
+.menu button:hover{background:var(--hover);}
+.menu button .m{
+  margin-left:auto; color:var(--ink3); font-size:11px; font-family:var(--mono);
+  max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.menu button > span:first-child{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.menu hr{border:0; border-top:1px solid var(--line); margin:4px 6px;}
+#toast{
+  position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+  background:var(--raised); border:1px solid var(--line2); border-radius:9px;
+  padding:8px 14px; font-size:12.5px; z-index:80; opacity:0; pointer-events:none;
+  transition:opacity .18s;
+}
+#toast.show{opacity:1;}
+
+/* ═══════════════ context 用量 ═══════════════ */
+#todoBar{
+  display:flex; flex-direction:column; gap:2px; padding:6px 8px; margin-bottom:6px;
+  background:var(--ground); border:1px solid var(--line); border-radius:8px;
+  max-height:132px; overflow-y:auto; font-size:11.5px;
+}
+#todoBar .t{display:flex; gap:7px; align-items:flex-start; color:var(--ink2);}
+#todoBar .t.done{color:var(--ink3); text-decoration:line-through;}
+#todoBar .t .b{color:var(--accent); flex:none;}
+#todoBar .t.done .b{color:var(--ok);}
+#todoBar .h{font-size:10.5px; color:var(--ink3); letter-spacing:.04em;}
+/* 打 / 之後浮在輸入框上面的功能清單 */
+#slashBar{
+  display:flex; flex-direction:column; gap:1px; padding:5px; margin-bottom:6px;
+  background:var(--raised); border:1px solid var(--line2); border-radius:9px;
+  max-height:230px; overflow-y:auto;
+}
+#slashBar .sc{
+  display:flex; align-items:center; gap:9px; padding:6px 9px; border-radius:6px;
+  cursor:pointer; font-size:12.5px; color:var(--ink2); border:0; background:none;
+  width:100%; text-align:left;
+}
+#slashBar .sc.on,#slashBar .sc:hover{background:var(--hover); color:var(--ink);}
+#slashBar .sc .k{font-family:var(--mono); color:var(--accent); flex:none;}
+#slashBar .sc .d{
+  color:var(--ink3); font-size:11.5px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+#slashBar .hd{padding:4px 9px 2px; font-size:10.5px; color:var(--ink3); letter-spacing:.04em;}
+
+/* 工具卡收折 */
+.tool-card .th .fold{
+  margin-left:6px; width:18px; height:18px; flex:none; border:0; background:none;
+  color:var(--ink3); font-size:10px; line-height:1;
+}
+.tool-card .th .fold:hover{color:var(--accent);}
+.tool-card.fold pre,.tool-card.fold .ta{display:none;}
+
+#runBar{
+  padding:4px 9px; margin-bottom:6px; border:1px solid var(--line); border-radius:8px;
+  background:var(--ground); font-size:11px; color:var(--ink3); font-family:var(--mono);
+  white-space:pre-line;              /* 第二行是「現在：<待辦>」 */
+}
+#resumeBar{
+  display:flex; align-items:center; gap:8px; margin-bottom:6px;
+  padding:4px 6px 4px 9px; border:1px dashed var(--line2); border-radius:8px;
+  background:var(--ground); font-size:11.5px; color:var(--ink2);
+}
+#resumeBar[hidden]{display:none;}
+#resumeWhy{flex:1; min-width:0;}
+#queueBar{
+  display:flex; align-items:center; gap:8px; margin-bottom:6px;
+  padding:4px 6px 4px 9px; border:1px solid var(--accent); border-radius:8px;
+  background:var(--ground); font-size:11.5px; color:var(--ink2);
+}
+#queueBar[hidden]{display:none;}
+#queueWhy{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+
+#ctxRow{display:flex; align-items:center; gap:8px; padding:1px 2px 5px;}
+#ctxTrack{flex:1; height:4px; border-radius:2px; background:var(--hover); overflow:hidden;}
+#ctxFill{height:100%; width:0; background:var(--accent); transition:width .25s;}
+#ctxFill.warn{background:var(--warn);}
+#ctxFill.over{background:var(--err);}
+#ctxText{font-size:10.5px; color:var(--ink3); font-family:var(--mono); white-space:nowrap;}
+
+/* ═══════════════ 工具呼叫 ═══════════════ */
+.tool-card{
+  border:1px solid var(--line2); background:var(--surface); border-radius:10px;
+  padding:10px 12px; display:flex; flex-direction:column; gap:8px; max-width:min(760px,100%);
+}
+.tool-card .th{display:flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600;}
+.tool-card .th .nm{font-family:var(--mono); color:var(--accent); font-weight:500;}
+.tool-card pre{
+  margin:0; background:var(--code-bg); border:1px solid var(--line); border-radius:8px;
+  padding:8px 10px; font-family:var(--mono); font-size:11.5px; color:var(--code-ink);
+  white-space:pre-wrap; word-break:break-word; max-height:230px; overflow:auto;
+}
+.tool-card .ta{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+/* 選項按鈕：.mini 預設 flex:none + 固定高度，長選項會一路頂出卡片外面。
+   這裡讓它可以縮、可以換行、文字也可以折。 */
+.tool-card .opts .mini{
+  flex:0 1 auto; max-width:100%; height:auto; min-height:26px;
+  padding:5px 10px; line-height:1.45; text-align:left;
+  white-space:normal; overflow-wrap:anywhere;
+}
+/* 選起來的那一個要一眼看得出來。用跟思考模式分段、檔案樹同一組 token —— */
+/* 「選中」在這個介面裡長什麼樣，只能有一種答案。 */
+.tool-card .opts .mini.on{
+  background:var(--think-sel); color:var(--think-sel-ink);
+  border-color:var(--think-sel); font-weight:600;
+}
+.tool-card .opts .mini.on:hover{background:var(--think-sel);}
+/* 送出鍵：選好了才亮起來。不能用 .primary —— .mini 在這份檔案裡排在它後面，
+   同權重會把 height/border/background 全部蓋掉，class 加了等於沒加。 */
+.tool-card .ta .mini[data-send]:not(:disabled){
+  background:var(--accent); color:var(--accent-ink);
+  border-color:var(--accent); font-weight:600;
+}
+.tool-card .st{font-size:11.5px; color:var(--ink3);}
+.tool-card.done{border-color:var(--line);}
+
+/* ═══════════════ 對話框：模型管理 / 比較 ═══════════════ */
+.dialog.wide{max-width:820px;}
+.dialog select, .dialog textarea{
+  background:var(--ground); border:1px solid var(--line2); border-radius:9px;
+  padding:7px 10px; font-size:12.5px; outline:none; width:100%; resize:vertical;
+}
+.dialog select:focus, .dialog textarea:focus{border-color:var(--accent);}
+.row-list{display:flex; flex-direction:column; gap:6px; max-height:44vh; overflow-y:auto; padding-right:2px;}
+
+/* 還原點：照 VS Code 原始檔控制那一欄的排法 —— 一行一個檔案，
+   狀態字母靠右，路徑用灰色接在檔名後面，不換行不加框。 */
+.sc-list{display:flex; flex-direction:column; overflow-y:auto; flex:1; min-height:0;}
+.sc-row{
+  display:flex; align-items:center; gap:8px; padding:3px 10px 3px 12px;
+  cursor:pointer; white-space:nowrap; font-size:12.5px; color:var(--ink2);
+  border-left:2px solid transparent;
+}
+.sc-row:hover{background:var(--hover); border-left-color:var(--accent);}
+.sc-row .nm{color:var(--ink); overflow:hidden; text-overflow:ellipsis; flex:none; max-width:52%;}
+.sc-row .dir{color:var(--ink3); font-size:11px; overflow:hidden;
+  text-overflow:ellipsis; flex:1; min-width:0;}
+.sc-row .tm{color:var(--ink3); font-size:11px; font-family:var(--mono); flex:none;}
+.sc-row .st{
+  width:15px; text-align:center; font-weight:700; font-size:11px;
+  font-family:var(--mono); flex:none;
+}
+.sc-row .st.m{color:var(--accent);}      /* Modified */
+.sc-row .st.a{color:var(--ok, #3fb950);} /* Added */
+.sc-head{
+  display:flex; align-items:center; gap:6px; padding:8px 10px 4px 12px;
+  font-size:11px; font-weight:600; letter-spacing:.04em; color:var(--ink3);
+  text-transform:uppercase;
+}
+.sc-head .cnt{
+  background:var(--raised); border:1px solid var(--line2); border-radius:9px;
+  padding:0 6px; font-size:10px; font-family:var(--mono); color:var(--ink2);
+}
+.sc-row.day{
+  cursor:default; color:var(--ink3); font-size:11px; padding-top:8px;
+  border-left-color:transparent; background:none;
+}
+.sc-row.day:hover{background:none; border-left-color:transparent;}
+.mm-row{
+  display:flex; align-items:center; gap:9px; padding:7px 10px; border:1px solid var(--line);
+  border-radius:9px; background:var(--ground);
+}
+.mm-row .n{flex:1; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.mm-row .m{font-size:11px; color:var(--ink3); font-family:var(--mono); white-space:nowrap;}
+.mini{
+  height:26px; padding:0 10px; border-radius:7px; border:1px solid var(--line2);
+  background:var(--raised); font-size:11.5px; flex:none;
+}
+.mini:hover:not(:disabled){background:var(--hover);}
+.mini:disabled{opacity:.45; cursor:not-allowed;}
+.mini.danger:hover:not(:disabled){color:var(--err); border-color:var(--err);}
+#pullTrack{height:5px; border-radius:3px; background:var(--hover); overflow:hidden; flex:1;}
+#pullFill{height:100%; width:0; background:var(--accent); transition:width .2s;}
+.stepper{display:flex; align-items:center; gap:0;}
+.stepper button{
+  width:32px; height:32px; border:1px solid var(--line2); background:var(--raised);
+  color:var(--ink); font-size:16px; font-weight:600; line-height:1;
+}
+.stepper button:first-child{border-radius:8px 0 0 8px;}
+.stepper button:last-child{border-radius:0 8px 8px 0;}
+.stepper button:hover:not(:disabled){background:var(--hover); border-color:var(--accent);}
+.stepper button:disabled{color:var(--ink3); cursor:not-allowed;}
+.stepper .v{
+  width:74px; height:32px; text-align:center;
+  border:1px solid var(--line2); border-left:0; border-right:0;
+  background:var(--ground); font-family:var(--mono); font-size:13px;
+  font-variant-numeric:tabular-nums; outline:none; padding:0;
+}
+.stepper .v:focus{border-color:var(--accent);}
+.fs-demo{
+  margin-top:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+  background:var(--ground); font-size:calc(14px * var(--fs)); line-height:1.7; color:var(--ink);
+}
+
+.help-btn{
+  width:15px; height:15px; margin-left:6px; border-radius:50%; flex:none;
+  border:1px solid var(--line2); background:var(--raised); color:var(--ink3);
+  font-size:10px; font-weight:700; line-height:1; padding:0; vertical-align:middle;
+}
+.help-btn:hover{border-color:var(--accent); color:var(--accent);}
+.p-help{display:flex; flex-direction:column; gap:12px; max-height:60vh; overflow-y:auto;}
+.p-help .row{display:flex; flex-direction:column; gap:2px;}
+.p-help .n{font-family:var(--mono); font-size:12px; color:var(--accent);}
+.p-help .d{font-size:12px; color:var(--ink2); line-height:1.55;}
+.p-help .lim{font-size:11px; color:var(--ink3); font-family:var(--mono);}
+
+.sub-label{font-size:11px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--ink3);}
+
+.cmp-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+.cmp-col{
+  border:1px solid var(--line); border-radius:10px; background:var(--ground);
+  display:flex; flex-direction:column; min-height:200px; max-height:42vh; overflow:hidden;
+}
+.cmp-col .h{display:flex; align-items:center; gap:7px; padding:7px 9px; border-bottom:1px solid var(--line);}
+.cmp-col .h select{height:28px; padding:0 6px; font-size:11.5px;}
+.cmp-col .b{flex:1; overflow-y:auto; padding:10px 12px; font-size:12.5px; line-height:1.65;}
+.cmp-col .f{padding:5px 9px; border-top:1px solid var(--line); font-size:10.5px; color:var(--ink3); font-family:var(--mono);}
+@media (max-width:720px){ .cmp-grid{grid-template-columns:1fr;} }
+
+#wsResult{
+  font-size:11.5px; color:var(--ink3); font-family:var(--mono);
+  overflow-wrap:anywhere; line-height:1.6;
+}
+#wsResult b{color:var(--ink2); font-weight:600;}
+
+/* 右側面板的分頁 */
+.tabs{display:flex; gap:2px; flex:1; min-width:0;}
+.tab{
+  height:26px; padding:0 11px; border-radius:7px; background:none; border:1px solid transparent;
+  color:var(--ink3); font-size:12px; font-weight:600;
+}
+.tab:hover{color:var(--ink2); background:var(--hover);}
+.tab.on{color:var(--ink); background:var(--raised); border-color:var(--line2);}
+
+/* 檔案檢視：行號 + 內容 */
+#fBody{flex:1; min-height:0; display:flex; flex-direction:column;}
+.f-head{
+  display:flex; align-items:center; gap:6px; padding:8px 10px 8px 14px;
+  border-bottom:1px solid var(--line); font-size:11.5px;
+}
+.f-head .p{
+  flex:1; min-width:0; font-family:var(--mono); color:var(--ink2);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left;
+}
+.codeview{
+  flex:1; min-height:0; overflow:auto; background:var(--code-bg);
+  font-family:var(--mono); font-size:11.5px; line-height:1.65; padding:6px 0;
+}
+.cl{display:flex; white-space:pre;}
+.cl:hover{background:var(--hover);}
+.cl .ln{
+  flex:none; width:48px; padding-right:10px; text-align:right; color:var(--ink3);
+  user-select:none; position:sticky; left:0; background:var(--code-bg);
+}
+.cl .lt{padding-right:14px; color:var(--code-ink);}
+.cl.add{background:color-mix(in srgb, var(--ok) 12%, transparent);}
+.cl.add .lt{color:var(--ok);}
+.cl.del{background:color-mix(in srgb, var(--err) 12%, transparent);}
+.cl.del .lt{color:var(--err);}
+.cl.hunk .lt{color:var(--ink3);}
+.cl.hunk{background:var(--surface);}
+.fv-empty{padding:18px 16px; color:var(--ink3); font-size:12px; line-height:1.7;}
+
+/* 檔案樹：一列一個項目，縮排靠 padding-left，沒有連接線也看得懂層級 */
+#treeWrap,#viewWrap{flex:1; min-height:0; display:flex; flex-direction:column;}
+.tree{flex:1; min-height:0; overflow:auto; padding:4px 0 10px; font-size:12px;}
+.tree .it{
+  display:flex; align-items:center; gap:5px; padding:2px 10px 2px 0;
+  color:var(--ink2); cursor:pointer; white-space:nowrap;
+}
+.tree .it:hover{background:var(--hover);}
+.tree .it.on{background:var(--think-sel); color:var(--think-sel-ink);}
+.tree .it .tw{
+  width:12px; flex:none; text-align:center; color:var(--ink3); font-size:9px;
+  transition:transform .12s;
+}
+.tree .it .tw.open{transform:rotate(90deg);}
+.tree .it .nm{overflow:hidden; text-overflow:ellipsis;}
+.tree .it.dir .nm{color:var(--ink); font-weight:500;}
+.tree .it .sz{margin-left:auto; color:var(--ink3); font-size:10px; font-family:var(--mono);}
+.tree .kids{display:none;}
+.tree .kids.open{display:block;}
+.ws-head .p{direction:ltr; font-weight:500; color:var(--ink);}
+#brList .it{
+  display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:7px;
+  cursor:pointer; font-size:12.5px;
+}
+#brList .it:hover{background:var(--hover);}
+#brList .it .g{margin-left:auto; font-size:10.5px; color:var(--accent); font-family:var(--mono);}
+
+/* 收合：箭頭貼在面板自己身上，收起來之後由畫面邊緣的細條叫回來 */
+.chev-btn{
+  width:22px; height:22px; flex:none; border:0; background:none; color:var(--ink3);
+  font-size:15px; line-height:1; border-radius:6px; display:flex;
+  align-items:center; justify-content:center;
+}
+.chev-btn:hover{background:var(--hover); color:var(--ink);}
+.edge-rail{
+  position:fixed; top:0; bottom:0; width:14px; border:0; padding:0; z-index:30;
+  background:var(--surface); color:var(--ink3); font-size:13px; line-height:1;
+  display:none; align-items:center; justify-content:center;
+}
+.edge-rail.left{left:0; border-right:1px solid var(--line);}
+.edge-rail.right{right:0; border-left:1px solid var(--line);}
+.edge-rail:hover{background:var(--hover); color:var(--accent);}
+body.hide-sidebar #sidebar{display:none;}
+body.hide-params #params{display:none;}
+body.hide-sidebar #sideRail, body.hide-params #paramRail{display:flex;}
+/* 窄畫面時面板本來就收著，浮層叫出來之後細條要讓開 */
+@media (max-width:820px){ body:not(.show-sidebar) #sideRail{display:flex;} }
+@media (max-width:1100px){ body:not(.show-params) #paramRail{display:flex;} }
+body.show-sidebar #sideRail, body.show-params #paramRail{display:none;}
+
+/* 工具卡裡的 diff */
+.diff{white-space:pre-wrap; font-family:var(--mono); font-size:11.5px; line-height:1.5;}
+.diff .a{color:var(--ok);}
+.diff .d{color:var(--err);}
+.diff .h{color:var(--ink3);}
+
+/* 壓縮後的摘要訊息 */
+.msg.user.compacted .bubble{
+  background:var(--raised); color:var(--ink2); border:1px dashed var(--line2); font-style:italic;
+}
+
+/* 附件晶片 */
+.file-chip{
+  display:inline-flex; align-items:center; gap:6px; background:var(--raised);
+  border:1px solid var(--line2); border-radius:6px; padding:2px 4px 2px 8px;
+  margin:0 5px 4px 0; color:var(--ink2);
+}
+.file-chip.editable{cursor:pointer;}
+.file-chip.editable:hover{border-color:var(--accent); color:var(--ink);}
+.file-chip .x{
+  border:0; background:none; color:var(--ink3); padding:0 3px; border-radius:4px; line-height:1;
+}
+.file-chip .x:hover{color:var(--err); background:var(--hover);}
+.danger-text{color:var(--err);}
+
+/* 窄畫面：收掉兩側欄，但要能從 ⋯ 選單叫回來（否則參數與對話清單就消失了） */
+@media (max-width:1100px){
+  #params{display:none;}
+  body.show-params #params{display:flex; position:absolute; right:0; top:0; bottom:0; z-index:40;
+    box-shadow:-12px 0 32px rgba(0,0,0,.35);}
+}
+@media (max-width:820px){
+  #sidebar{display:none;}
+  body.show-sidebar #sidebar{display:flex; position:absolute; left:0; top:0; bottom:0; z-index:40;
+    box-shadow:12px 0 32px rgba(0,0,0,.35);}
+}
+
+
+/* ═══════════════ 側欄拖寬 ═══════════════ */
+/* 把手放在側欄**裡面**的內側邊緣：兩側欄都是 overflow:hidden，
+   用負的 right/left 把手會被切掉。6px 是 VSCode 那類編輯器的量級。 */
+.resizer{
+  position:absolute; top:0; bottom:0; width:6px; z-index:6;
+  cursor:col-resize; background:transparent; border:0; padding:0;
+  touch-action:none;                 /* 不然行動裝置上會變成捲動 */
+}
+#sidebar .resizer{right:0;}
+#params  .resizer{left:0;}
+.resizer:hover, .resizer.dragging{background:var(--accent); opacity:.55;}
+/* 拖的時候整頁鎖住游標與選取，不然滑過文字會反白一片 */
+body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !important;}
+
+/* ═══════════════ 模型寫出來的 檔案:行號 ═══════════════ */
+/* 用虛線底線而不是藍字：它出現在一段技術文字中間，做得跟外部連結一樣顯眼會很吵。 */
+.file-ref{
+  cursor:pointer; border-bottom:1px dashed var(--ink3);
+  text-underline-offset:2px;
+}
+.file-ref:hover{color:var(--accent); border-bottom-color:var(--accent);}
+/* 跳過去的那一行要亮一下，不然使用者還是得自己數行號 */
+#fvBody .cl.hit{background:var(--think-sel); border-radius:4px;}
+#fvBody .cl.hit .ln{color:var(--think-sel-ink);}
+
+/* 被擋住的待辦：淡一點，但不能像做完的那樣劃掉 —— 它還沒做 */
+#todoBar .t.blocked{opacity:.62;}
+#todoBar .t .dep{color:var(--ink3); font-size:10.5px;}
+
+/* 一輪的總計：跟 per-message 的統計並排，但用等寬字，方便比對不同輪的數字 */
+.msg-foot .turn{
+  font-size:11px; color:var(--ink3); font-family:var(--mono);
+  border-left:1px solid var(--line2); padding-left:10px;
+}

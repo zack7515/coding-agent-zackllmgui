@@ -1,0 +1,3 @@
+# Ollama GUI（PySide6 版）
+# 只有這一個相依套件；與 Ollama 的溝通用標準函式庫的 urllib，沒有 requests。
+PySide6>=6.6

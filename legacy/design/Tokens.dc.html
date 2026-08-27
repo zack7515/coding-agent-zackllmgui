@@ -1,0 +1,239 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    * { box-sizing: border-box; }
+    a { color: #5b95f7; text-decoration: none; }
+    a:hover { color: #7fadfa; }
+  </style>
+</helmet>
+
+<div style="width: 1000px; height: 1000px; background: #0d0f12; color: #e9ebee; font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif; font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 20px; overflow: hidden;">
+
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">色票與元件規格</div>
+    <div style="font-size: 12.5px; color: #6d7580; line-height: 1.5;">冷調中性灰底 + 單一藍色主行動色，思考流程專屬紫色。字型走 Windows 內建 Segoe UI Variable，中文自動落到微軟正黑體。</div>
+  </div>
+
+  <!-- 深色表面 -->
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">深色表面</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #0d0f12; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">app / 聊天底</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#0d0f12</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #141619; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">側欄 / 面板</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#141619</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #1b1e23; border: 1px solid #31363e;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">控制項</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#1b1e23</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #22262d;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">hover / 氣泡</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#22262d</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #23272e;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">分隔線</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#23272e</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #0a0c0e; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">程式碼底</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#0a0c0e</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文字與強調色 -->
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">文字與強調色</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #e9ebee;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">主文字</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#e9ebee</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #a3aab4;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">次要文字</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#a3aab4</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #6d7580;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">提示 / 停用</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#6d7580</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #5b95f7;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">主行動色</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#5b95f7</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #a78bff;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">思考流程</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#a78bff</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #17151f; border: 1px solid #2c2640;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">思考區塊底</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#17151f</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 狀態色 -->
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">狀態色</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #3ddc97;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">已連線</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#3ddc97</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #f5b544;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">連線中 / 警告</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#f5b544</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #ff6b6b;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">離線 / 錯誤</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#ff6b6b</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #1a2320; border: 1px solid #24382f;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">成功底</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#1a2320</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #1a1315; border: 1px solid #3a2529;"></div>
+        <div style="font-size: 11.5px; font-weight: 500;">錯誤底</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#1a1315</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 48px; border-radius: 10px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center; gap: 9px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #f5b544; box-shadow: 0 0 0 3px rgba(245, 181, 68, 0.14);"></span>
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #ff6b6b; box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);"></span>
+        </div>
+        <div style="font-size: 11.5px; font-weight: 500;">狀態燈 7px</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">+ 3px 光暈</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 淺色主題 -->
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">淺色主題對應</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #ffffff; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#ffffff</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #f7f8fa; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#f7f8fa</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #eef0f3; border: 1px solid #23272e;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#eef0f3</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #dcdfe4;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#dcdfe4</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #1a1d21;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#1a1d21</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="height: 40px; border-radius: 10px; background: #2f6fe0;"></div>
+        <div style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">#2f6fe0</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 20px;">
+    <!-- 字級 -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+      <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">字級</div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 14px; line-height: 1.7;">聊天內文 Body</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">14px / 1.7</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 13px;">介面預設 UI</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">13px / 1.5</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 12.5px; font-weight: 600;">標題 / 模型名</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">12.5px / 600</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">區段標籤</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">11px / 600 / .06em</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 12.5px; font-family: 'Cascadia Code', Consolas, monospace;">程式碼 code</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">Cascadia 12.5px</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <span style="width: 130px; flex: 0 0 130px; font-size: 11px; color: #6d7580;">統計 / 時間戳</span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">11px</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 尺寸 -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+      <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">尺寸與圓角</div>
+      <div style="display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: #a3aab4;">
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">側欄寬</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">260px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">參數面板寬</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">320px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">頂列高</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">56px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">訊息欄最大寬</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">720px 置中</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">控制項高</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">30 / 32 / 36px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">圓角</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">6 · 8 · 10 · 12 · 20 · 999</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">送出鍵</span><span style="font-family: 'Cascadia Code', Consolas, monospace; color: #6d7580;">34px 圓形</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 圖示 -->
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">圖示 · 線條 1.8–2 / 24 格線 / 圓端點</div>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 6.1"></path><path d="M20 5v6h-6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5l-8 8a5 5 0 01-7-7l8.5-8.5a3.4 3.4 0 014.8 4.8L9.9 17.2a1.8 1.8 0 01-2.5-2.5l7.8-7.8"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"></path><circle cx="16" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="13" cy="18" r="2"></circle></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.3A8.5 8.5 0 019.7 3.5a8.5 8.5 0 1010.8 10.8z"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0113.7-5.6L20 8"></path><path d="M20 4v4h-4"></path></svg></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

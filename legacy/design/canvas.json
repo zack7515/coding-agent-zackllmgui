@@ -1,0 +1,25 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "主畫面" },
+    { "file": "ConnectionStates.dc.html", "x": 0, "y": 1020, "w": 880, "h": 880, "title": "連線狀態與防呆" },
+    { "file": "ThinkingPanel.dc.html", "x": 960, "y": 1020, "w": 880, "h": 940, "title": "思考區塊與參數" },
+    { "file": "Tokens.dc.html", "x": 0, "y": 2080, "w": 1000, "h": 1000, "title": "色票與元件規格" }
+  ],
+  "annotations": [
+    {
+      "id": "impl-note",
+      "x": 1500,
+      "y": 0,
+      "w": 300,
+      "text": "PySide6 對照\n\n• 側欄／面板 = QFrame + objectName，全部樣式走一份 QSS\n• 聊天區 = QScrollArea + 逐則 message widget\n• 思考區塊 = 可摺疊 QFrame，標題列點擊切換\n• 狀態燈 = 自繪 QWidget（圓點 + 光暈），每 30 秒輪詢\n• 圓角輸入框 = QTextEdit 外包 QFrame + border-radius"
+    },
+    {
+      "id": "density-note",
+      "x": 1500,
+      "y": 260,
+      "w": 300,
+      "text": "密度說明\n\n桌面應用密度，控制項高度取 30–36px，不套用行動裝置 44px 觸控最小值。"
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

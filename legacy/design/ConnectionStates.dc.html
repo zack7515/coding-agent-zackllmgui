@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    * { box-sizing: border-box; }
+    a { color: #5b95f7; text-decoration: none; }
+    a:hover { color: #7fadfa; }
+  </style>
+</helmet>
+
+<div style="width: 880px; height: 880px; background: #0d0f12; color: #e9ebee; font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif; font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 22px; overflow: hidden;">
+
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">連線狀態與防呆</div>
+    <div style="font-size: 12.5px; color: #6d7580; line-height: 1.5;">狀態燈固定在頂列右側。所有狀態由 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #a3aab4;">GET /api/tags</span> 的結果驅動，每 30 秒輪詢一次。</div>
+  </div>
+
+  <!-- ── 四種狀態 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">狀態指示器</div>
+
+    <!-- 已連線 -->
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">已連線</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">127.0.0.1:11434</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #3ddc97;">綠燈 #3ddc97</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">/api/tags 回 200 且模型數 &gt; 0。輸入框、送出鍵全部啟用。</div>
+      </div>
+    </div>
+
+    <!-- 連線中 -->
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #f5b544; box-shadow: 0 0 0 4px rgba(245, 181, 68, 0.14);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">連線中…</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #6d7580; font-family: 'Cascadia Code', Consolas, monospace;">127.0.0.1:11434</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #f5b544;">黃燈 #f5b544 · 光暈 1.4s 呼吸</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">請求已送出、尚未收到回應。送出鍵維持啟用，避免誤判為壞掉。</div>
+      </div>
+    </div>
+
+    <!-- 離線 -->
+    <div style="background: #141619; border: 1px solid #3a2529; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #1c1315; border: 1px solid #3a2529; display: flex; align-items: center; gap: 8px; padding: 0 5px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #ff6b6b; box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);"></span>
+          <span style="font-size: 12px; color: #ffc4c4; font-weight: 500;">無法連線</span>
+          <span style="height: 22px; border-radius: 999px; background: #2e1c1f; display: flex; align-items: center; gap: 5px; padding: 0 9px;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ff9a9a" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0113.7-5.6L20 8"></path><path d="M20 4v4h-4"></path></svg>
+            <span style="font-size: 11px; color: #ff9a9a; font-weight: 600;">重試</span>
+          </span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #ff6b6b;">紅燈 #ff6b6b</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">連線被拒或逾時。pill 本身變成可按的重試鍵，並跳出下方橫幅。</div>
+      </div>
+    </div>
+
+    <!-- 已連線但無模型 -->
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">已連線</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #f5b544; font-weight: 500;">無可用模型</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #f5b544;">綠燈 + 琥珀文字</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">server 活著但 models 是空陣列。提示 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #cfd4da;">ollama pull llama3.2</span>，送出鍵鎖住。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 斷線防呆 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">斷線時的防呆</div>
+
+    <div style="border-radius: 12px; background: #1a1315; border: 1px solid #3a2529; padding: 13px 15px; display: flex; align-items: center; gap: 13px;">
+      <div style="width: 30px; height: 30px; flex: 0 0 30px; border-radius: 999px; background: #2e1c1f; display: flex; align-items: center; justify-content: center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff6b6b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"></path><circle cx="12" cy="16.8" r="0.9" fill="#ff6b6b" stroke="none"></circle><circle cx="12" cy="12" r="9"></circle></svg>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-size: 13px; font-weight: 600; color: #ffc4c4;">無法連線到 127.0.0.1:11434</div>
+        <div style="font-size: 12px; color: #a3aab4; line-height: 1.5;">請確認 Ollama 已啟動（<span style="font-family: 'Cascadia Code', Consolas, monospace;">ollama serve</span>）；遠端連線需設定 <span style="font-family: 'Cascadia Code', Consolas, monospace;">OLLAMA_HOST=0.0.0.0</span>。</div>
+      </div>
+      <div style="height: 30px; border-radius: 8px; background: #ff6b6b; display: flex; align-items: center; padding: 0 13px; font-size: 12px; font-weight: 600; color: #1a1315;">重試連線</div>
+      <div style="height: 30px; border-radius: 8px; border: 1px solid #3a2529; display: flex; align-items: center; padding: 0 13px; font-size: 12px; color: #ffc4c4;">設定主機</div>
+    </div>
+
+    <div style="border-radius: 20px; background: #121417; border: 1px solid #1f2329; padding: 12px 12px 10px 16px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 14px; color: #4b525b;">尚未連線，無法送出</div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="width: 30px; height: 30px; border-radius: 8px; border: 1px solid #1f2329; display: flex; align-items: center; justify-content: center;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3f454d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5l-8 8a5 5 0 01-7-7l8.5-8.5a3.4 3.4 0 014.8 4.8L9.9 17.2a1.8 1.8 0 01-2.5-2.5l7.8-7.8"></path></svg>
+        </div>
+        <div style="height: 30px; border-radius: 8px; border: 1px solid #1f2329; display: flex; align-items: center; gap: 6px; padding: 0 10px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#3f454d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 12px; color: #3f454d; font-weight: 600;">思考 · 高</span>
+        </div>
+        <div style="flex: 1;"></div>
+        <div style="height: 26px; border-radius: 7px; background: #1f2329; display: flex; align-items: center; padding: 0 10px; font-size: 11.5px; color: #8d95a0;">連線後才能送出</div>
+        <div style="width: 34px; height: 34px; border-radius: 999px; background: #1f2329; display: flex; align-items: center; justify-content: center;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4b525b" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 主機設定 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">主機設定（點狀態燈開啟）</div>
+
+    <div style="width: 400px; border-radius: 14px; background: #141619; border: 1px solid #2c313a; padding: 15px; display: flex; flex-direction: column; gap: 11px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);">
+      <div style="font-size: 13px; font-weight: 600;">Ollama 主機</div>
+      <div style="height: 34px; border-radius: 9px; background: #0d0f12; border: 1px solid #3a4150; display: flex; align-items: center; padding: 0 11px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12.5px;">http://192.168.1.20:11434<span style="width: 1.5px; height: 15px; background: #5b95f7; margin-left: 1px;"></span></div>
+      <div style="display: flex; align-items: center; gap: 9px;">
+        <div style="height: 30px; border-radius: 8px; background: #5b95f7; display: flex; align-items: center; padding: 0 14px; font-size: 12px; font-weight: 600; color: #0d0f12;">測試連線</div>
+        <div style="display: flex; align-items: center; gap: 7px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3ddc97" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>
+          <span style="font-size: 12px; color: #3ddc97;">成功 · v0.12.3 · 6 個模型</span>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #5f6772; line-height: 1.55; border-top: 1px solid #23272e; padding-top: 10px;">留空自動套用環境變數 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #8d95a0;">OLLAMA_HOST</span>，未填通訊協定時自動補上 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #8d95a0;">http://</span>。</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

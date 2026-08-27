@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-Hant" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZackLLMGUI</title>
+<!-- 這個檔案是 frontend/index.html 的產出，不要直接改它。
+     改 frontend/ 底下的檔案，serve.py 啟動或重新整理時會自己重組（或跑 python build.py）。 -->
+<style>
+/*{{STYLE}}*/
+</style>
+</head>
+<body>
+
+<div id="app">
+  <!-- ═══════ 側欄 ═══════ -->
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="app-name">ZackLLMGUI</span>
+      <button class="chev-btn" id="sideCollapse" title="收合對話清單">‹</button>
+    </div>
+    <div class="side-top">
+      <button class="btn-new" id="newChatBtn"><span id="newChatIcon"></span>新對話<span class="kbd">Ctrl N</span></button>
+      <div class="search-wrap">
+        <span id="searchIcon"></span>
+        <input class="search" id="searchBox" placeholder="搜尋對話" autocomplete="off">
+      </div>
+    </div>
+    <div class="side-label">對話</div>
+    <div id="chatList"></div>
+    <div class="side-foot">
+      <button class="avatar" id="avatarBtn" title="點一下改名字">本</button>
+      <div class="meta">
+        <div class="h" id="footHost">尚未連線</div>
+        <div class="s" id="footInfo">—</div>
+      </div>
+      <button class="icon-btn flat" id="settingsBtn" title="設定"></button>
+    </div>
+    <div class="resizer" id="sideResize" title="拖曳調整寬度，雙擊還原"></div>
+  </aside>
+
+  <!-- ═══════ 主區 ═══════ -->
+  <main id="main">
+    <header id="topbar">
+      <button class="model-btn" id="modelBtn">
+        <span class="n" id="modelName">尚未選擇模型</span>
+        <span class="size-chip" id="modelSize" hidden></span>
+        <span id="modelChev"></span>
+      </button>
+      <span class="cap cap-think" id="capThink" hidden>thinking</span>
+      <span class="cap cap-tools" id="capTools" hidden>tools</span>
+      <span class="cap cap-vision" id="capVision" hidden>vision</span>
+      <div class="spacer"></div>
+      <div id="statusPill" role="button" tabindex="0" title="點擊設定主機">
+        <span class="dot idle" id="statusDot"></span>
+        <span id="statusText">尚未連線</span>
+        <span class="pill-sep" id="pillSep"></span>
+        <span id="statusHost"></span>
+        <button id="retryBtn">重試</button>
+      </div>
+      <button class="icon-btn" id="moreBtn" title="更多"></button>
+    </header>
+
+    <div id="scroll"><div id="thread"></div></div>
+
+    <div id="composerWrap">
+      <div id="composer">
+        <div id="slashBar" hidden></div>
+        <div id="runBar" hidden></div>
+        <div id="resumeBar" hidden><span id="resumeWhy"></span><button class="mini" id="resumeBtn">繼續</button></div>
+        <div id="queueBar" hidden><span id="queueWhy"></span><button class="mini" id="queueDrop">取消</button></div>
+        <div id="todoBar" hidden></div>
+        <div id="ctxRow" hidden><div id="ctxTrack"><div id="ctxFill"></div></div><span id="ctxText"></span></div>
+        <div id="attachBar"><span id="attachText"></span><button id="attachClear">清除</button></div>
+        <textarea id="input" rows="1" placeholder="輸入訊息…（打 / 看有哪些功能）"></textarea>
+        <div class="comp-row">
+          <button class="icon-btn" id="attachBtn" title="附加檔案或圖片"></button>
+          <button class="icon-btn" id="compactBtn" title="壓縮對話（把較早的訊息濃縮成摘要）"></button>
+          <button class="icon-btn" id="writeBtn" title="允許模型修改檔案"></button>
+          <button class="icon-btn" id="featBtn" title="功能與工具"></button>
+          <span class="hint" id="hint"></span>
+          <button id="sendBtn" title="送出"></button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════ 參數面板 ═══════ -->
+  <aside id="params">
+    <div class="resizer" id="paramResize" title="拖曳調整寬度，雙擊還原"></div>
+    <div class="p-head">
+      <button class="chev-btn" id="paramCollapse" title="收合右側面板">›</button>
+      <div class="tabs">
+        <button class="tab on" id="tabParams">參數</button>
+        <button class="tab" id="tabFile">檔案</button>
+        <button class="tab" id="tabHist">紀錄</button>
+      </div>
+      <button class="ghost" id="resetBtn"><span id="resetIcon"></span>還原</button>
+    </div>
+    <div id="pBody">
+      <div class="sec">
+        <div class="sec-label"><span id="thinkSecIcon"></span>思考模式<button
+          class="help-btn" id="thinkHelp" title="思考強度是什麼">!</button></div>
+        <div class="seg" id="thinkSeg"></div>
+        <label class="check"><input type="checkbox" id="showThink" checked>在對話中顯示思考過程</label>
+        <div class="note" id="thinkNote"></div>
+      </div>
+      <div class="divider"></div>
+
+      <div class="sec">
+        <div class="sec-label">系統提示</div>
+        <div class="dialog-row">
+          <button class="ghost" id="presetBtn">套用預設…</button>
+          <button class="ghost" id="presetSave">存成預設</button>
+        </div>
+        <textarea class="field" id="system" placeholder="例如：你是一位精確、簡潔的技術助理。"></textarea>
+      </div>
+      <div class="divider"></div>
+
+      <div class="sec" id="sliders">
+        <div class="sec-label">取樣參數</div>
+      </div>
+      <div class="divider"></div>
+
+      <div class="sec">
+        <div class="sec-label">進階<button class="help-btn" id="paramHelp"
+          title="這些參數是什麼意思">!</button></div>
+        <div class="grid2">
+          <div><label class="f-label" for="num_ctx">num_ctx（K）</label><input class="field" id="num_ctx" placeholder="64"></div>
+          <div><label class="f-label" for="num_predict">num_predict</label><input class="field" id="num_predict" placeholder="-1（不限）"></div>
+          <div><label class="f-label" for="seed">seed</label><input class="field" id="seed" placeholder="-1（隨機）"></div>
+          <div><label class="f-label" for="keep_alive">keep_alive</label><input class="field" id="keep_alive" placeholder="5m"></div>
+        </div>
+        <div class="grid2">
+          <div><label class="f-label" for="num_keep">num_keep</label><input class="field" id="num_keep" placeholder="自動"></div>
+          <div><label class="f-label" for="num_batch">num_batch</label><input class="field" id="num_batch" placeholder="512"></div>
+          <div><label class="f-label" for="num_gpu">num_gpu</label><input class="field" id="num_gpu" placeholder="自動"></div>
+          <div><label class="f-label" for="num_thread">num_thread</label><input class="field" id="num_thread" placeholder="自動"></div>
+          <div><label class="f-label" for="draft_num_predict">draft_num_predict</label><input class="field" id="draft_num_predict" placeholder="自動"></div>
+        </div>
+        <div><label class="f-label" for="stop">stop（多組用逗號分隔）</label><input class="field" id="stop" placeholder="空白＝不設定"></div>
+      </div>
+    </div>
+    <div id="fBody" hidden>
+      <div class="f-head ws-head">
+        <span class="p" id="wsName">（未選資料夾）</span>
+        <button class="mini" id="wsPick" title="選一個資料夾當工作區">選資料夾…</button>
+        <button class="help-btn" id="wsHelp" title="工作區是什麼、限制有哪些">!</button>
+      </div>
+      <div id="treeWrap">
+        <div class="tree" id="fvTree"></div>
+      </div>
+      <div id="viewWrap" hidden>
+        <div class="f-head">
+          <button class="mini" id="fvBack" title="回到檔案樹">‹</button>
+          <span class="p" id="fvPath">（還沒開啟檔案）</span>
+          <button class="mini" id="fvDiff" hidden>差異</button>
+          <button class="mini" id="fvReload" hidden>重讀</button>
+        </div>
+        <div class="codeview" id="fvBody"></div>
+      </div>
+    </div>
+    <div id="hBody" hidden>
+      <div class="f-head ws-head">
+        <span class="p">這個工作區的變更紀錄</span>
+        <button class="mini" id="rwReload" title="重新讀取">重讀</button>
+        <button class="help-btn" id="rwHelp" title="還原會動到什麼">!</button>
+      </div>
+      <div id="histWrap">
+        <div id="wsGit"></div>
+        <div class="sc-head">還原點<span class="cnt" id="rwCount">0</span></div>
+        <div class="sc-list" id="rwList"></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- 主機設定 -->
+<div class="overlay hidden" id="hostOverlay">
+  <div class="dialog">
+    <h2>連線設定<button class="help-btn" id="hostHelp" title="這些設定是什麼">!</button></h2>
+    <div class="seg" id="provSeg"></div>
+    <div id="provOllama">
+      <input id="hostInput" placeholder="http://192.168.1.20:11434" spellcheck="false">
+    </div>
+    <div id="provOpenai" hidden>
+      <input id="oaBase" placeholder="https://api.openai.com/v1" spellcheck="false">
+      <input id="oaKey" type="password" placeholder="API 金鑰" spellcheck="false" style="margin-top:8px;">
+    </div>
+    <div class="dialog-row">
+      <button class="primary" id="hostTest">測試連線</button>
+      <span id="hostResult"></span>
+    </div>
+    <div class="divider"></div>
+    <div class="dialog-actions">
+      <button class="ghost" id="hostCancel">取消</button>
+      <button class="primary" id="hostSave">儲存並連線</button>
+    </div>
+  </div>
+</div>
+
+<!-- 工作區 -->
+<!-- 選資料夾 -->
+<div class="overlay hidden" id="brOverlay">
+  <div class="dialog wide">
+    <h2>選一個資料夾當工作區</h2>
+    <div class="dialog-row" style="margin-bottom:8px;">
+      <button class="mini" id="brUp" title="上一層">↑</button>
+      <input id="brPath" spellcheck="false" placeholder="／可以直接打路徑"
+        style="flex:1; font-family:var(--mono);">
+      <button class="mini" id="brGo" title="跳到這個路徑">前往</button>
+    </div>
+    <div class="row-list" id="brList"></div>
+    <div class="note" id="brNote"></div>
+    <div class="dialog-actions">
+      <button class="ghost" id="brHome">家目錄</button>
+      <button class="ghost" id="brCancel">取消</button>
+      <button class="primary" id="brPickHere">就選這個資料夾</button>
+    </div>
+  </div>
+</div>
+
+<!-- 允許規則 -->
+<div class="overlay hidden" id="rlOverlay">
+  <div class="dialog wide">
+    <h2>允許規則<button class="help-btn" id="rlHelp" title="規則怎麼比對">!</button></h2>
+    <div class="dialog-row">
+      <input id="rlTool" spellcheck="false" placeholder="工具（run_shell、edit_file、* ）"
+        style="flex:1; font-family:var(--mono);">
+      <input id="rlPattern" spellcheck="false" placeholder="樣式（pytest*、secrets/**）"
+        style="flex:1; font-family:var(--mono);">
+      <select id="rlAction" class="field" style="width:88px;">
+        <option value="allow">放行</option>
+        <option value="ask">要問</option>
+        <option value="deny">禁止</option>
+      </select>
+      <button class="mini" id="rlAdd">加入</button>
+    </div>
+    <div class="row-list" id="rlList"></div>
+    <div class="note" style="font-family:var(--mono); font-size:11px;" id="rlPath"></div>
+    <div class="dialog-actions">
+      <button class="primary" id="rlClose">關閉</button>
+    </div>
+  </div>
+</div>
+
+<!-- 進階參數說明 -->
+<div class="overlay hidden" id="phOverlay">
+  <div class="dialog wide">
+    <h2 id="phTitle">說明</h2>
+    <div class="p-help" id="phBody"></div>
+    <div class="note" id="phNote"></div>
+    <div class="dialog-actions">
+      <button class="primary" id="phClose">關閉</button>
+    </div>
+  </div>
+</div>
+
+<!-- 字體大小 -->
+<div class="overlay hidden" id="fsOverlay">
+  <div class="dialog">
+    <h2>字體大小<button class="help-btn" id="fsHelp" title="會縮放哪些東西">!</button></h2>
+    <div class="dialog-row">
+      <div class="stepper">
+        <button id="fsMinus" title="縮小 1%">−</button>
+        <input class="v" id="fsValue" inputmode="numeric" spellcheck="false"
+          title="直接輸入百分比，例如 115">
+        <button id="fsPlus" title="放大 1%">＋</button>
+      </div>
+      <button class="ghost" id="fsReset">重設為 100%</button>
+    </div>
+    <div class="fs-demo">預覽：這行字會跟著變。The quick brown fox. <code>code_sample()</code></div>
+    <div class="dialog-actions">
+      <button class="primary" id="fsClose">關閉</button>
+    </div>
+  </div>
+</div>
+
+<!-- 附件內容 -->
+<div class="overlay hidden" id="fileOverlay">
+  <div class="dialog wide">
+    <h2>附件內容</h2>
+    <input id="fileName" spellcheck="false" placeholder="檔名（副檔名決定 code block 的語言）">
+    <textarea id="fileText" rows="16" spellcheck="false"
+      style="font-family:var(--mono); font-size:12px; line-height:1.6; min-height:40vh;"></textarea>
+    <div class="note" id="fileMeta"></div>
+    <div class="dialog-actions">
+      <button class="ghost danger-text" id="fileDelete">刪除這個附件</button>
+      <button class="ghost" id="fileCancel">取消</button>
+      <button class="primary" id="fileSave">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 模型管理 -->
+<div class="overlay hidden" id="modelsOverlay">
+  <div class="dialog wide">
+    <h2>模型管理<button class="help-btn" id="pullHelp" title="模型名稱怎麼填">!</button></h2>
+    <div class="dialog-row" id="pullRow">
+      <input id="pullInput" placeholder="qwen3:8b 或 hf.co/user/repo:Q4_K_M" spellcheck="false" style="flex:1;">
+      <button class="primary" id="pullBtn">下載</button>
+    </div>
+    <div class="dialog-row" id="pullProgress" hidden>
+      <div id="pullTrack"><div id="pullFill"></div></div>
+      <span class="m" id="pullText" style="font-size:11px; color:var(--ink3);"></span>
+      <button class="mini danger" id="pullCancel">取消</button>
+    </div>
+    <div class="divider"></div>
+    <div class="sub-label">執行中（佔用記憶體）</div>
+    <div class="row-list" id="psList" style="max-height:22vh;"></div>
+    <div class="sub-label">已下載</div>
+    <div class="row-list" id="mmList"></div>
+    <div class="dialog-actions">
+      <button class="ghost" id="mmRefresh">重新整理</button>
+      <button class="primary" id="mmClose">關閉</button>
+    </div>
+  </div>
+</div>
+
+<!-- 多模型比較 -->
+<div class="overlay hidden" id="cmpOverlay">
+  <div class="dialog wide">
+    <h2>多模型比較<button class="help-btn" id="cmpHelp" title="比較會用什麼設定">!</button></h2>
+    <textarea id="cmpPrompt" rows="3" placeholder="同一個提示，兩個模型各答一次…"></textarea>
+    <div class="cmp-grid">
+      <div class="cmp-col">
+        <div class="h"><select id="cmpModelA"></select><button class="mini" data-copy="A">複製</button></div>
+        <div class="b" id="cmpBodyA"></div>
+        <div class="f" id="cmpStatA"></div>
+      </div>
+      <div class="cmp-col">
+        <div class="h"><select id="cmpModelB"></select><button class="mini" data-copy="B">複製</button></div>
+        <div class="b" id="cmpBodyB"></div>
+        <div class="f" id="cmpStatB"></div>
+      </div>
+    </div>
+    
+    <div class="dialog-actions">
+      <button class="ghost" id="cmpClose">關閉</button>
+      <button class="primary" id="cmpRun">開始</button>
+    </div>
+  </div>
+</div>
+
+<button class="edge-rail left" id="sideRail" title="展開對話清單">›</button>
+<button class="edge-rail right" id="paramRail" title="展開右側面板">‹</button>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+(function () {
+/*{{SCRIPT}}*/
+})();
+</script>
+</body>
+</html>

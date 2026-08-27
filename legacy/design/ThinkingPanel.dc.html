@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    * { box-sizing: border-box; }
+    a { color: #5b95f7; text-decoration: none; }
+    a:hover { color: #7fadfa; }
+  </style>
+</helmet>
+
+<div style="width: 880px; height: 940px; background: #0d0f12; color: #e9ebee; font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif; font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 22px; overflow: hidden;">
+
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">思考區塊與參數面板</div>
+    <div style="font-size: 12.5px; color: #6d7580; line-height: 1.5;">思考內容走專屬紫色系，和一般回覆明顯分流；能力偵測來自 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #a3aab4;">POST /api/show</span> 的 capabilities。</div>
+  </div>
+
+  <!-- ── 思考區塊三態 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">思考區塊</div>
+
+    <!-- 串流中 -->
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">串流中</div>
+      <div style="flex: 1; border-radius: 12px; background: #17151f; border: 1px solid #2c2640; overflow: hidden;">
+        <div style="height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">思考中</span>
+          <span style="display: flex; gap: 3px; align-items: center; padding-top: 1px;">
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #a78bff;"></span>
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+          </span>
+          <div style="flex: 1;"></div>
+          <span style="font-size: 11px; color: #6d5f88; font-family: 'Cascadia Code', Consolas, monospace;">2.6s</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="padding: 0 12px 11px 31px; font-size: 12.5px; line-height: 1.7; color: #8b8399; font-style: italic;">先確認使用者要的是折線圖而不是散佈圖，資料欄位應該是時間對數值<span style="display: inline-block; width: 2px; height: 13px; background: #a78bff; vertical-align: -2px; margin-left: 3px;"></span></div>
+      </div>
+    </div>
+
+    <!-- 完成收合 -->
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">完成 · 收合</div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+        <div style="align-self: flex-start; height: 28px; border-radius: 8px; background: #17151f; border: 1px solid #2c2640; display: flex; align-items: center; gap: 7px; padding: 0 10px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">已思考 4.2 秒</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">串流結束後自動收合成一顆膠囊，點一下展開。展開／收合狀態逐則記憶。</div>
+      </div>
+    </div>
+
+    <!-- 完成展開 -->
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">完成 · 展開</div>
+      <div style="flex: 1; border-radius: 12px; background: #17151f; border: 1px solid #2c2640; overflow: hidden;">
+        <div style="height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px; border-bottom: 1px solid #241f33;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">已思考 4.2 秒</span>
+          <div style="flex: 1;"></div>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6d5f88" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="padding: 11px 14px; font-size: 12.5px; line-height: 1.75; color: #8b8399; font-style: italic; max-height: 96px; overflow: hidden;">先確認使用者要的是折線圖而不是散佈圖，資料欄位應該是時間對數值。內建 csv 模組就夠了，不需要 pandas，避免多裝套件。matplotlib 的 plot_date 已經被標記為過時，改用一般的 plot 搭配 datetime 物件比較安全。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 思考模式控制的三種形態 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">思考模式控制（依模型能力自動切換）</div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
+
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 11.5px; color: #cfd4da;">gpt-oss:20b</div>
+        <div style="height: 32px; border-radius: 9px; background: #0d0f12; border: 1px solid #23272e; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">關</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">低</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">中</div>
+          <div style="flex: 1; border-radius: 6px; background: #2f2a45; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #c4b5fd; font-weight: 600;">高</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">capabilities 含 thinking，且模型支援分級。四段全開。</div>
+      </div>
+
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 11.5px; color: #cfd4da;">qwen3:8b</div>
+        <div style="height: 32px; border-radius: 9px; background: #0d0f12; border: 1px solid #23272e; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">關閉</div>
+          <div style="flex: 1; border-radius: 6px; background: #2f2a45; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #c4b5fd; font-weight: 600;">開啟</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">有 thinking 但不吃強度分級，收斂成兩段開關。</div>
+      </div>
+
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; opacity: 0.55;">
+        <div style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 11.5px; color: #cfd4da;">llama3.2:3b</div>
+        <div style="height: 32px; border-radius: 9px; background: #101215; border: 1px dashed #262b33; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #4b525b;">關閉</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #4b525b;">開啟</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">無 thinking 能力，整組停用並灰化，避免送出後被 server 退件。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── payload 對照 ── -->
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">UI 選項 → /api/chat payload</div>
+
+    <div style="border-radius: 12px; border: 1px solid #23272e; overflow: hidden; background: #0a0c0e;">
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); background: #111417; border-bottom: 1px solid #23272e;">
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">UI 選項</div>
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">送出欄位</div>
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">適用</div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">關閉</div>
+        <div style="padding: 9px 14px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #c792ea;">false</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">具 thinking 能力的模型</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">開啟</div>
+        <div style="padding: 9px 14px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #c792ea;">true</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">qwen3、deepseek-r1 等</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">低 / 中 / 高</div>
+        <div style="padding: 9px 14px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #9ece6a;">"low"|"medium"|"high"</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">gpt-oss 系列</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); background: #0f0d13;">
+        <div style="padding: 9px 14px; font-size: 12.5px; color: #b9a6f5;">控制項已停用</div>
+        <div style="padding: 9px 14px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; color: #6d7580;">整個欄位不送出</div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">無 thinking 能力的模型</div>
+      </div>
+    </div>
+    <div style="font-size: 11px; color: #5f6772; line-height: 1.55;">最後一列是關鍵防呆：舊版 Ollama 收到不支援的 <span style="font-family: 'Cascadia Code', Consolas, monospace; color: #8d95a0;">think</span> 會直接回 400，所以能力不足時整個欄位省略，而不是送 false。</div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

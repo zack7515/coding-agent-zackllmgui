@@ -1,0 +1,933 @@
+<title>Ollama GUI 介面規格</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+  :root {
+    --ground: #08090b;
+    --ground-2: #0f1114;
+    --surface: #141619;
+    --line: #1e222a;
+    --line-2: #2a2f38;
+    --ink: #e9ebee;
+    --ink-2: #9aa2ad;
+    --ink-3: #656d78;
+    --accent: #5b95f7;
+    --think: #a78bff;
+    --ok: #3ddc97;
+    --warn: #f5b544;
+    --err: #ff6b6b;
+    --chrome: 'IBM Plex Sans', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', 'Cascadia Code', Consolas, monospace;
+    /* 畫板內部一律使用 Windows 目標字型，讓預覽和實作一致 */
+    --app: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif;
+    --app-mono: 'Cascadia Code', Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--chrome);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+  /* ── 頁首 ── */
+  header.page {
+    border-bottom: 1px solid var(--line);
+    padding: 64px 0 40px;
+    background:
+      radial-gradient(720px 320px at 12% -10%, rgba(91, 149, 247, 0.10), transparent 70%),
+      radial-gradient(560px 280px at 88% 0%, rgba(167, 139, 255, 0.08), transparent 70%);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.12;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .lede {
+    max-width: 62ch;
+    color: var(--ink-2);
+    font-size: 16px;
+    margin: 0 0 28px;
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 34px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+  }
+  .fact { display: flex; flex-direction: column; gap: 3px; }
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .fact dd { margin: 0; font-size: 14px; font-weight: 500; }
+
+  /* ── 章節 ── */
+  section { padding: 56px 0; border-bottom: 1px solid var(--line); }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sec-num {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+  }
+  h2 {
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .sec-note { max-width: 68ch; color: var(--ink-2); font-size: 14.5px; margin: 0 0 26px; }
+
+  /* ── 畫板框 ── */
+  .board { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--ground-2); }
+  .board-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .board-bar .name { color: var(--ink-2); font-weight: 500; }
+  .board-bar .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--line-2); }
+  .board-scroll { overflow-x: auto; padding: 22px; }
+  .board-scroll > * { margin: 0 auto; }
+
+  /* ── 對照表 ── */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 660px; }
+  thead th {
+    text-align: left;
+    padding: 11px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  tbody td { padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink-2); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody td:first-child { color: var(--ink); font-weight: 500; white-space: nowrap; }
+  code { font-family: var(--mono); font-size: 12.5px; color: var(--ink); background: #12151a; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+
+  footer.page { padding: 40px 0 64px; color: var(--ink-3); font-size: 13.5px; }
+  a { color: var(--accent); }
+  a:hover { color: #82b0fa; }
+
+  @media (max-width: 720px) {
+    .wrap { padding: 0 18px; }
+    header.page { padding: 44px 0 32px; }
+    section { padding: 40px 0; }
+    .board-scroll { padding: 14px; }
+  }
+</style>
+
+<header class="page">
+  <div class="wrap">
+    <p class="eyebrow">PySide6 實作規格</p>
+    <h1>Ollama GUI 介面規格</h1>
+    <p class="lede">本機 Ollama 的桌面聊天前端。深色為主、單一藍色行動色，思考流程走獨立紫色系與一般回覆分流。以下四張畫板是實作的唯一依據，數值可直接抄進 QSS。</p>
+    <dl class="facts">
+      <div class="fact"><dt>框架</dt><dd>PySide6 + QSS</dd></div>
+      <div class="fact"><dt>字型</dt><dd>Segoe UI Variable / Cascadia Code</dd></div>
+      <div class="fact"><dt>密度</dt><dd>桌面 30–36px 控制項</dd></div>
+      <div class="fact"><dt>基準視窗</dt><dd>1440 × 900</dd></div>
+      <div class="fact"><dt>API</dt><dd>/api/tags · /api/show · /api/chat</dd></div>
+    </dl>
+  </div>
+</header>
+
+<!-- ═══════════ 1 主畫面 ═══════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">01</span><h2>主畫面</h2></div>
+    <p class="sec-note">三欄：260px 對話側欄、彈性聊天區、320px 參數面板。訊息欄最大寬 720px 置中，使用者訊息靠右氣泡、助理訊息靠左全寬，與 Open WebUI 的節奏一致。</p>
+
+    <div class="board">
+      <div class="board-bar"><span class="name">主畫面</span><span class="dot"></span><span>1440 × 900</span><span class="dot"></span><span>深色</span></div>
+      <div class="board-scroll">
+
+<div style="width: 1440px; height: 900px; display: flex; overflow: hidden; background: #0d0f12; color: #e9ebee; font-family: var(--app); font-size: 13px;">
+
+  <!-- 左側欄 -->
+  <aside style="width: 260px; flex: 0 0 260px; background: #141619; border-right: 1px solid #23272e; display: flex; flex-direction: column; overflow: hidden;">
+    <div style="height: 56px; flex: 0 0 56px; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid #23272e;">
+      <div style="width: 26px; height: 26px; border-radius: 8px; background: #1b1e23; border: 1px solid #31363e; display: flex; align-items: center; justify-content: center;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b95f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 4.5v9L12 21l-7.5-4.5v-9z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+      </div>
+      <span style="font-size: 14px; font-weight: 600; letter-spacing: -0.01em;">Ollama GUI</span>
+      <div style="flex: 1;"></div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+    </div>
+
+    <div style="padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+      <div style="height: 36px; border-radius: 10px; background: #1b1e23; border: 1px solid #31363e; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-weight: 500;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#e9ebee" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        <span>新對話</span>
+        <div style="flex: 1;"></div>
+        <span style="font-family: var(--app-mono); font-size: 10.5px; color: #6d7580;">Ctrl N</span>
+      </div>
+      <div style="height: 32px; border-radius: 8px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 10px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+        <span style="color: #6d7580; font-size: 12.5px;">搜尋對話</span>
+      </div>
+    </div>
+
+    <div style="flex: 1; min-height: 0; overflow: hidden; padding: 4px 8px; display: flex; flex-direction: column; gap: 2px;">
+      <div style="padding: 10px 8px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6d7580;">今天</div>
+      <div style="height: 34px; border-radius: 8px; background: #23272e; display: flex; align-items: center; gap: 9px; padding: 0 10px;">
+        <div style="width: 3px; height: 15px; border-radius: 2px; background: #5b95f7; flex: 0 0 3px;"></div>
+        <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">讀取 CSV 並畫圖</span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.3"></circle><circle cx="12" cy="12" r="1.3"></circle><circle cx="12" cy="19" r="1.3"></circle></svg>
+      </div>
+      <div style="height: 34px; border-radius: 8px; display: flex; align-items: center; padding: 0 10px 0 13px; color: #a3aab4;"><span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">解釋 transformer 架構</span></div>
+      <div style="height: 34px; border-radius: 8px; display: flex; align-items: center; padding: 0 10px 0 13px; color: #a3aab4;"><span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">翻譯這段技術文件</span></div>
+      <div style="padding: 14px 8px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6d7580;">前 7 天</div>
+      <div style="height: 34px; border-radius: 8px; display: flex; align-items: center; padding: 0 10px 0 13px; color: #a3aab4;"><span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">SQL 查詢最佳化</span></div>
+      <div style="height: 34px; border-radius: 8px; display: flex; align-items: center; padding: 0 10px 0 13px; color: #a3aab4;"><span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">正規表達式除錯</span></div>
+      <div style="height: 34px; border-radius: 8px; display: flex; align-items: center; padding: 0 10px 0 13px; color: #a3aab4;"><span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Dockerfile 精簡</span></div>
+    </div>
+
+    <div style="border-top: 1px solid #23272e; padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+      <div style="width: 26px; height: 26px; border-radius: 999px; background: #23272e; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #a3aab4;">本</div>
+      <div style="flex: 1; min-width: 0;">
+        <div style="font-size: 12.5px; font-weight: 500;">本機</div>
+        <div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">6 個模型</div>
+      </div>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"></path><circle cx="16" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="13" cy="18" r="2"></circle></svg>
+    </div>
+  </aside>
+
+  <!-- 聊天區 -->
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; background: #0d0f12;">
+    <header style="height: 56px; flex: 0 0 56px; display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid #1a1d22;">
+      <div style="height: 32px; border-radius: 8px; background: #1b1e23; border: 1px solid #31363e; display: flex; align-items: center; gap: 9px; padding: 0 10px 0 12px;">
+        <span style="font-weight: 600; letter-spacing: -0.01em;">gpt-oss:20b</span>
+        <span style="height: 18px; padding: 0 6px; border-radius: 5px; background: #2a2f37; color: #a3aab4; font-size: 10.5px; font-weight: 600; display: flex; align-items: center;">20B</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <span style="height: 22px; padding: 0 8px; border-radius: 6px; background: #1d1a2b; color: #a78bff; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          thinking
+        </span>
+        <span style="height: 22px; padding: 0 8px; border-radius: 6px; background: #1a2320; color: #3ddc97; font-size: 11px; font-weight: 600; display: flex; align-items: center;">tools</span>
+      </div>
+      <div style="flex: 1;"></div>
+      <div style="height: 30px; border-radius: 999px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+        <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+        <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">已連線</span>
+        <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+        <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">127.0.0.1:11434</span>
+      </div>
+      <div style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.3A8.5 8.5 0 019.7 3.5a8.5 8.5 0 1010.8 10.8z"></path></svg>
+      </div>
+      <div style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"></path><circle cx="16" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="13" cy="18" r="2"></circle></svg>
+      </div>
+    </header>
+
+    <div style="flex: 1; min-height: 0; overflow: hidden; padding: 24px 0 8px;">
+      <div style="max-width: 720px; margin: 0 auto; padding: 0 24px; display: flex; flex-direction: column; gap: 22px;">
+
+        <div style="display: flex; justify-content: flex-end;">
+          <div style="max-width: 76%; background: #22262d; border-radius: 18px 18px 4px 18px; padding: 10px 15px; font-size: 14px; line-height: 1.6;">幫我用 Python 讀取 CSV 並畫出折線圖</div>
+        </div>
+
+        <div style="display: flex; gap: 12px;">
+          <div style="width: 28px; height: 28px; flex: 0 0 28px; border-radius: 999px; background: #1b1e23; border: 1px solid #31363e; display: flex; align-items: center; justify-content: center; margin-top: 2px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b95f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 4.5v9L12 21l-7.5-4.5v-9z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+          </div>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 12.5px; font-weight: 600;">gpt-oss:20b</span>
+              <span style="font-size: 11px; color: #6d7580;">14:02</span>
+            </div>
+            <div style="align-self: flex-start; height: 28px; border-radius: 8px; background: #17151f; border: 1px solid #2c2640; display: flex; align-items: center; gap: 7px; padding: 0 10px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+              <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">已思考 4.2 秒</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+            </div>
+            <div style="font-size: 14px; line-height: 1.7; color: #d7dbe0;">用 <span style="font-family: var(--app-mono); font-size: 12.5px; background: #191c21; border: 1px solid #23272e; border-radius: 4px; padding: 1px 5px;">matplotlib</span> 搭配內建的 <span style="font-family: var(--app-mono); font-size: 12.5px; background: #191c21; border: 1px solid #23272e; border-radius: 4px; padding: 1px 5px;">csv</span> 模組即可，不必額外安裝 pandas：</div>
+            <div style="border-radius: 12px; border: 1px solid #23272e; overflow: hidden; background: #0a0c0e;">
+              <div style="height: 30px; background: #111417; border-bottom: 1px solid #23272e; display: flex; align-items: center; padding: 0 12px; gap: 8px;">
+                <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">python</span>
+                <div style="flex: 1;"></div>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg>
+              </div>
+              <div style="padding: 12px 14px; font-family: var(--app-mono); font-size: 12.5px; line-height: 1.75; color: #c8cdd4;">
+                <div><span style="color: #c792ea;">import</span> csv</div>
+                <div><span style="color: #c792ea;">import</span> matplotlib.pyplot <span style="color: #c792ea;">as</span> plt</div>
+                <div style="height: 8px;"></div>
+                <div><span style="color: #c792ea;">with</span> <span style="color: #7aa2f7;">open</span>(<span style="color: #9ece6a;">"data.csv"</span>, encoding=<span style="color: #9ece6a;">"utf-8"</span>) <span style="color: #c792ea;">as</span> f:</div>
+                <div>&nbsp;&nbsp;&nbsp;&nbsp;rows = <span style="color: #7aa2f7;">list</span>(csv.DictReader(f))</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 14px; padding-top: 2px;">
+              <span style="font-size: 11px; color: #5f6772; font-family: var(--app-mono);">248 tokens · 41.6 tok/s · 首字 0.38s</span>
+              <div style="flex: 1;"></div>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6d7580" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 6.1"></path><path d="M20 5v6h-6"></path></svg>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end;">
+          <div style="max-width: 76%; background: #22262d; border-radius: 18px 18px 4px 18px; padding: 10px 15px; font-size: 14px; line-height: 1.6;">改成用 pandas 寫</div>
+        </div>
+
+        <div style="display: flex; gap: 12px;">
+          <div style="width: 28px; height: 28px; flex: 0 0 28px; border-radius: 999px; background: #1b1e23; border: 1px solid #31363e; display: flex; align-items: center; justify-content: center; margin-top: 2px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b95f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 4.5v9L12 21l-7.5-4.5v-9z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+          </div>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+            <div style="font-size: 12.5px; font-weight: 600;">gpt-oss:20b</div>
+            <div style="border-radius: 12px; background: #17151f; border: 1px solid #2c2640; overflow: hidden;">
+              <div style="height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+                <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">思考中</span>
+                <span style="display: flex; gap: 3px; align-items: center; padding-top: 1px;">
+                  <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+                  <span style="width: 3px; height: 3px; border-radius: 999px; background: #a78bff;"></span>
+                  <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+                </span>
+                <div style="flex: 1;"></div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+              </div>
+              <div style="padding: 0 12px 11px 31px; font-size: 12.5px; line-height: 1.7; color: #8b8399; font-style: italic;">使用者要改用 pandas。read_csv 一行就能讀進來，再用 DataFrame.plot 直接畫，比手動組 list 精簡</div>
+            </div>
+            <div style="font-size: 14px; line-height: 1.7; color: #d7dbe0;">pandas 版本更精簡，兩行就能完成<span style="display: inline-block; width: 2px; height: 15px; background: #5b95f7; vertical-align: -3px; margin-left: 2px;"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="flex: 0 0 auto; padding: 8px 0 18px;">
+      <div style="max-width: 720px; margin: 0 auto; padding: 0 24px;">
+        <div style="border-radius: 20px; background: #16191e; border: 1px solid #2c313a; padding: 12px 12px 10px 16px; display: flex; flex-direction: column; gap: 10px;">
+          <div style="font-size: 14px; color: #6d7580; line-height: 1.5;">輸入訊息…</div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; border: 1px solid #2c313a;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5l-8 8a5 5 0 01-7-7l8.5-8.5a3.4 3.4 0 014.8 4.8L9.9 17.2a1.8 1.8 0 01-2.5-2.5l7.8-7.8"></path></svg>
+            </div>
+            <div style="height: 30px; border-radius: 8px; background: #1d1a2b; border: 1px solid #2c2640; display: flex; align-items: center; gap: 6px; padding: 0 10px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+              <span style="font-size: 12px; color: #b9a6f5; font-weight: 600;">思考 · 高</span>
+            </div>
+            <div style="flex: 1;"></div>
+            <span style="font-size: 11px; color: #5f6772;">Enter 送出 · Shift+Enter 換行</span>
+            <div style="width: 34px; height: 34px; border-radius: 999px; background: #5b95f7; display: flex; align-items: center; justify-content: center;">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#0d0f12" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 參數面板 -->
+  <aside style="width: 320px; flex: 0 0 320px; background: #141619; border-left: 1px solid #23272e; display: flex; flex-direction: column; overflow: hidden;">
+    <div style="height: 56px; flex: 0 0 56px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid #23272e;">
+      <span style="font-size: 14px; font-weight: 600;">參數</span>
+      <div style="flex: 1;"></div>
+      <div style="height: 26px; border-radius: 7px; border: 1px solid #2c313a; display: flex; align-items: center; gap: 6px; padding: 0 9px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0113.7-5.6L20 8"></path><path d="M20 4v4h-4"></path></svg>
+        <span style="font-size: 11.5px; color: #a3aab4;">還原</span>
+      </div>
+    </div>
+
+    <div style="flex: 1; min-height: 0; overflow: hidden; padding: 16px; display: flex; flex-direction: column; gap: 18px;">
+      <div style="display: flex; flex-direction: column; gap: 9px;">
+        <div style="display: flex; align-items: center; gap: 7px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">思考模式</span>
+        </div>
+        <div style="height: 32px; border-radius: 9px; background: #0d0f12; border: 1px solid #23272e; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #8d95a0;">關閉</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #8d95a0;">低</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #8d95a0;">中</div>
+          <div style="flex: 1; border-radius: 6px; background: #2f2a45; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #c4b5fd; font-weight: 600;">高</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 9px; padding-top: 1px;">
+          <div style="width: 32px; height: 18px; border-radius: 999px; background: #4a3f6b; padding: 2px; display: flex; justify-content: flex-end;">
+            <div style="width: 14px; height: 14px; border-radius: 999px; background: #c4b5fd;"></div>
+          </div>
+          <span style="font-size: 12.5px; color: #cfd4da;">顯示思考過程</span>
+        </div>
+        <div style="font-size: 11px; line-height: 1.55; color: #5f6772;">低／中／高僅 gpt-oss 系列支援；其他推理模型只有開啟與關閉。</div>
+      </div>
+
+      <div style="height: 1px; background: #23272e;"></div>
+
+      <div style="display: flex; flex-direction: column; gap: 9px;">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">系統提示</span>
+        <div style="height: 68px; border-radius: 10px; background: #0d0f12; border: 1px solid #23272e; padding: 9px 11px; font-size: 12.5px; line-height: 1.6; color: #6d7580;">你是一位精確、簡潔的技術助理。</div>
+      </div>
+
+      <div style="height: 1px; background: #23272e;"></div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">取樣參數</span>
+        <div style="display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: center;">
+            <span style="flex: 1; font-size: 12.5px; color: #cfd4da;">Temperature</span>
+            <span style="height: 20px; padding: 0 7px; border-radius: 5px; background: #1b1e23; border: 1px solid #2c313a; display: flex; align-items: center; font-family: var(--app-mono); font-size: 11px;">0.80</span>
+          </div>
+          <div style="height: 4px; border-radius: 999px; background: #23272e; display: flex; align-items: center;">
+            <div style="width: 40%; height: 4px; border-radius: 999px; background: #5b95f7;"></div>
+            <div style="width: 13px; height: 13px; border-radius: 999px; background: #e9ebee; margin-left: -6px; border: 3px solid #5b95f7;"></div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: center;">
+            <span style="flex: 1; font-size: 12.5px; color: #cfd4da;">Top P</span>
+            <span style="height: 20px; padding: 0 7px; border-radius: 5px; background: #1b1e23; border: 1px solid #2c313a; display: flex; align-items: center; font-family: var(--app-mono); font-size: 11px;">0.90</span>
+          </div>
+          <div style="height: 4px; border-radius: 999px; background: #23272e; display: flex; align-items: center;">
+            <div style="width: 90%; height: 4px; border-radius: 999px; background: #5b95f7;"></div>
+            <div style="width: 13px; height: 13px; border-radius: 999px; background: #e9ebee; margin-left: -6px; border: 3px solid #5b95f7;"></div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: center;">
+            <span style="flex: 1; font-size: 12.5px; color: #cfd4da;">Top K</span>
+            <span style="height: 20px; padding: 0 7px; border-radius: 5px; background: #1b1e23; border: 1px solid #2c313a; display: flex; align-items: center; font-family: var(--app-mono); font-size: 11px;">40</span>
+          </div>
+          <div style="height: 4px; border-radius: 999px; background: #23272e; display: flex; align-items: center;">
+            <div style="width: 40%; height: 4px; border-radius: 999px; background: #5b95f7;"></div>
+            <div style="width: 13px; height: 13px; border-radius: 999px; background: #e9ebee; margin-left: -6px; border: 3px solid #5b95f7;"></div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: center;">
+            <span style="flex: 1; font-size: 12.5px; color: #cfd4da;">Repeat penalty</span>
+            <span style="height: 20px; padding: 0 7px; border-radius: 5px; background: #1b1e23; border: 1px solid #2c313a; display: flex; align-items: center; font-family: var(--app-mono); font-size: 11px;">1.10</span>
+          </div>
+          <div style="height: 4px; border-radius: 999px; background: #23272e; display: flex; align-items: center;">
+            <div style="width: 40%; height: 4px; border-radius: 999px; background: #5b95f7;"></div>
+            <div style="width: 13px; height: 13px; border-radius: 999px; background: #e9ebee; margin-left: -6px; border: 3px solid #5b95f7;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="height: 1px; background: #23272e;"></div>
+
+      <div style="display: flex; flex-direction: column; gap: 9px;">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">進階</span>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px;">
+          <div style="display: flex; flex-direction: column; gap: 5px;">
+            <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">num_ctx</span>
+            <div style="height: 30px; border-radius: 8px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; padding: 0 10px; font-family: var(--app-mono); font-size: 12px;">4096</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 5px;">
+            <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">num_predict</span>
+            <div style="height: 30px; border-radius: 8px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; padding: 0 10px; font-family: var(--app-mono); font-size: 12px; color: #6d7580;">-1</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 5px;">
+            <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">seed</span>
+            <div style="height: 30px; border-radius: 8px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; padding: 0 10px; font-family: var(--app-mono); font-size: 12px; color: #6d7580;">-1</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 5px;">
+            <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">keep_alive</span>
+            <div style="height: 30px; border-radius: 8px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; padding: 0 10px; font-family: var(--app-mono); font-size: 12px;">5m</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 2 連線狀態 ═══════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">02</span><h2>連線狀態與防呆</h2></div>
+    <p class="sec-note">狀態燈常駐頂列右側，由 30 秒一次的 <code>/api/tags</code> 輪詢驅動。斷線時輸入區整組灰化並鎖住送出，避免使用者對著死掉的 server 一直打字。</p>
+
+    <div class="board">
+      <div class="board-bar"><span class="name">連線狀態與防呆</span><span class="dot"></span><span>880 × 880</span></div>
+      <div class="board-scroll">
+
+<div style="width: 880px; background: #0d0f12; color: #e9ebee; font-family: var(--app); font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 22px; border-radius: 8px;">
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">連線狀態與防呆</div>
+    <div style="font-size: 12.5px; color: #6d7580; line-height: 1.5;">狀態燈固定在頂列右側。所有狀態由 <span style="font-family: var(--app-mono); color: #a3aab4;">GET /api/tags</span> 的結果驅動，每 30 秒輪詢一次。</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">狀態指示器</div>
+
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">已連線</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">127.0.0.1:11434</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #3ddc97;">綠燈 #3ddc97</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">/api/tags 回 200 且模型數 &gt; 0。輸入框、送出鍵全部啟用。</div>
+      </div>
+    </div>
+
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #f5b544; box-shadow: 0 0 0 4px rgba(245, 181, 68, 0.14);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">連線中…</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">127.0.0.1:11434</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #f5b544;">黃燈 #f5b544 · 光暈 1.4s 呼吸</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">請求已送出、尚未收到回應。送出鍵維持啟用，避免誤判為壞掉。</div>
+      </div>
+    </div>
+
+    <div style="background: #141619; border: 1px solid #3a2529; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #1c1315; border: 1px solid #3a2529; display: flex; align-items: center; gap: 8px; padding: 0 5px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #ff6b6b; box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);"></span>
+          <span style="font-size: 12px; color: #ffc4c4; font-weight: 500;">無法連線</span>
+          <span style="height: 22px; border-radius: 999px; background: #2e1c1f; display: flex; align-items: center; gap: 5px; padding: 0 9px;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ff9a9a" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0113.7-5.6L20 8"></path><path d="M20 4v4h-4"></path></svg>
+            <span style="font-size: 11px; color: #ff9a9a; font-weight: 600;">重試</span>
+          </span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #ff6b6b;">紅燈 #ff6b6b</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">連線被拒或逾時。pill 本身變成可按的重試鍵，並跳出下方橫幅。</div>
+      </div>
+    </div>
+
+    <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 18px;">
+      <div style="width: 236px; flex: 0 0 236px;">
+        <div style="height: 30px; width: fit-content; border-radius: 999px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 11px;">
+          <span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span>
+          <span style="font-size: 12px; color: #cfd4da; font-weight: 500;">已連線</span>
+          <span style="width: 1px; height: 13px; background: #2a2f37;"></span>
+          <span style="font-size: 11px; color: #f5b544; font-weight: 500;">無可用模型</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 12.5px; font-weight: 600; color: #f5b544;">綠燈 + 琥珀文字</div>
+        <div style="font-size: 12px; color: #8d95a0; line-height: 1.55;">server 活著但 models 是空陣列。提示 <span style="font-family: var(--app-mono); color: #cfd4da;">ollama pull llama3.2</span>，送出鍵鎖住。</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">斷線時的防呆</div>
+
+    <div style="border-radius: 12px; background: #1a1315; border: 1px solid #3a2529; padding: 13px 15px; display: flex; align-items: center; gap: 13px;">
+      <div style="width: 30px; height: 30px; flex: 0 0 30px; border-radius: 999px; background: #2e1c1f; display: flex; align-items: center; justify-content: center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff6b6b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"></path><circle cx="12" cy="16.8" r="0.9" fill="#ff6b6b" stroke="none"></circle><circle cx="12" cy="12" r="9"></circle></svg>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-size: 13px; font-weight: 600; color: #ffc4c4;">無法連線到 127.0.0.1:11434</div>
+        <div style="font-size: 12px; color: #a3aab4; line-height: 1.5;">請確認 Ollama 已啟動（<span style="font-family: var(--app-mono);">ollama serve</span>）；遠端連線需設定 <span style="font-family: var(--app-mono);">OLLAMA_HOST=0.0.0.0</span>。</div>
+      </div>
+      <div style="height: 30px; border-radius: 8px; background: #ff6b6b; display: flex; align-items: center; padding: 0 13px; font-size: 12px; font-weight: 600; color: #1a1315;">重試連線</div>
+      <div style="height: 30px; border-radius: 8px; border: 1px solid #3a2529; display: flex; align-items: center; padding: 0 13px; font-size: 12px; color: #ffc4c4;">設定主機</div>
+    </div>
+
+    <div style="border-radius: 20px; background: #121417; border: 1px solid #1f2329; padding: 12px 12px 10px 16px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 14px; color: #4b525b;">尚未連線，無法送出</div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="width: 30px; height: 30px; border-radius: 8px; border: 1px solid #1f2329; display: flex; align-items: center; justify-content: center;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3f454d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5l-8 8a5 5 0 01-7-7l8.5-8.5a3.4 3.4 0 014.8 4.8L9.9 17.2a1.8 1.8 0 01-2.5-2.5l7.8-7.8"></path></svg>
+        </div>
+        <div style="height: 30px; border-radius: 8px; border: 1px solid #1f2329; display: flex; align-items: center; gap: 6px; padding: 0 10px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#3f454d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 12px; color: #3f454d; font-weight: 600;">思考 · 高</span>
+        </div>
+        <div style="flex: 1;"></div>
+        <div style="height: 26px; border-radius: 7px; background: #1f2329; display: flex; align-items: center; padding: 0 10px; font-size: 11.5px; color: #8d95a0;">連線後才能送出</div>
+        <div style="width: 34px; height: 34px; border-radius: 999px; background: #1f2329; display: flex; align-items: center; justify-content: center;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4b525b" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">主機設定（點狀態燈開啟）</div>
+    <div style="width: 400px; border-radius: 14px; background: #141619; border: 1px solid #2c313a; padding: 15px; display: flex; flex-direction: column; gap: 11px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);">
+      <div style="font-size: 13px; font-weight: 600;">Ollama 主機</div>
+      <div style="height: 34px; border-radius: 9px; background: #0d0f12; border: 1px solid #3a4150; display: flex; align-items: center; padding: 0 11px; font-family: var(--app-mono); font-size: 12.5px;">http://192.168.1.20:11434<span style="width: 1.5px; height: 15px; background: #5b95f7; margin-left: 1px;"></span></div>
+      <div style="display: flex; align-items: center; gap: 9px;">
+        <div style="height: 30px; border-radius: 8px; background: #5b95f7; display: flex; align-items: center; padding: 0 14px; font-size: 12px; font-weight: 600; color: #0d0f12;">測試連線</div>
+        <div style="display: flex; align-items: center; gap: 7px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3ddc97" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>
+          <span style="font-size: 12px; color: #3ddc97;">成功 · v0.12.3 · 6 個模型</span>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #5f6772; line-height: 1.55; border-top: 1px solid #23272e; padding-top: 10px;">留空自動套用環境變數 <span style="font-family: var(--app-mono); color: #8d95a0;">OLLAMA_HOST</span>，未填通訊協定時自動補上 <span style="font-family: var(--app-mono); color: #8d95a0;">http://</span>。</div>
+    </div>
+  </div>
+</div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 3 思考區塊 ═══════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">03</span><h2>思考區塊與參數面板</h2></div>
+    <p class="sec-note">思考模式的控制項會依 <code>/api/show</code> 回傳的 capabilities 自動變形：四段、兩段、或整組停用。最後一列的「完全不送出 think 欄位」是關鍵 —— 舊版 Ollama 收到不支援的 <code>think</code> 會直接回 400。</p>
+
+    <div class="board">
+      <div class="board-bar"><span class="name">思考區塊與參數</span><span class="dot"></span><span>880 × 940</span></div>
+      <div class="board-scroll">
+
+<div style="width: 880px; background: #0d0f12; color: #e9ebee; font-family: var(--app); font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 22px; border-radius: 8px;">
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">思考區塊與參數面板</div>
+    <div style="font-size: 12.5px; color: #6d7580; line-height: 1.5;">思考內容走專屬紫色系，和一般回覆明顯分流；能力偵測來自 <span style="font-family: var(--app-mono); color: #a3aab4;">POST /api/show</span> 的 capabilities。</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">思考區塊</div>
+
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">串流中</div>
+      <div style="flex: 1; border-radius: 12px; background: #17151f; border: 1px solid #2c2640; overflow: hidden;">
+        <div style="height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">思考中</span>
+          <span style="display: flex; gap: 3px; align-items: center; padding-top: 1px;">
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #a78bff;"></span>
+            <span style="width: 3px; height: 3px; border-radius: 999px; background: #7a6ba8;"></span>
+          </span>
+          <div style="flex: 1;"></div>
+          <span style="font-size: 11px; color: #6d5f88; font-family: var(--app-mono);">2.6s</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="padding: 0 12px 11px 31px; font-size: 12.5px; line-height: 1.7; color: #8b8399; font-style: italic;">先確認使用者要的是折線圖而不是散佈圖，資料欄位應該是時間對數值<span style="display: inline-block; width: 2px; height: 13px; background: #a78bff; vertical-align: -2px; margin-left: 3px;"></span></div>
+      </div>
+    </div>
+
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">完成 · 收合</div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+        <div style="align-self: flex-start; height: 28px; border-radius: 8px; background: #17151f; border: 1px solid #2c2640; display: flex; align-items: center; gap: 7px; padding: 0 10px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">已思考 4.2 秒</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">串流結束後自動收合成一顆膠囊，點一下展開。展開／收合狀態逐則記憶。</div>
+      </div>
+    </div>
+
+    <div style="display: flex; gap: 14px; align-items: flex-start;">
+      <div style="width: 92px; flex: 0 0 92px; padding-top: 7px; font-size: 11.5px; color: #6d7580;">完成 · 展開</div>
+      <div style="flex: 1; border-radius: 12px; background: #17151f; border: 1px solid #2c2640; overflow: hidden;">
+        <div style="height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px; border-bottom: 1px solid #241f33;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg>
+          <span style="font-size: 11.5px; color: #b9a6f5; font-weight: 500;">已思考 4.2 秒</span>
+          <div style="flex: 1;"></div>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6d5f88" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a6ba8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="padding: 11px 14px; font-size: 12.5px; line-height: 1.75; color: #8b8399; font-style: italic;">先確認使用者要的是折線圖而不是散佈圖，資料欄位應該是時間對數值。內建 csv 模組就夠了，不需要 pandas，避免多裝套件。matplotlib 的 plot_date 已經被標記為過時，改用一般的 plot 搭配 datetime 物件比較安全。</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">思考模式控制（依模型能力自動切換）</div>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="font-family: var(--app-mono); font-size: 11.5px; color: #cfd4da;">gpt-oss:20b</div>
+        <div style="height: 32px; border-radius: 9px; background: #0d0f12; border: 1px solid #23272e; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">關</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">低</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">中</div>
+          <div style="flex: 1; border-radius: 6px; background: #2f2a45; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #c4b5fd; font-weight: 600;">高</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">capabilities 含 thinking，且模型支援分級。四段全開。</div>
+      </div>
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="font-family: var(--app-mono); font-size: 11.5px; color: #cfd4da;">qwen3:8b</div>
+        <div style="height: 32px; border-radius: 9px; background: #0d0f12; border: 1px solid #23272e; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #8d95a0;">關閉</div>
+          <div style="flex: 1; border-radius: 6px; background: #2f2a45; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #c4b5fd; font-weight: 600;">開啟</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">有 thinking 但不吃強度分級，收斂成兩段開關。</div>
+      </div>
+      <div style="background: #141619; border: 1px solid #23272e; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; opacity: 0.55;">
+        <div style="font-family: var(--app-mono); font-size: 11.5px; color: #cfd4da;">llama3.2:3b</div>
+        <div style="height: 32px; border-radius: 9px; background: #101215; border: 1px dashed #262b33; padding: 3px; display: flex; gap: 3px;">
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #4b525b;">關閉</div>
+          <div style="flex: 1; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #4b525b;">開啟</div>
+        </div>
+        <div style="font-size: 11px; color: #5f6772; line-height: 1.5;">無 thinking 能力，整組停用並灰化，避免送出後被 server 退件。</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">UI 選項 → /api/chat payload</div>
+    <div style="border-radius: 12px; border: 1px solid #23272e; overflow: hidden; background: #0a0c0e;">
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); background: #111417; border-bottom: 1px solid #23272e;">
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">UI 選項</div>
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">送出欄位</div>
+        <div style="padding: 9px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #6d7580;">適用</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">關閉</div>
+        <div style="padding: 9px 14px; font-family: var(--app-mono); font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #c792ea;">false</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">具 thinking 能力的模型</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">開啟</div>
+        <div style="padding: 9px 14px; font-family: var(--app-mono); font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #c792ea;">true</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">qwen3、deepseek-r1 等</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); border-bottom: 1px solid #1a1d21;">
+        <div style="padding: 9px 14px; font-size: 12.5px;">低 / 中 / 高</div>
+        <div style="padding: 9px 14px; font-family: var(--app-mono); font-size: 12px;"><span style="color: #9ece6a;">"think"</span>: <span style="color: #9ece6a;">"low"|"medium"|"high"</span></div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">gpt-oss 系列</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 150px 250px minmax(0, 1fr); background: #0f0d13;">
+        <div style="padding: 9px 14px; font-size: 12.5px; color: #b9a6f5;">控制項已停用</div>
+        <div style="padding: 9px 14px; font-family: var(--app-mono); font-size: 12px; color: #6d7580;">整個欄位不送出</div>
+        <div style="padding: 9px 14px; font-size: 12px; color: #8d95a0;">無 thinking 能力的模型</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 4 色票 ═══════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">04</span><h2>色票與元件規格</h2></div>
+    <p class="sec-note">冷調中性灰底、單一藍色行動色、思考流程專屬紫。字型走 Windows 內建的 Segoe UI Variable，中文自動落到微軟正黑體，不需要打包字型檔。</p>
+
+    <div class="board">
+      <div class="board-bar"><span class="name">色票與元件規格</span><span class="dot"></span><span>1000 × 1000</span></div>
+      <div class="board-scroll">
+
+<div style="width: 1000px; background: #0d0f12; color: #e9ebee; font-family: var(--app); font-size: 13px; padding: 30px 32px; display: flex; flex-direction: column; gap: 20px; border-radius: 8px;">
+
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">深色表面</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #0d0f12; border: 1px solid #23272e;"></div><div style="font-size: 11.5px; font-weight: 500;">app / 聊天底</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#0d0f12</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #141619; border: 1px solid #23272e;"></div><div style="font-size: 11.5px; font-weight: 500;">側欄 / 面板</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#141619</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #1b1e23; border: 1px solid #31363e;"></div><div style="font-size: 11.5px; font-weight: 500;">控制項</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#1b1e23</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #22262d;"></div><div style="font-size: 11.5px; font-weight: 500;">hover / 氣泡</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#22262d</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #23272e;"></div><div style="font-size: 11.5px; font-weight: 500;">分隔線</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#23272e</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #0a0c0e; border: 1px solid #23272e;"></div><div style="font-size: 11.5px; font-weight: 500;">程式碼底</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#0a0c0e</div></div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">文字與強調色</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #e9ebee;"></div><div style="font-size: 11.5px; font-weight: 500;">主文字</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#e9ebee</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #a3aab4;"></div><div style="font-size: 11.5px; font-weight: 500;">次要文字</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#a3aab4</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #6d7580;"></div><div style="font-size: 11.5px; font-weight: 500;">提示 / 停用</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#6d7580</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #5b95f7;"></div><div style="font-size: 11.5px; font-weight: 500;">主行動色</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#5b95f7</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #a78bff;"></div><div style="font-size: 11.5px; font-weight: 500;">思考流程</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#a78bff</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #17151f; border: 1px solid #2c2640;"></div><div style="font-size: 11.5px; font-weight: 500;">思考區塊底</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#17151f</div></div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">狀態色</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #3ddc97;"></div><div style="font-size: 11.5px; font-weight: 500;">已連線</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#3ddc97</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #f5b544;"></div><div style="font-size: 11.5px; font-weight: 500;">連線中 / 警告</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#f5b544</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #ff6b6b;"></div><div style="font-size: 11.5px; font-weight: 500;">離線 / 錯誤</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#ff6b6b</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #1a2320; border: 1px solid #24382f;"></div><div style="font-size: 11.5px; font-weight: 500;">成功底</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#1a2320</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #1a1315; border: 1px solid #3a2529;"></div><div style="font-size: 11.5px; font-weight: 500;">錯誤底</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">#1a1315</div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><div style="height: 48px; border-radius: 10px; background: #0d0f12; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center; gap: 9px;"><span style="width: 7px; height: 7px; border-radius: 999px; background: #3ddc97; box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.16);"></span><span style="width: 7px; height: 7px; border-radius: 999px; background: #f5b544; box-shadow: 0 0 0 3px rgba(245, 181, 68, 0.14);"></span><span style="width: 7px; height: 7px; border-radius: 999px; background: #ff6b6b; box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);"></span></div><div style="font-size: 11.5px; font-weight: 500;">狀態燈 7px</div><div style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">+ 3px 光暈</div></div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 20px;">
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+      <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">字級</div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 14px;">聊天內文 Body</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">14px / 1.7</span></div>
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 13px;">介面預設 UI</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">13px / 1.5</span></div>
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 12.5px; font-weight: 600;">標題 / 模型名</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">12.5px / 600</span></div>
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">區段標籤</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">11px / 600 / .06em</span></div>
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 12.5px; font-family: var(--app-mono);">程式碼 code</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">Cascadia 12.5px</span></div>
+        <div style="display: flex; align-items: baseline; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; font-size: 11px; color: #6d7580;">統計 / 時間戳</span><span style="font-size: 11px; color: #6d7580; font-family: var(--app-mono);">11px</span></div>
+      </div>
+    </div>
+
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px;">
+      <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">尺寸與圓角</div>
+      <div style="display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: #a3aab4;">
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">側欄寬</span><span style="font-family: var(--app-mono); color: #6d7580;">260px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">參數面板寬</span><span style="font-family: var(--app-mono); color: #6d7580;">320px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">頂列高</span><span style="font-family: var(--app-mono); color: #6d7580;">56px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">訊息欄最大寬</span><span style="font-family: var(--app-mono); color: #6d7580;">720px 置中</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">控制項高</span><span style="font-family: var(--app-mono); color: #6d7580;">30 / 32 / 36px</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">圓角</span><span style="font-family: var(--app-mono); color: #6d7580;">6 · 8 · 10 · 12 · 20 · 999</span></div>
+        <div style="display: flex; gap: 12px;"><span style="width: 130px; flex: 0 0 130px; color: #cfd4da;">送出鍵</span><span style="font-family: var(--app-mono); color: #6d7580;">34px 圓形</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8d95a0;">圖示 · 線條 1.8–2 / 24 格線 / 圓端點</div>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"></rect><path d="M5 15V6a2 2 0 012-2h9"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 6.1"></path><path d="M20 5v6h-6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5l-8 8a5 5 0 01-7-7l8.5-8.5a3.4 3.4 0 014.8 4.8L9.9 17.2a1.8 1.8 0 01-2.5-2.5l7.8-7.8"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"></path><circle cx="16" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="13" cy="18" r="2"></circle></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.3A8.5 8.5 0 019.7 3.5a8.5 8.5 0 1010.8 10.8z"></path></svg></div>
+      <div style="width: 42px; height: 42px; border-radius: 10px; background: #141619; border: 1px solid #23272e; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a3aab4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0113.7-5.6L20 8"></path><path d="M20 4v4h-4"></path></svg></div>
+    </div>
+  </div>
+</div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 5 實作對照 ═══════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">05</span><h2>PySide6 實作對照</h2></div>
+    <p class="sec-note">每個視覺元素對應的 Qt 作法。整份樣式集中在單一 QSS 字串，色票以 Python dict 供應，切換主題只換 dict 再重新套用。</p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>畫面元素</th><th>Qt 作法</th><th>要注意的地方</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>側欄 / 參數面板</td>
+            <td><code>QFrame</code> + <code>objectName</code></td>
+            <td>QSS 用 <code>#objectName</code> 選取，避免樣式外溢到子控制項</td>
+          </tr>
+          <tr>
+            <td>對話列表</td>
+            <td><code>QListWidget</code> + 自訂 item widget</td>
+            <td>選取態的左側藍條用 <code>border-left: 3px</code> 畫</td>
+          </tr>
+          <tr>
+            <td>訊息串</td>
+            <td><code>QScrollArea</code> + 每則一個 widget</td>
+            <td>串流時只更新最後一個 widget，不重建整串</td>
+          </tr>
+          <tr>
+            <td>使用者氣泡</td>
+            <td><code>QLabel</code> 包在靠右的 <code>QHBoxLayout</code></td>
+            <td>四角不等圓角 QSS 支援；需 <code>setWordWrap(True)</code></td>
+          </tr>
+          <tr>
+            <td>助理回覆（Markdown）</td>
+            <td><code>QTextBrowser</code> + <code>setMarkdown()</code></td>
+            <td>高度要跟著內容長，關掉自身捲軸並綁 <code>documentSize</code></td>
+          </tr>
+          <tr>
+            <td>思考折疊區</td>
+            <td>可摺疊 <code>QFrame</code>，標題列接 <code>mousePressEvent</code></td>
+            <td>收合就 <code>setVisible(False)</code>；箭頭圖示同步換向</td>
+          </tr>
+          <tr>
+            <td>狀態燈</td>
+            <td>自繪 <code>QWidget</code>，<code>paintEvent</code> 畫圓點 + 光暈</td>
+            <td>連線中的呼吸效果用 <code>QPropertyAnimation</code> 跑透明度</td>
+          </tr>
+          <tr>
+            <td>思考模式四段切換</td>
+            <td><code>QButtonGroup</code> 內 4 顆 <code>QPushButton(checkable)</code></td>
+            <td>依 capabilities 動態增減按鈕數，不支援時整組 <code>setEnabled(False)</code></td>
+          </tr>
+          <tr>
+            <td>取樣滑桿</td>
+            <td><code>QSlider</code> + 數值 <code>QLabel</code></td>
+            <td>QSlider 只吃整數，浮點參數要自己乘 100 再除回來</td>
+          </tr>
+          <tr>
+            <td>圓角輸入框</td>
+            <td><code>QTextEdit</code> 外包一層 <code>QFrame</code></td>
+            <td>圓角畫在外框上，內層 <code>QTextEdit</code> 設透明無邊框</td>
+          </tr>
+          <tr>
+            <td>串流與 UI 執行緒</td>
+            <td><code>QThread</code> worker + <code>Signal</code></td>
+            <td>絕不從 worker 直接碰 widget；一律走 signal 回主執行緒</td>
+          </tr>
+          <tr>
+            <td>圖示</td>
+            <td>SVG 字串 → <code>QPixmap</code></td>
+            <td>顏色寫死在 SVG 裡，換主題時重新產生一次</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer class="page">
+  <div class="wrap">
+    畫板為靜態視覺規格，非可互動原型。內容示意用的對話與統計數字為範例值，實作時由 <code>/api/chat</code> 的真實回傳填入。
+  </div>
+</footer>
