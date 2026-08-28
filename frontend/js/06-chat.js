@@ -1075,16 +1075,40 @@ function carryOver() {
 // 用量一過門檻就先在背景算好，真的要壓時直接拿現成的。
 // 存在 S 而不是對話物件上：Promise 進了 localStorage 會變成 {}，
 // 重整之後那個 {} 是 truthy 的，會被當成「算好了」然後炸掉。
+// 切點不能落在一組工具呼叫中間：`tool` 訊息要跟著發出它的那則 assistant 訊息，
+// 拆開之後外部 API 直接回「tool_call_id 找不到」，本機模型則是看到一段沒頭沒尾的
+// 工具結果。往前退到下一個安全的位置 —— 工具迴圈裡最後幾則幾乎都是一組呼叫，
+// 所以 length - COMPACT_KEEP 剛好經常切在中間。
+function safeCut(msgs, cut) {
+  while (cut > 0 && (msgs[cut] || {}).role === 'tool') cut--;
+  return cut;
+}
+
 function preCompact() {
   const c = current();
   // 不在產生中才算：本機通常只有一張顯示卡，兩個生成搶同一張卡
   // 只會讓正在跑的那個變慢。工具跑指令的空檔就夠算完了。
   if (!c || !S.model || S.streaming || S.pre) return;
   if (c.messages.length <= COMPACT_KEEP + 1) return;
-  const n = c.messages.length - COMPACT_KEEP;
+  const n = safeCut(c.messages, c.messages.length - COMPACT_KEEP);
+  if (n <= 0) return;
   const p = once(COMPACT_PROMPT + transcriptOf(c.messages.slice(0, n)));
   S.pre = { id: c.id, n: n, p: p };
   p.catch(function () { S.pre = null; });     // 算失敗就當作沒算過，點下去再算一次
+}
+
+// 放著讓它自己跑的時候沒有人會去點那顆壓縮鍵，而 context 滿了**不會報錯** ——
+// Ollama 會默默把最前面的訊息丟掉，連系統提示與規則一起，模型於是開始忘記自己
+// 在幹嘛，畫面上什麼都看不出來。三十分鐘的任務多半就是撞在這裡。
+// 只在工具迴圈裡自動壓：一般聊天時人就在旁邊，壓不壓由他決定。
+const AUTO_COMPACT_AT = 0.85;      // preCompact 在 0.75 就先算好了，這裡拿現成的
+
+async function autoCompact(c) {
+  if (!c || S.streaming || c.messages.length <= COMPACT_KEEP + 1) return false;
+  if (rawEstimate('') * S.ctxRatio < ctxLimit() * AUTO_COMPACT_AT) return false;
+  const before = c.messages.length;
+  await compactChat();
+  return c.messages.length < before;
 }
 
 async function compactChat() {
@@ -1096,7 +1120,8 @@ async function compactChat() {
   // 背景算好的那一份只有在「算的時候是這場對話、而且訊息只增沒減」時才作數
   const pre = S.pre && S.pre.id === c.id && c.messages.length >= S.pre.n + COMPACT_KEEP
     ? S.pre : null;
-  const cut = pre ? pre.n : c.messages.length - COMPACT_KEEP;
+  const cut = pre ? pre.n : safeCut(c.messages, c.messages.length - COMPACT_KEEP);
+  if (cut <= 0) { toast('這一段沒辦法切開壓縮（都在同一組工具呼叫裡）'); return; }
   const head = c.messages.slice(0, cut);
   const tail = c.messages.slice(cut);
 

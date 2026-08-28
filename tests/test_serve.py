@@ -1944,6 +1944,52 @@ def test_orphan_worktrees_are_findable_and_closeable():
         serve.cur().write = False
 
 
+def test_worktree_borrows_the_main_venv():
+    """子代理的 worktree 沒有 .venv —— 它是 git 開出來的乾淨 checkout。
+
+    不接主 repo 那一份的話，每個 work 子代理都要先花好幾輪 setup_env 重建一份
+    一模一樣的環境，而且每份都佔磁碟。venv 的 site-packages 是絕對路徑，
+    從哪個目錄跑都算數，所以借用是安全的。
+    """
+    with Workspace() as ws:
+        git_repo(ws)
+        serve.cur().write = True
+        venv = ws / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+        info = serve.agent_open("work")
+        try:
+            assert not (Path(info["path"]) / ".venv").exists(), "worktree 竟然帶著 .venv"
+            with serve.as_agent(info["id"]):
+                assert serve.detect_python() == [str(venv / "python")], \
+                    "子代理沒有借到主 repo 的 .venv"
+            assert serve.detect_python() == [str(venv / "python")]
+        finally:
+            serve.agent_close(info["id"], force=True)
+            serve.cur().write = False
+
+
+def test_skill_listing_is_capped():
+    """系統提示裡的 skill 清單每一輪都要重送，所以是固定成本。
+
+    現在只有幾個，但 make-skill 就是拿來一直加的 —— 沒有上限的話，加到三十個之後
+    每一次呼叫都先付那三十行。這裡驗的是「多到一個程度就不再無限長」。
+    """
+    long_desc = "很長的描述" * 60
+    skills = [{"name": f"s{i}", "description": long_desc, "scope": "內建", "tools": []}
+              for i in range(serve.SKILL_LIST_MAX + 5)]
+    was, serve.skills_list = serve.skills_list, lambda: skills
+    was_tools, serve.ALLOW_TOOLS = serve.ALLOW_TOOLS, True
+    try:
+        rules = serve.agent_rules()
+        assert rules.count("\n- s") <= serve.SKILL_LIST_MAX, "清單沒有上限"
+        assert "還有 5 個沒列出來" in rules, rules[-300:]
+        assert long_desc not in rules, "描述沒有截短"
+        assert long_desc[:serve.SKILL_DESC_MAX] in rules
+    finally:
+        serve.skills_list, serve.ALLOW_TOOLS = was, was_tools
+
+
 def test_close_never_deletes_a_branch_that_has_commits():
     """**乾淨不等於沒東西。** 子代理自己 commit 過的話，工作目錄是乾淨的，
     但分支上有成果 —— 只看乾不乾淨就 branch -D，那是把十分鐘的工作刪掉。

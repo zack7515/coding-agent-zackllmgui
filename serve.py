@@ -216,7 +216,9 @@ JOURNAL = "journal.jsonl"          # 放在 BACKUP_DIR 底下
 # ponytail: 一個全域變數，靠請求順序決定。一次只跑一個工具（每一次都要人確認）
 #           所以夠用；真的要平行跑工具的話得改成傳參數穿到 journal_add。
 CURRENT_CHAT = ""
-SKILLS_DIR = "skills"              # serve.py 旁邊；工作區有自己的就用工作區的
+SKILLS_DIR = "skills"    # serve.py 旁邊；工作區有自己的就用工作區的
+SKILL_LIST_MAX = 30      # 系統提示裡最多列幾個 skill
+SKILL_DESC_MAX = 120     # 每一則描述最多幾個字
 AGENTS_DIR = "agents"              # 子代理型別，一種一個 .md，規則同上
 AGENT_BODY_LIMIT = 4000
 SKILL_BODY_LIMIT = 8000
@@ -385,13 +387,24 @@ def ws_walk():
 
 
 def detect_python() -> list:
-    """找出這個專案該用哪個 python 跑測試。順序：.venv → venv → uv → poetry → 系統。"""
-    root = ws_root()
-    for name in (".venv", "venv"):
-        for sub in ("bin/python", "Scripts/python.exe"):
-            cand = root / name / sub
-            if cand.exists():
-                return [str(cand)]
+    """找出這個專案該用哪個 python 跑測試。順序：.venv → venv → uv → poetry → 系統。
+
+    在子代理的 worktree 裡先找自己的，找不到就用**主 repo 的** —— worktree 是
+    `git worktree add` 開出來的乾淨 checkout，`.venv` 不在版控裡所以不會跟過去。
+    不接這一段的話，每個 work 子代理都要先花好幾輪 setup_env 重建一份一模一樣的
+    環境（而且每份都佔磁碟）。venv 的 site-packages 是絕對路徑，從哪個目錄跑都算數。
+    """
+    rec = getattr(_CUR, "agent", None)
+    roots = [ws_root()]
+    if rec and rec.get("root") and Path(rec["root"]) != roots[0]:
+        roots.append(Path(rec["root"]))
+    for root in roots:
+        for name in (".venv", "venv"):
+            for sub in ("bin/python", "Scripts/python.exe"):
+                cand = root / name / sub
+                if cand.exists():
+                    return [str(cand)]
+    root = roots[0]
     if (root / "uv.lock").exists() and shutil.which("uv"):
         return ["uv", "run", "python"]
     if (root / "poetry.lock").exists() and shutil.which("poetry"):
@@ -1613,8 +1626,15 @@ def agent_rules() -> str:
     # 六份描述 240 token 常駐得起，六份正文是幾千 token 而且九成用不到。
     skills = skills_list() if ALLOW_TOOLS else []
     if skills:
+        # 這段每一輪都要重送，所以是固定成本：一份 skill 多幾行，是每一次呼叫都多幾行。
+        # 有些 agent 為此開了兩個設定（清單佔 context 的比例、每則描述的字數上限）；
+        # 這裡直接寫死，因為本機模型的 context 小得多，可調的空間本來就不大。
         r.append("\n## 現成的做法（要用就先 load_skill 把步驟載進來）")
-        r += [f"- {s['name']}：{s['description']}" for s in skills]
+        r += [f"- {s['name']}：{s['description'][:SKILL_DESC_MAX]}"
+              for s in skills[:SKILL_LIST_MAX]]
+        if len(skills) > SKILL_LIST_MAX:
+            r.append(f"- （還有 {len(skills) - SKILL_LIST_MAX} 個沒列出來，"
+                     "用 load_skill 指名還是叫得到）")
 
     name, text = project_md()
     if text:

@@ -3767,16 +3767,40 @@ function carryOver() {
 // 用量一過門檻就先在背景算好，真的要壓時直接拿現成的。
 // 存在 S 而不是對話物件上：Promise 進了 localStorage 會變成 {}，
 // 重整之後那個 {} 是 truthy 的，會被當成「算好了」然後炸掉。
+// 切點不能落在一組工具呼叫中間：`tool` 訊息要跟著發出它的那則 assistant 訊息，
+// 拆開之後外部 API 直接回「tool_call_id 找不到」，本機模型則是看到一段沒頭沒尾的
+// 工具結果。往前退到下一個安全的位置 —— 工具迴圈裡最後幾則幾乎都是一組呼叫，
+// 所以 length - COMPACT_KEEP 剛好經常切在中間。
+function safeCut(msgs, cut) {
+  while (cut > 0 && (msgs[cut] || {}).role === 'tool') cut--;
+  return cut;
+}
+
 function preCompact() {
   const c = current();
   // 不在產生中才算：本機通常只有一張顯示卡，兩個生成搶同一張卡
   // 只會讓正在跑的那個變慢。工具跑指令的空檔就夠算完了。
   if (!c || !S.model || S.streaming || S.pre) return;
   if (c.messages.length <= COMPACT_KEEP + 1) return;
-  const n = c.messages.length - COMPACT_KEEP;
+  const n = safeCut(c.messages, c.messages.length - COMPACT_KEEP);
+  if (n <= 0) return;
   const p = once(COMPACT_PROMPT + transcriptOf(c.messages.slice(0, n)));
   S.pre = { id: c.id, n: n, p: p };
   p.catch(function () { S.pre = null; });     // 算失敗就當作沒算過，點下去再算一次
+}
+
+// 放著讓它自己跑的時候沒有人會去點那顆壓縮鍵，而 context 滿了**不會報錯** ——
+// Ollama 會默默把最前面的訊息丟掉，連系統提示與規則一起，模型於是開始忘記自己
+// 在幹嘛，畫面上什麼都看不出來。三十分鐘的任務多半就是撞在這裡。
+// 只在工具迴圈裡自動壓：一般聊天時人就在旁邊，壓不壓由他決定。
+const AUTO_COMPACT_AT = 0.85;      // preCompact 在 0.75 就先算好了，這裡拿現成的
+
+async function autoCompact(c) {
+  if (!c || S.streaming || c.messages.length <= COMPACT_KEEP + 1) return false;
+  if (rawEstimate('') * S.ctxRatio < ctxLimit() * AUTO_COMPACT_AT) return false;
+  const before = c.messages.length;
+  await compactChat();
+  return c.messages.length < before;
 }
 
 async function compactChat() {
@@ -3788,7 +3812,8 @@ async function compactChat() {
   // 背景算好的那一份只有在「算的時候是這場對話、而且訊息只增沒減」時才作數
   const pre = S.pre && S.pre.id === c.id && c.messages.length >= S.pre.n + COMPACT_KEEP
     ? S.pre : null;
-  const cut = pre ? pre.n : c.messages.length - COMPACT_KEEP;
+  const cut = pre ? pre.n : safeCut(c.messages, c.messages.length - COMPACT_KEEP);
+  if (cut <= 0) { toast('這一段沒辦法切開壓縮（都在同一組工具呼叫裡）'); return; }
   const head = c.messages.slice(0, cut);
   const tail = c.messages.slice(cut);
 
@@ -5175,6 +5200,7 @@ const SUB_DEPTH_MAX = 2;
 const SUB_NEVER = ['ask_user_question', 'todo_write'];
 // 續談用的 context 最多留這麼多則。每一則都是一整條對話，不能無限留。
 const SUB_KEEP = 20;
+const SUB_CTX_AT = 0.8;   // 子代理用掉這個比例的 num_ctx 就收工具，逼它做結論
 
 function agentTypes() { return S.agentTypes || []; }
 
@@ -5285,6 +5311,7 @@ async function runSubagent(args, depth, parent) {
     + (agentRules() || '') }];
   const msgs = box.msgs;
   msgs.push({ role: 'user', content: task });
+  let wrap = false;                 // 收工具了嗎（context 快滿的時候）
 
   const finish = async function (text) {
     // 有改動就留著 worktree 並且講清楚改在哪個分支 —— 子代理跑了十分鐘的結果，
@@ -5320,10 +5347,21 @@ async function runSubagent(args, depth, parent) {
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
+      // 子代理沒有壓縮，它的 context 只會一路長；60 輪跑到一半就會超過 num_ctx，
+      // 而超過不會報錯 —— 最前面被丟掉的正好是它的任務。所以在滿之前**把工具收走**：
+      // 沒有工具可叫，它只能把現在知道的寫成結論。收工具比用提示詞求它收尾可靠。
+      if (!wrap && msgs.reduce(function (n, m) { return n + estTokens(m.content || ''); }, 0)
+          * S.ctxRatio > ctxLimit() * SUB_CTX_AT) {
+        wrap = true;
+        msgs.push({ role: 'user', content: '你的 context 快滿了，不要再呼叫工具，'
+          + '用現在已經知道的東西給結論，並且講清楚哪些部分還沒查完。' });
+        log('· context 快滿了，收工具讓它做結論');
+      }
+
       let text = '';
       let calls = null;
       const payload = { model: type.model || S.model, messages: msgs,
-                        tools: subTools(type, at), stream: true };
+                        tools: wrap ? [] : subTools(type, at), stream: true };
       const opts = buildOptions();
       if (Object.keys(opts).length) payload.options = opts;
       if (thinkValue() !== null) payload.think = false;   // 子代理不用思考，省時間
@@ -5476,6 +5514,10 @@ async function runTools(c, calls, depth) {
     pin();
   }
   blockComposer('');
+  // 壓在這裡不是隨便挑的：這一輪的工具結果都進去了，下一次模型呼叫還沒發出去。
+  // 壓在迴圈開頭的話，發出這幾個呼叫的那則 assistant 訊息可能被摘要掉，
+  // 後面接上去的 tool 結果就變成沒有來源的孤兒。
+  if (await autoCompact(c)) toast('context 快滿了，已經自動壓縮先前的訊息');
   flushQueue(c);          // 使用者在這一輪打的字，跟工具結果一起送過去
   await runStream(c, depth);
 }

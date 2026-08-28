@@ -1329,6 +1329,7 @@ const SUB_DEPTH_MAX = 2;
 const SUB_NEVER = ['ask_user_question', 'todo_write'];
 // 續談用的 context 最多留這麼多則。每一則都是一整條對話，不能無限留。
 const SUB_KEEP = 20;
+const SUB_CTX_AT = 0.8;   // 子代理用掉這個比例的 num_ctx 就收工具，逼它做結論
 
 function agentTypes() { return S.agentTypes || []; }
 
@@ -1439,6 +1440,7 @@ async function runSubagent(args, depth, parent) {
     + (agentRules() || '') }];
   const msgs = box.msgs;
   msgs.push({ role: 'user', content: task });
+  let wrap = false;                 // 收工具了嗎（context 快滿的時候）
 
   const finish = async function (text) {
     // 有改動就留著 worktree 並且講清楚改在哪個分支 —— 子代理跑了十分鐘的結果，
@@ -1474,10 +1476,21 @@ async function runSubagent(args, depth, parent) {
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
+      // 子代理沒有壓縮，它的 context 只會一路長；60 輪跑到一半就會超過 num_ctx，
+      // 而超過不會報錯 —— 最前面被丟掉的正好是它的任務。所以在滿之前**把工具收走**：
+      // 沒有工具可叫，它只能把現在知道的寫成結論。收工具比用提示詞求它收尾可靠。
+      if (!wrap && msgs.reduce(function (n, m) { return n + estTokens(m.content || ''); }, 0)
+          * S.ctxRatio > ctxLimit() * SUB_CTX_AT) {
+        wrap = true;
+        msgs.push({ role: 'user', content: '你的 context 快滿了，不要再呼叫工具，'
+          + '用現在已經知道的東西給結論，並且講清楚哪些部分還沒查完。' });
+        log('· context 快滿了，收工具讓它做結論');
+      }
+
       let text = '';
       let calls = null;
       const payload = { model: type.model || S.model, messages: msgs,
-                        tools: subTools(type, at), stream: true };
+                        tools: wrap ? [] : subTools(type, at), stream: true };
       const opts = buildOptions();
       if (Object.keys(opts).length) payload.options = opts;
       if (thinkValue() !== null) payload.think = false;   // 子代理不用思考，省時間
@@ -1630,6 +1643,10 @@ async function runTools(c, calls, depth) {
     pin();
   }
   blockComposer('');
+  // 壓在這裡不是隨便挑的：這一輪的工具結果都進去了，下一次模型呼叫還沒發出去。
+  // 壓在迴圈開頭的話，發出這幾個呼叫的那則 assistant 訊息可能被摘要掉，
+  // 後面接上去的 tool 結果就變成沒有來源的孤兒。
+  if (await autoCompact(c)) toast('context 快滿了，已經自動壓縮先前的訊息');
   flushQueue(c);          // 使用者在這一輪打的字，跟工具結果一起送過去
   await runStream(c, depth);
 }

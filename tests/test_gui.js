@@ -1103,13 +1103,16 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   const mk = (replies, opt) => new Function(`
     const conf = ${JSON.stringify(opt || {})};
-    const S = { model: 'm', srv: {}, run: { calls: 0, tokens: 0 }, streamTools: [], toolDefs: [],
+    const S = { model: 'm', srv: {}, run: { calls: 0, tokens: 0 }, ctxRatio: 1,
+                streamTools: [], toolDefs: [],
                 subs: {}, agentTypes: ${JSON.stringify(TYPES)},
                 abort: { signal: { aborted: !!conf.aborted } } };
     let turn = 0;
     const calls = [];       // [工具名, 跑在哪個 worktree]
     const agentOps = [];
+    const tools = [];       // 每一輪送出去的工具清單
     const chatStream = async (payload, signal, on) => {
+      tools.push(payload.tools || []);
       await new Promise((r) => setTimeout(r, 0));   // 讓「中斷」那顆鈕有機會插進來
       const r = ${JSON.stringify(replies)}[turn++] || {};
       if (r.content) on.content(r.content);
@@ -1117,6 +1120,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       on.done({ prompt_eval_count: 100, eval_count: 20 });
     };
     const budgetStop = (run) => (conf.budget && run.tokens > conf.budget ? '超出預算' : '');
+    const estTokens = (t) => String(t || '').length;
+    const ctxLimit = () => conf.ctx || 1e9;
     const renderRunBar = () => {};
     const execTool = async (n, a, msg, agent) => {
       calls.push([n, agent || '']);
@@ -1163,7 +1168,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const pin = () => {};
     ${src}
     return { runSubagent, subTools, subWrites, agentType, startSubagents, callArgs,
-             calls, agentOps, clicks, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
+             calls, agentOps, clicks, tools, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
   `)();
 
   const box = mk([]);
@@ -1298,6 +1303,18 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   const stopped = await broke.runSubagent({ prompt: '一直花', type: 'explore' });
   assert.ok(/超出預算/.test(stopped), '超支了還在跑：' + stopped);
   assert.strictEqual(broke.calls.length, 2, '超支之後不該再叫工具');
+
+  // context 快滿了就把**工具收走**，逼它用現在知道的做結論。沒有這一段的話它會一路
+  // 跑到 60 輪，而超過 num_ctx 不會報錯 —— 最前面被丟掉的正好是它的任務。
+  // 收工具比用提示詞求它收尾可靠：沒有工具可叫，它只能寫字。
+  const roomy = mk([{ content: '查完了' }]);
+  await roomy.runSubagent({ prompt: '一般任務', type: 'explore' });
+  assert.ok(roomy.tools[0].length > 0, 'context 還很空就不該收工具');
+
+  const full = mk([{ content: '只查到一半' }], { ctx: 1 });
+  const wrapped = await full.runSubagent({ prompt: '很長的任務', type: 'explore' });
+  assert.strictEqual(full.tools[0].length, 0, 'context 滿了還把工具送出去');
+  assert.ok(/只查到一半/.test(wrapped), '收工具之後沒有拿到結論：' + wrapped);
 
   // 沒給 prompt 就不要開一個什麼都不知道的子代理
   assert.ok(/錯誤/.test(await mk([]).runSubagent({})));
@@ -1445,6 +1462,26 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     ${grab('carryOver')} return carryOver;`)()();
   assert.strictEqual(empty, '', '什麼都沒有時不該多塞一段');
   console.log('ok   壓縮之後待辦與背景指令還在');
+
+  // 切點不能落在一組工具呼叫中間：tool 訊息離開它的 assistant 之後，外部 API 直接
+  // 回「tool_call_id 找不到」。工具迴圈裡最後幾則幾乎都是一組呼叫，所以這很常發生
+  const cut = new Function(`${grab('safeCut')} return safeCut;`)();
+  const conv = [{ role: 'user' }, { role: 'assistant' },
+                { role: 'assistant' }, { role: 'tool' }, { role: 'tool' }];
+  assert.strictEqual(cut(conv, 4), 2, '切在工具結果中間了');
+  assert.strictEqual(cut(conv, 2), 2, '安全的切點被往前推了');
+  assert.strictEqual(cut([{ role: 'tool' }, { role: 'tool' }], 1), 0,
+    '整段都是工具結果時要回 0，讓呼叫端知道切不開');
+
+  // 自動壓縮只在工具迴圈裡做：那時候沒有人在旁邊，而 context 滿了不會報錯 ——
+  // Ollama 會默默把最前面的訊息丟掉，連系統提示一起
+  const autoSrc = grab('autoCompact');
+  assert.ok(/ctxLimit\(\) \* AUTO_COMPACT_AT/.test(autoSrc), '沒有看用量就壓：' + autoSrc);
+  assert.ok(/S\.streaming/.test(autoSrc), '產生中還去壓縮');
+  assert.ok(/await autoCompact\(c\)/.test(grab('runTools')), '工具迴圈沒有接自動壓縮');
+  assert.ok(script.indexOf('await autoCompact(c)') > script.indexOf('blockComposer(\'\')'),
+    '壓縮要在這一輪的工具結果都進去之後才做');
+  console.log('ok   壓縮不會切開工具呼叫，滿了會自己壓');
 
   // 背景先算好的摘要不能存進對話：Promise 進了 localStorage 會變成 {}，
   // 而 {} 是 truthy 的 —— 重整之後會被當成「算好了」然後炸掉
