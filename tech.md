@@ -1274,6 +1274,34 @@ Ollama 指到別台時，這些數字講的是 `serve.py` 這台的卡，不是�
 會被包成 code block、算得進 context 用量條、可以點開來改、可以按 × 移除。
 完全不必為它另外做一套機制。
 
+### skill 的 `tools:`：用來篩清單，不是用來限制工具
+
+`SKILL.md` 的 `tools:` 原本只有測試拿去驗「這幾支工具存在」，執行時沒有作用。
+有些 agent 的對應欄位（`allowed-tools`）是**會限制**的，這裡刻意不走那條路：
+skill 是流程說明不是沙盒 —— 做到一半發現需要 `search_files` 卻被自己的宣告擋住，
+比多給幾支工具糟得多。
+
+生效的方式是**篩清單**：宣告的工具現在有一支拿不到（工作區唯讀而它要 `write_file`），
+這份 skill 就不進系統提示。那是 `agent_rules()` 一開始就寫下的規則
+——**沒開放的功能一個字都不要提**——套到 skill 上而已，不是新概念。
+認不得的工具名（MCP 那種會來會去的）不算數：拿它判斷等於讓一台 server 沒開就
+少掉一份 skill。`/` 選單與 `load_skill` 指名都還是叫得到。
+
+### skill 正文可以帶「現在的實際狀態」
+
+`SKILL.md` 是靜態文字，但流程需要現場狀態：`release-checklist` 要看 `git status`。
+沒有這個就只能寫成「請先執行 X 看看」，模型照著多跑一輪 —— 而那一輪的輸出，
+載入的當下本來就拿得到。所以正文裡的 `` !`指令` `` 會在 `load_skill` 時換成輸出。
+
+**這是把「讀一份檔案」變成「跑一段指令」，而 skill 檔可以來自工作區**，
+所以四道限制一條都不能少：
+
+- 走 `build_command()`，跟 `run_shell` 同一份風險檢查與沙盒包裝（第二份遲早會忘了改）。
+- **危險指令直接不跑，不是跳出來問。** 這一條是分界線：確認卡問的是「使用者要跑這行」，
+  而 skill 檔裡的字不是使用者打的。問了等於把一份檔案的內容升格成使用者的意圖。
+- 一份最多 5 行、每行 1,500 字、15 秒。
+- `load_skill` 的確認卡先把這幾行列出來 —— `preview_tool()` 多一個分支就有了。
+
 ## 字體大小只縮放閱讀區
 
 CSS 裡的字級全是寫死的 px，要做全域縮放得動六十幾條規則。實際上只有六條需要動：
@@ -1344,6 +1372,8 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **子代理的 commit 訊息是機器寫的**（`agent_commit_msg`） | 分支上那一筆長成「子代理 a123（work）：<交辦的話>」 | 那是給人辨認用的，不是給 changelog 用的。要漂亮的訊息就 merge 之後自己 `--amend` |
 | **自動壓縮的門檻寫死 85%**（[06-chat.js](frontend/js/06-chat.js) `AUTO_COMPACT_AT`） | 沒得調 | 太早壓會丟掉還用得到的細節，太晚壓會來不及。85% 留得下一次壓縮呼叫本身的空間，而 `preCompact` 在 75% 就先算好了 |
 | **子代理滿了是「收工具」不是壓縮**（[07-tools.js](frontend/js/07-tools.js) `SUB_CTX_AT`） | 一份長調查只會拿到「查到一半」的結論 | 幫子代理也做一套壓縮＝多一條會壞的路。收工具是三行，而且結論一定拿得到。真的常撞到再說 |
+| **`check_job` 要有背景指令才送**（[serve.py](serve.py) `tool_defs`） | 模型看不到它，除非真的丟了背景指令 | 一支工具的定義每輪約 110 token（量過），而多數對話從頭到尾沒有背景指令。用既有的 `needs` 閘門，不是另做一套延後載入 —— 那一套量過之後不值得，見 [plan-agent.md](plan-agent.md) 第 1 節 |
+| **skill 的 `!`指令`` 最多 5 行、15 秒**（`SKILL_CMD_MAX`） | 想帶更多現場狀態就帶不了 | 那是 skill 不是腳本。要跑一串就寫成一支腳本，正文叫 `run_shell` 跑它 —— 那條路有完整的確認卡 |
 | **skill 清單的上限寫死 30 則／120 字**（[serve.py](serve.py) `SKILL_LIST_MAX`） | 第 31 個 skill 模型看不到（`load_skill` 指名還是叫得到） | 有些 agent 為此開了兩個設定，這裡的 context 小一個數量級，可調空間本來就不大 |
 | **worktree 只借 python 環境**（`detect_python`） | JS 專案的子代理跑不了 `npm test` | 借 `.venv` 安全（唯讀的執行環境），連結 `node_modules` 不安全（兩個子代理同時 `npm install`）。見 [plan-agent.md](plan-agent.md) 2.20 |
 | **MCP 連線不會主動關**（[serve.py](serve.py) `mcps`） | 換過幾個工作區之後，閒置的 stdio 行程留到收攤 | 閒置行程不花什麼，而「什麼時候沒人用了」要另外追一份狀態。真的變多就掛在 `SESSIONS_MAX` 淘汰那裡 |
@@ -1403,7 +1433,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 80 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 83 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
 node tests/test_gui.js       # 64 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree

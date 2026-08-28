@@ -306,6 +306,10 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
   約 240 token），模型看到適用的就用 `load_skill` 把正文載進來。實測 qwen3.8:27b
   在「測試沒過，幫我處理」這句話之後，**第一輪就自己選了 `run-pytest`** 並照著步驟做。
   正文按需載入而不是常駐，是因為六份正文加起來是幾千 token，而九成的對話用不到。
+  兩件事跟著開放狀態走：**用不到的不列**（工作區唯讀時，一份要 `write_file` 的
+  skill 不會出現在模型看得到的清單裡；`/` 選單與指名載入照舊），
+  以及**正文可以帶現場狀態** —— 寫 `` !`git status --porcelain` ``，載入時會換成它的
+  輸出，省掉模型自己再跑一輪。危險指令不會跑，確認卡會先把要跑的幾行列出來。
 - **子代理**（`task`）：把「掃過整個專案找出所有用到 X 的地方」這種事交出去，
   它有自己的 context 與輪數上限（60 輪），**只有結論回到主對話**。自己做的話幾十個
   檔案的內容會灌進對話，之後每一輪都要重送。按停止鍵停得住。
@@ -1034,7 +1038,7 @@ ollamaGUI/
 │       └── 09-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 80 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 83 項： python tests/test_serve.py
 │   ├── test_gui.js         網頁 64 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
