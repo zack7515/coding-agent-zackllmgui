@@ -1635,8 +1635,11 @@ const AUTO_MODES = [
   ['ws', '工作區內全自動', '連 rm、mv、chmod 也自動放行 —— 但只限路徑全都在工作區裡的；'
     + '動到工作區外、sudo、裝套件仍要你點頭。沙盒開著時全部不問（沙盒本身就出不去）']
 ];
+// load_skill 留在這裡是因為**它真的會跑指令的時候，risk 就不是 'ok'**
+// （serve.py 的 preview_risk），而上面那條風險檢查排在自動模式前面 ——
+// 會跑指令的那幾份一定跳確認卡，其餘的（九成）照舊自動載入。
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
-  'todo_write', 'load_skill'];   // load_skill 只是讀 serve.py 旁邊的一份說明
+  'todo_write', 'load_skill'];
 
 // 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
 // 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。
@@ -5049,9 +5052,12 @@ function confirmTool(name, args, pre) {
       el.querySelector('.ta .st').textContent = '核准之後 write_file / edit_file 才會出現';
     }
     if (write) el.querySelector('.fp').textContent = '· ' + (args.path || '');
+    // 多行的（load_skill 會先跑的那幾行、沙盒說明）只把第一行放進這個小標，
+    // 完整的接在參數下面 —— 一個 span 塞五行等於沒顯示
+    const head = risky.split('\n')[0];
     if (risky) {
       const warn = el.querySelector('.fp');
-      warn.textContent = risky;
+      warn.textContent = head;
       warn.style.color = 'var(--err)';
     }
     $('thread').appendChild(el);
@@ -5060,13 +5066,16 @@ function confirmTool(name, args, pre) {
     waitBadge(true);
     notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
       + (write && args.path ? ' · ' + args.path : '')
-      + (risky ? ' · ' + risky : ''));
+      + (head ? ' · ' + head : ''));
 
     // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
     if (write && pre && pre.diff) {
       const box = el.querySelector('.args');
       box.className = 'args diff';
       box.innerHTML = renderDiff(pre.diff);
+    } else if (risky.indexOf('\n') >= 0) {
+      // 不是 diff、但有好幾行要看的：load_skill 會先執行的那份清單
+      el.querySelector('.args').textContent += '\n\n' + risky;
     }
 
     // 「以後都放行」：把這一次的判斷寫成規則，不用每天重新點一遍。

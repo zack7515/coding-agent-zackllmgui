@@ -18,7 +18,7 @@
 |---|---|---|---|
 | 1 | 工具開關 | **預設開啟**；`--no-tools` 或網頁上關掉之後，一個工具定義都不會送給模型 | `ALLOW_TOOLS` |
 | 2 | 只接受本機請求 | `--host 0.0.0.0` 時同網段的人不能叫你的機器跑指令 | `_is_local()` |
-| 3 | 只認自己那一頁 | **你逛到的別的網頁**不能 POST 過來執行指令 | `same_site()` |
+| 3 | 只認自己那一頁 | **你逛到的別的網頁**不能叫這支服務做事，也讀不走它的回應 | `same_site()` |
 | 4 | 工作區路徑限制 | 檔案工具跑出專案資料夾 | `ws_path()` |
 | 5 | 修改檔案要再開一道 | 讀得到不等於改得了 | `ALLOW_WRITE` |
 | 6 | 指令風險判斷 | 無法還原的操作直接拒絕執行 | `command_risk()` |
@@ -76,23 +76,35 @@ if target != root and root not in target.parents:
 所以上面每一道關卡都在它後面，而確認卡在網頁那一端 —— 繞過網頁就等於繞過確認卡。
 攻擊者讀不到回應（沒有 CORS 標頭），但指令已經跑掉了。
 
-`same_site()` 擋兩件事，掛在 `do_POST` 一處，所有路由一起生效：
+`same_site()` 擋兩件事，掛在 **`parse_request()`** 一處 ——
+每一個請求都會走到那裡，包含 GET：
 
 | 送過來的東西 | 結果 |
 |---|---|
 | `Origin` 跟 `Host` 對不上（別的網站） | 403 |
 | `Origin: null`（沙箱 iframe、`file://`） | 403 |
-| `Host` 是網域名（DNS rebinding：網域指回 127.0.0.1，Origin 會跟 Host 一致） | 403 |
+| `Host` 是不認得的網域名（DNS rebinding：網域指回 127.0.0.1，Origin 會跟 Host 一致） | 403 |
 | `Origin` 跟 `Host` 一致（自己那一頁） | 放行 |
-| 沒有 `Origin`（curl、測試、本機其他程式） | 放行 |
+| `Host` 是 `localhost`、任何 IP、或**這台機器自己的主機名** | 放行 |
+| 沒有 `Origin` 的 **POST**（curl、測試、本機其他程式） | 放行 |
+| 沒有 `Origin` 的 **GET** | 照樣看 `Host` |
 
-最後一列是刻意的：這道擋的是「瀏覽器裡的別的網頁」，
-本機程式本來就直接執行得了指令，攔它沒有意義。
-`--trust-remote` 會跳過 `Host` 那一條（主機名不再是判斷依據），跨站那一條照擋。
+**最後兩列不一樣不是筆誤。** 瀏覽器送非 GET 的請求時一定會帶 `Origin`（同源也帶），
+所以沒帶 `Origin` 的 POST 只可能來自 curl 或本機其他程式 —— 那些本來就直接執行得了
+指令，攔它不會多擋到什麼。GET 反過來：**同源時不帶 `Origin`**，而 DNS rebinding
+之後攻擊者那一頁就是同源，只剩 `Host` 看得出來。
+
+掛在 `do_POST` 是不夠的（一開始就是那樣寫的）：`/ext` 是照 `X-Target` 轉發的代理、
+`/upstream` 會吐出工作區的絕對路徑、工具清單與背景工作的指令列 —— 兩支都是 GET，
+rebinding 之後對方**讀得到回應**。`do_DELETE`（`/api/delete` 會刪掉 Ollama 的模型）
+則是自己補了一道 `_is_local()`：它走不到 `do_POST` 那條路。
+
+`--trust-remote` 把這道門**整個**關掉，不是只關一半 —— 理由見第 5 節。
 
 `tests/test_serve.py::test_same_site_blocks_other_pages` 逐條驗真值表，
-`::test_cross_site_post_is_refused_over_http` 真的送一次跨站表單 POST，
-確認回 403 而且**沒有執行到任何東西**。
+`::test_cross_site_post_is_refused_over_http` 真的開一個伺服器送一次跨站表單
+POST，確認回 403 而且**沒有執行到任何東西**，再用 rebinding 的 `Host` 打
+`/upstream`、`/sys`、`/ext` 三支 GET。
 
 ### 指令風險判斷
 
@@ -104,8 +116,18 @@ if target != root and root not in target.parents:
 | ⚠ risky | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill` | 執行得了，但確認卡標紅講明原因，**自動模式一定會問人**——除了「工作區內全自動」那一格（沙盒開著時是整級放行），見上面第 7 道 |
 | ok | `pytest`、`ls`、`git status`、`grep` | 照一般流程 |
 
-旗標拆開寫算同一件事：`rm -r -f x`、`rm --recursive --force x` 跟 `rm -rf x`
-一樣擋（`rm_norm()` 先把旗標併回一串）。不併的話拆開寫就從 ⛔ 掉到 ⚠。
+**block 要精準，risky 可以寬鬆。** 兩邊的代價不對稱：risky 錯殺只是多問一次，
+block 錯殺沒有任何按鈕救得回來，使用者得離開這裡去開終端機。所以 `rm` 那兩條
+綁在「一段指令的開頭」（`SEG`），`git rm -r -f build` 只算 ⚠ —— 那是 git 在刪，
+git 救得回來。
+
+旗標怎麼寫都算同一件事：`rm -r -f x`、`rm x -rf`、`rm --recursive --force x`、
+`RM -R -F x` 跟 `rm -rf x` 一樣擋。做法是 `canon()` 先用 `shlex` 拆成 token 再拼回
+固定的樣子（併旗標、長短旗標互補、脫引號），**原字串與 canon 兩種都比對**，
+取比較嚴的結論 —— canon 認不出來的寫法（`git -C /repo push`、沒有空格的 `a&&b`）
+還有原字串接著，兩邊都是只會多抓不會少抓。同樣的道理也修好了
+`chmod --recursive 777 /`、`git push -f`、`dd of="/dev/sda"`：
+以前這幾條分別掉到 ⚠ 或 ok。
 
 **但這份清單擋的是打錯字與粗心，不是對手。** 決心要繞過正規表示式的人有的是寫法
 （`$IFS`、變數展開、寫成腳本再跑），那一層要靠沙盒 —— 見第 4 節。
@@ -210,22 +232,33 @@ if target != root and root not in target.parents:
 JavaScript。工作區裡有惡意的 `.eslintrc.js` 就等於有一段會被執行的程式碼。
 這跟「在別人的 repo 裡跑 `npm test`」是同一種風險，沙盒開著的話它也一樣關在裡面。
 
-## 3.7 skill 裡的 !`指令`：只有內建的那幾份跑得動
+## 3.7 skill 裡的 !`指令`：只有模型改不到的那幾份跑得動
 
 SKILL.md 的正文可以寫 !`git status`，`load_skill` 會把它換成現在的輸出
 （流程需要現場狀態，不然只能寫「請先執行 X 看看」讓模型多跑一輪）。
 這是**第二個執行入口**，所以邊界跟第 3.6 節同一套：
 
-1. **工作區裡的 skill 只列指令、不代跑。** 那個檔案模型自己寫得出來
+1. **模型改得到的 skill 只列指令、不代跑。** 那個檔案模型自己寫得出來
    （`make-skill` 就是在做這件事），跑的話「寫一個檔案」就變成「執行一行指令」——
    等於它可以自己給自己開一條繞過 `run_shell` 確認卡的路。clone 回來的專案裡
-   藏著一份 skill 也是同一條路。判斷在 `skill_builtin()`：資料夾在 `serve.py`
-   旁邊才算數，那是使用者裝的。
-2. 內建那幾份也只跑 `command_risk()` 判為 ok 的，⚠ 與 ⛔ 一律只顯示不執行 ——
-   skill 檔沒有資格要求 `rm`，那不是使用者打的字。
+   藏著一份 skill 也是同一條路。判斷在 `skill_trusted()`，問的是
+   **「這個資料夾在工作區裡面嗎」**，不是「在不在內建資料夾裡」——
+   那兩個問法在預設設定下是同一個資料夾（工作區預設就是 `os.getcwd()`，
+   README 也叫你在 checkout 裡跑），用後者等於這道關卡沒開。
+   代價：把工作區設在 checkout 上時，內建那幾份也不跑了。那是對的 ——
+   那個狀態下模型確實改得動它們。要讓它們跑就把工作區指到別的地方。
+2. **走的關卡跟 `run_shell` 完全一樣**（`skill_cmd_block()`）：子代理的工具白名單
+   （`agent_guard`）、使用者寫的 `deny` 規則、`command_risk()`。少任何一道都不行 ——
+   那兩道都是**按工具名**比對的，而這條路走到 subprocess 時掛的名字是 `load_skill`：
+   為 `run_shell` 寫的 deny 規則會整條錯過，宣告唯讀的子代理（`agents/explore.md`
+   的工具清單裡有 `load_skill`）也照樣拿得到 subprocess。
 3. 一份最多 5 行、每行 15 秒、輸出留 1500 字，且照樣走 `build_command()`
-   （同一份風險檢查與沙盒包裝）。
+   （同一份風險檢查與沙盒包裝）。逾時是 `kill_tree()` 殺整棵程序樹，
+   而且會照實說「可能已經有副作用」—— 說「沒有執行」是騙人的，它跑了十五秒。
 4. 確認卡在按下去之前就把這幾行列出來，不跑的那幾行標「⛔ 不會跑」與原因。
+   **而且那張卡真的會出現**：`preview_risk()` 會把「這次載入真的會跑指令」的
+   `load_skill` 算成 ⚠，而風險檢查排在自動模式前面。少了這一支的話它是
+   `READ_ONLY_TOOLS` 的一員，「唯讀自動」以上一次都不會問。
 
 ## 4. 怎麼真的關起來
 
@@ -313,12 +346,16 @@ podman run --rm -it \
 `--allow-origin` 白名單開跨來源。做完發現它解的問題，第一種本來就解了，
 而且還多一個「哪個網頁能指揮我的 shell」的攻擊面。整套刪掉了。）
 
-`--trust-remote` 沒有預設值以外的緩衝：它就是把第 2 道關卡整個關掉。
+`--trust-remote` 沒有預設值以外的緩衝：它把第 2 道與第 3 道**整個**關掉。
 啟動時會印一行警告，這是刻意的。
 
 **放在反向代理後面要記得加 `--trust-remote`。** 代理是從 127.0.0.1 連進來的，
-`_is_local()` 看不出差別（這本身就是個洞），但第 3 道會看 `Host` ——
-網域名一律 403。想這樣用就明講 `--trust-remote`，代價寫在上面那張表裡。
+`_is_local()` 看不出差別（這本身就是個洞），而第 3 道會看 `Host`。
+第 3 道曾經只被關掉一半（只跳過 `Host` 那一條，跨站那一條照擋），
+那樣是不能用的：nginx 的 `proxy_pass` 預設把 `Host` 改寫成後端位址、
+Apache 的 `ProxyPreserveHost` 預設是 Off —— 瀏覽器送的 `Origin` 是對外網域，
+轉進來的 `Host` 是 `127.0.0.1:5678`，兩者永遠對不上，每一個 POST 都 403，
+而且沒有任何設定救得回來。要嘛整道開著、要嘛整道關掉，沒有中間值。
 
 ---
 

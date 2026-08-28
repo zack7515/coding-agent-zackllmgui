@@ -324,6 +324,25 @@ focus chain…）為什麼長成那樣，寫在 [tech.md](tech.md) 的〈長指�
 **現在的做法**：寫進 `safety/README.md` 第 4 節當已知限制，真的在意就把那兩支關掉
 （`run_browser` 本來就預設關）。
 
+### 2.22 工作區設在 checkout 上時，內建 skill 的 !`指令` 也不跑了
+
+**問題**：`skill_trusted()` 問的是「這個資料夾在工作區裡面嗎」。而預設工作區就是
+`os.getcwd()`、README 也叫你在 checkout 裡跑 —— 那個狀態下 `HERE/skills` 就在工作區
+裡面，所以連 `release-checklist` 的 !`git status --porcelain` 都只會列出來不執行。
+
+**為什麼還是這樣做**：那個狀態下模型**確實**改得動那份檔案，
+`write_file skills/release-checklist/SKILL.md` 一行就蓋掉了。原本用「在不在
+`HERE/skills` 底下」判斷，在同一個狀態下等於整道關卡沒開（兩個資料夾是同一個）。
+兩害相權，寧可少一個便利功能。
+
+**做完長什麼樣**：裝機時把內建 skill 的雜湊記下來，比對過才算數。
+
+**成本**：中（要有一份 manifest，還要處理使用者自己改內建 skill 的情況），
+而換來的只是「工作區指到 checkout 上」這一種用法的便利。
+
+**現在的做法**：不做。要讓內建的跑就把工作區指到真正的專案
+（`--workspace ~/專案`），那本來就是正常用法。
+
 ---
 
 ## 3. 優先序

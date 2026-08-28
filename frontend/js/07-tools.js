@@ -1174,9 +1174,12 @@ function confirmTool(name, args, pre) {
       el.querySelector('.ta .st').textContent = '核准之後 write_file / edit_file 才會出現';
     }
     if (write) el.querySelector('.fp').textContent = '· ' + (args.path || '');
+    // 多行的（load_skill 會先跑的那幾行、沙盒說明）只把第一行放進這個小標，
+    // 完整的接在參數下面 —— 一個 span 塞五行等於沒顯示
+    const head = risky.split('\n')[0];
     if (risky) {
       const warn = el.querySelector('.fp');
-      warn.textContent = risky;
+      warn.textContent = head;
       warn.style.color = 'var(--err)';
     }
     $('thread').appendChild(el);
@@ -1185,13 +1188,16 @@ function confirmTool(name, args, pre) {
     waitBadge(true);
     notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
       + (write && args.path ? ' · ' + args.path : '')
-      + (risky ? ' · ' + risky : ''));
+      + (head ? ' · ' + head : ''));
 
     // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
     if (write && pre && pre.diff) {
       const box = el.querySelector('.args');
       box.className = 'args diff';
       box.innerHTML = renderDiff(pre.diff);
+    } else if (risky.indexOf('\n') >= 0) {
+      // 不是 diff、但有好幾行要看的：load_skill 會先執行的那份清單
+      el.querySelector('.args').textContent += '\n\n' + risky;
     }
 
     // 「以後都放行」：把這一次的判斷寫成規則，不用每天重新點一遍。

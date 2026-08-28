@@ -1066,9 +1066,15 @@ def _tool_edit_file(path: str, old: str = "", new: str = "", replace_all: bool =
 
 # 一定要擋下來的：打錯一個字就回不去的那種。
 # 這裡列的是「無法用備份救回來」的操作，跟 rm 掉工作區裡的檔案不同層級。
+#
+# **block 的規則要精準，risky 的可以寬鬆。** 兩邊的代價不對稱：risky 錯殺只是多問
+# 一次，block 錯殺沒有任何按鈕救得回來 —— 使用者得離開這裡去開終端機。所以 rm
+# 那兩條綁在 SEG（一段指令的開頭），`git rm -r -f build` 不算：那是 git 在刪，
+# git 救得回來，而且它從來就不該落進「不可申訴」這一級。
+SEG = r"(?:^|[;&|(`]\s*)(?:sudo\s+)?"
 BLOCKED_CMDS = [
-    (r"\brm\s+(-[a-zA-Z]*\s+)*(/|/\*|~|~/|\$HOME)(\s|$)", "rm 掉根目錄或家目錄"),
-    (r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r", "rm -rf（工作區裡的東西請改用 rm -r <路徑>，不要加 -f）"),
+    (SEG + r"rm\s+(-[a-zA-Z]*\s+)*(/|/\*|~|~/|\$HOME)(\s|$)", "rm 掉根目錄或家目錄"),
+    (SEG + r"rm\s+-[a-zA-Z]*(r[a-zA-Z]*f|f[a-zA-Z]*r)", "rm -rf（工作區裡的東西請改用 rm -r <路徑>，不要加 -f）"),
     (r"\bmkfs(\.|\s)", "格式化磁碟"),
     (r"\bdd\s+[^|]*of=/dev/", "dd 寫進裝置"),
     (r">\s*/dev/(sd|nvme|hd)", "覆寫磁碟裝置"),
@@ -1076,7 +1082,7 @@ BLOCKED_CMDS = [
     (r"\b(shutdown|reboot|halt|poweroff)\b", "關機或重開機"),
     (r"\bchmod\s+-R\s+777\s+/(\s|$)", "把根目錄權限打開"),
     (r"\b(userdel|groupdel|passwd)\b", "動到系統帳號"),
-    (r"\bgit\s+push\b[^|;]*--force", "強制推送（會覆蓋遠端歷史）"),
+    (r"\bgit\s+push\b[^|;]*--force(?!-with-lease)", "強制推送（會覆蓋遠端歷史）"),
     (r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
     (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
 ]
@@ -1097,17 +1103,73 @@ RISKY_CMDS = [
 ]
 
 
-def rm_norm(m) -> str:
-    """把 rm 後面的旗標併成一串：`-r -f`、`--recursive --force` 都變回 `-rf`。
+# 長旗標 ↔ 短旗標：canon 兩種寫法都補上去，規則寫成哪一種都比對得到。
+# 只放認得的那幾組 —— 亂猜的話 `--one-file-system` 裡的 f 跟 r 會湊成假的 -rf。
+FLAG_PAIRS = [("--recursive", "r"), ("--force", "f")]
+# 這些指令後面第一個字是子指令（git push、pip install），不是要操作的東西。
+SUBCOMMAND = {"sudo", "env", "git", "npm", "pnpm", "yarn", "pip", "pip3", "apt",
+              "apt-get", "yum", "dnf", "conda", "docker", "cargo", "go"}
+SEPARATOR = {";", "|", "||", "&&", "&"}
 
-    不併的話拆開寫就掉一個等級 —— `rm -rf ~/x` 擋得下來，`rm -r -f ~/x` 只是
-    紅字確認卡。只認得的長旗標換算，其餘丟掉（留著的話 `--one-file-system`
-    裡的 f 跟 r 會湊成假的 -rf）。
+
+def canon(command: str) -> str:
+    """把一行指令重寫成固定的樣子：`指令 子指令 -併好的旗標 參數 --長旗標`。
+
+    為什麼要有：`rm -rf x`、`rm -r -f x`、`rm x -rf`、`rm --recursive --force x`
+    是同一件事，正規表示式看到的卻是四個樣子（實測 19 種寫法有 12 種掉一級）。
+    與其把每條規則寫成四份，不如先把寫法收斂成一種。順便脫掉引號 ——
+    `dd of="/dev/sda"` 以前就是靠那對引號躲過去的。
+
+    長旗標排在最後面是有原因的：`chmod -R 777 /` 那條規則要的是 `-R` 緊接著 777，
+    補出來的 `--recursive` 插在中間就對不上了。
+
+    ponytail: 上限是「一個 token 就是一個字」。`git -C /repo push` 不知道 `-C`
+    會吃掉一個參數、`a&&b` 沒空格拆不開 —— 這兩種 canon 會算歪，所以
+    command_risk **原字串與 canon 兩種都比對**：canon 只會多抓，不會少抓。
     """
-    flags = ""
-    for t in m.group(1).split():
-        flags += {"--recursive": "r", "--force": "f"}.get(t, "") if t.startswith("--") else t[1:]
-    return "rm -" + flags
+    try:
+        toks = shlex.split(command)
+    except ValueError:
+        return command                   # 引號沒配對，交給原字串那一輪
+    out, seg = [], []
+
+    def flush():
+        if not seg:
+            return
+        head, rest = [seg[0]], seg[1:]
+        while head[-1].lower() in SUBCOMMAND:
+            nxt = next((t for t in rest if not t.startswith("-")), None)
+            if nxt is None:
+                break
+            rest.remove(nxt)
+            head.append(nxt)
+        short, longs, args = set(), [], []
+        for t in rest:
+            if re.fullmatch(r"-[a-zA-Z]+", t):
+                short |= set(t[1:])
+            elif t.startswith("--"):
+                longs.append(t)
+            else:
+                args.append(t)
+        for lg, sh in FLAG_PAIRS:
+            if lg in longs and sh not in short:
+                short.add(sh)
+            elif sh in short and lg not in longs:
+                longs.append(lg)
+        out.extend(head)
+        if short:
+            out.append("-" + "".join(sorted(short)))
+        out.extend(args + longs)
+        seg.clear()
+
+    for t in toks:
+        if t in SEPARATOR:
+            flush()
+            out.append(t)
+        else:
+            seg.append(t)
+    flush()
+    return " ".join(out)
 
 
 def command_risk(command: str) -> tuple:
@@ -1118,14 +1180,17 @@ def command_risk(command: str) -> tuple:
 
     **這份清單擋的是打錯字與粗心，不是對手。** 決心要繞過正規表示式的人有的是
     寫法（`$IFS`、變數展開、寫成腳本再跑），那一層要靠沙盒，不是靠這裡。
+
+    原字串與 canon() 兩種形式都比對，取比較嚴的那個結論 —— canon 認不出來的
+    寫法（見它的 ponytail 註解）還有原字串接著，兩邊都是只會多抓不會少抓。
     """
     cmd = " ".join(str(command or "").split())
-    cmd = re.sub(r"\brm((?:\s+--?[a-zA-Z][a-zA-Z-]*)+)", rm_norm, cmd)
+    forms = (cmd, canon(cmd))
     for pattern, why in BLOCKED_CMDS:
-        if re.search(pattern, cmd, re.I):
+        if any(re.search(pattern, f, re.I) for f in forms):
             return ("block", why)
     for pattern, why, *_ in RISKY_CMDS:
-        if re.search(pattern, cmd, re.I):
+        if any(re.search(pattern, f, re.I) for f in forms):
             return ("risky", why)
     return ("ok", "")
 
@@ -1338,6 +1403,26 @@ def skill_commands(body: str) -> list:
     return SKILL_CMD.findall(body)[:SKILL_CMD_MAX]
 
 
+def skill_cmd_block(cmd: str) -> str:
+    """skill 裡的這一行為什麼不跑。空字串＝可以跑。
+
+    走的是跟 run_shell 完全一樣的三道。少任何一道，`load_skill` 就是一個沒人
+    看守的執行入口：`run_tool()` 的 deny 規則與 `agent_guard()` 都是**按工具名**
+    比對的，而這裡走到 subprocess 時掛的名字是 load_skill —— 使用者為 run_shell
+    寫的 deny 規則會整條錯過，宣告唯讀的子代理（agents/explore.md）也照樣拿得到
+    subprocess。風險那一級則是因為 skill 檔沒有資格要求 rm：那不是使用者打的字。
+    """
+    try:
+        agent_guard("run_shell")
+    except Exception as e:
+        return str(e)
+    hit = rule_match("run_shell", {"command": cmd})
+    if hit and hit.get("action") == "deny":
+        return f"deny 規則擋下來（{hit.get('pattern', '')}）"
+    level, why = command_risk(cmd)
+    return why if level != "ok" else ""
+
+
 def skill_live(body: str, run: bool = True) -> str:
     """把 !`指令` 換成它現在的輸出。
 
@@ -1345,16 +1430,15 @@ def skill_live(body: str, run: bool = True) -> str:
     要看 `git status`、`run-pytest` 要看有沒有 `.venv`。沒有這個就只能寫成
     「請先執行 X 看看」，模型照著多跑一輪。
 
-    **這是一個新的執行入口**：讀一份檔案變成跑一段指令。所以三道都走既有的：
-    `build_command()`（同一份風險檢查與沙盒包裝）、危險指令**直接不跑**
-    （skill 檔沒有資格要求 rm，那不是使用者打的字），以及 `load_skill` 的確認卡
-    會先把這幾行列出來給人看。
+    **這是一個新的執行入口**：讀一份檔案變成跑一段指令。所以每一道都走既有的，
+    見 `skill_cmd_block()`；跑的時候也走 `build_command()`，風險檢查與沙盒包裝
+    只有那一份。
 
-    `run=False` 是給**工作區裡**的 skill 用的，見 `_tool_load_skill`。
+    `run=False` 是給模型改得到的 skill 用的，見 `_tool_load_skill`。
     """
     if not run:
         return SKILL_CMD.sub(
-            lambda m: f"`{m.group(1)}`（工作區裡的 skill 不代跑指令）", body)
+            lambda m: f"`{m.group(1)}`（模型改得到這份 skill，不代跑指令）", body)
     cmds = skill_commands(body)
     if not cmds or cur().ws is None:
         return SKILL_CMD.sub(lambda m: f"`{m.group(1)}`（沒有工作區，沒有執行）", body)
@@ -1362,16 +1446,25 @@ def skill_live(body: str, run: bool = True) -> str:
     for cmd in cmds:
         if cmd in done:
             continue
-        level, why = command_risk(cmd)
-        if level != "ok":
-            done[cmd] = ("", why)
+        no = skill_cmd_block(cmd)
+        if no:
+            done[cmd] = ("", no)
             continue
         try:
             argv, cwd, use_shell, _ = build_command("run_shell", {"command": cmd})
-            proc = subprocess.run(argv, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, timeout=15)
+            # 用 Popen 而不是 subprocess.run：逾時的時候 run 只殺得到最上面那個 sh，
+            # 真正在跑的孫子會活下來，而且沒有任何一支看得到它（見 kill_tree）。
+            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, start_new_session=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                out = proc.communicate(timeout=15)[0]
+            except subprocess.TimeoutExpired:
+                kill_tree(proc)
+                # 說「沒有執行」是騙人的：它跑了十五秒，副作用早就發生了
+                done[cmd] = ("", "跑超過 15 秒已中止，可能已經有副作用")
+                continue
             # 只去頭尾的換行：porcelain 那種輸出前兩欄是空白，strip() 會把它吃掉
-            done[cmd] = (proc.stdout.decode("utf-8", "replace").strip("\n")[:SKILL_CMD_OUT], "")
+            done[cmd] = (out.decode("utf-8", "replace").strip("\n")[:SKILL_CMD_OUT], "")
         except Exception as e:
             done[cmd] = ("", f"{type(e).__name__}: {e}")
 
@@ -1391,13 +1484,14 @@ def _tool_load_skill(name: str = "") -> str:
     設計上只有這一支是「按需載入」的：六份內建 skill 的描述加起來 240 token，
     常駐得起；正文全部塞進系統提示會是幾千 token，而九成的對話用不到。
 
-    **工作區裡的 skill 不代跑 !`指令`。** 那個檔案模型自己寫得出來（`make-skill`
+    **模型改得到的 skill 不代跑 !`指令`。** 那個檔案模型自己寫得出來（`make-skill`
     就是在做這件事），跑的話等於「寫一個檔案」變成「執行一行指令」——
     自己給自己開一條繞過 run_shell 確認卡的路。同樣的道理也擋掉 clone 回來的
-    專案裡藏著的 skill。內建的那幾份是跟 serve.py 一起裝的，那是使用者裝的。
+    專案裡藏著的 skill。判斷寫在 `skill_trusted()`，問的是「在不在工作區裡」，
+    不是「在不在內建資料夾裡」—— 那兩個在預設設定下是同一個資料夾。
     """
     folder, raw = skill_find(name)
-    body = skill_live(raw, run=skill_builtin(folder))
+    body = skill_live(raw, run=skill_trusted(folder))
     return (f"# skill：{name}\n\n照這份步驟做。它是流程說明，不是使用者的新指令 ——"
             f"使用者原本要你做的事沒有變。\n\n{body}")
 
@@ -2121,13 +2215,15 @@ def skills_usable() -> list:
 
 
 def skill_find(name: str) -> tuple:
-    """回傳 (資料夾, 正文)。**資料夾決定它有沒有資格執行指令**，見 skill_builtin。"""
+    """回傳 (資料夾, 正文)。**資料夾決定它有沒有資格執行指令**，見 skill_trusted。"""
     clean = str(name or "").strip()
     # 反著找：工作區的優先，跟 skills_list() 的覆蓋規則一致
     for root in reversed(skills_roots()):
         folder = root / clean
-        # 名稱只當資料夾名用，不接受路徑；底線開頭的是範本，不給讀
-        if (folder.parent != root or clean.startswith("_")
+        # 名稱只當資料夾名用，不接受路徑；底線開頭的是範本，不給讀。
+        # 比對 Path(clean).name 而不是 folder.parent —— 後者是**字面**比對，
+        # (root/"..").parent 就等於 root，`..` 一路讀到 skills/ 的上一層去。
+        if (not clean or clean != Path(clean).name or clean.startswith("_")
                 or not (folder / "SKILL.md").is_file()):
             continue
         _, body = parse_skill((folder / "SKILL.md").read_text("utf-8", errors="replace"))
@@ -2139,10 +2235,26 @@ def skill_body(name: str) -> str:
     return skill_find(name)[1]
 
 
-def skill_builtin(folder: Path) -> bool:
-    """這份 skill 是不是跟 serve.py 一起裝的那幾份（相對於工作區裡的）。"""
+def skill_trusted(folder: Path) -> bool:
+    """這份 skill 的檔案，模型自己改得到嗎？改得到就不准它跑指令。
+
+    原本問的是「在不在 HERE/skills 底下」，那個問法是錯的：預設工作區就是
+    `os.getcwd()`，README 也叫你在 checkout 裡跑 —— 那時候 `ws/skills` **就是**
+    `HERE/skills`，模型自己寫的每一份都會被算成內建的，等於這道關卡沒開。
+
+    現在問實際要問的那件事：`write_file` 碰得到的地方一律不跑。代價是把工作區
+    設在 checkout 上時，連內建那幾份也不跑 `!`指令`` 了 —— 這是對的，那個狀態下
+    模型確實改得動它們。要讓內建的跑就把工作區指到別的地方（`--workspace ~/專案`）。
+    """
     try:
-        return folder.parent.resolve() == (HERE / SKILLS_DIR).resolve()
+        folder = folder.resolve()
+        ws = cur().ws
+        if ws is None:
+            return True
+        folder.relative_to(ws.resolve())    # 沒丟例外＝在工作區裡面
+        return False
+    except ValueError:
+        return True
     except OSError:
         return False
 
@@ -2757,6 +2869,26 @@ def lint_after_write(path: Path) -> str:
     return f"[{Path(cmd[0]).name}] 這是剛剛寫入的檔案的檢查結果，請修掉：\n{body}"
 
 
+def preview_risk(name: str, args: dict) -> str:
+    """確認卡要不要標紅、自動模式能不能跳過。
+
+    load_skill 也算在裡面：它**會跑指令**，只是名字不叫 run_shell。少了這一支
+    的話 `autoApprove()` 看到 risk 一律是 "ok"，而 load_skill 又列在
+    READ_ONLY_TOOLS 裡 —— 「唯讀自動」以上一次都不會問，確認卡連出現的機會都沒有。
+    """
+    if name == "run_shell":
+        return command_risk(args.get("command", ""))[0]
+    if name == "load_skill":
+        try:
+            folder, raw = skill_find(args.get("name", ""))
+        except Exception:
+            return "ok"
+        will_run = [c for c in skill_commands(raw)
+                    if skill_trusted(folder) and not skill_cmd_block(c)]
+        return "risky" if will_run else "ok"
+    return "ok"
+
+
 def preview_tool(name: str, args: dict) -> str:
     """給確認卡看的東西：改檔案是 diff，跑指令是風險評估。"""
     """寫入前先算出 diff 給人看。不會碰到磁碟。"""
@@ -2769,10 +2901,10 @@ def preview_tool(name: str, args: dict) -> str:
             return ""
         if not cmds:
             return ""
-        why = ("" if skill_builtin(folder) else "工作區裡的 skill 不代跑指令")
+        why = ("" if skill_trusted(folder) else "模型改得到這份 skill，不代跑指令")
 
         def line(c):
-            no = why or ("" if command_risk(c)[0] == "ok" else command_risk(c)[1])
+            no = why or skill_cmd_block(c)
             return f"  {c}" + (f"   ⛔ 不會跑：{no}" if no else "")
         return "這份 skill 會先執行：\n" + "\n".join(line(c) for c in cmds)
     if name == "run_shell":
@@ -2867,11 +2999,19 @@ def run_tool(name: str, args: dict) -> str:
 # 都算。名字寫成本機、實際指回 127.0.0.1 的網域（DNS rebinding）騙得過 Origin，
 # 但騙不過 Host。
 # 空字串＝沒帶 Host（HTTP/1.0、非瀏覽器的呼叫），跟沒帶 Origin 同一個理由放行。
+# 只有瀏覽器會加 Origin，而且**跨來源的 POST 一定帶得上** —— 表單、no-cors fetch
+# 都算。名字寫成本機、實際指回 127.0.0.1 的網域（DNS rebinding）騙得過 Origin，
+# 但騙不過 Host。
+# 空字串＝沒帶 Host（HTTP/1.0、非瀏覽器的呼叫），跟沒帶 Origin 同一個理由放行。
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+# 這台機器自己的名字也算本機：手機用 http://macbook.local:5678 連進來要能用，
+# 不然 --host 0.0.0.0 這條路等於被這道關卡關掉了。gethostname 不查 DNS，不會卡。
+LOCAL_HOSTS |= {n.lower() for n in
+                (socket.gethostname(), socket.gethostname() + ".local")}
 
 
-def same_site(host: str, origin: str) -> str:
-    """這個 POST 是不是從自己的網頁發出來的。回傳擋掉的原因，空字串＝放行。
+def same_site(host: str, origin: str, method: str = "POST") -> str:
+    """這個請求是不是從自己的網頁發出來的。回傳擋掉的原因，空字串＝放行。
 
     **沒有這一道，`_is_local()` 是擋不住瀏覽器的**：使用者開著這支服務的時候
     逛到的任何一個網頁，都可以用一張 `enctype="text/plain"` 的表單 POST 到
@@ -2881,26 +3021,35 @@ def same_site(host: str, origin: str) -> str:
     兩件事：
     1. 有 Origin 就必須跟 Host 對得上。`null`（沙箱 iframe、file://）不算數 ——
        那正好是攻擊會送出來的值。
-    2. Host 必須是 IP 或 localhost。攻擊者的網域指回 127.0.0.1 時 Origin 跟 Host
-       會一致，只有這一條看得出來。`--trust-remote` 已經自己把邊界關掉了，跳過。
+    2. Host 必須是本機的名字或 IP。攻擊者的網域指回 127.0.0.1 時 Origin 跟 Host
+       會一致，只有這一條看得出來。
 
-    **沒有帶 Origin 的請求照舊放行**：curl、測試、本機其他程式都不帶。
-    這道擋的是「瀏覽器裡的別的網頁」，本機程式本來就直接執行得了指令。
+    **method 會影響第 2 條，這不是筆誤**：非 GET 的請求瀏覽器一定會帶 Origin
+    （同源也帶），所以沒帶 Origin 的 POST 只可能來自 curl 或本機其他程式 ——
+    那些本來就直接執行得了指令，攔它不會多擋到任何東西。GET 反過來，**同源時
+    不帶 Origin**，而 rebinding 之後那一頁就是同源，所以 GET 一定要看 Host。
+    少了這一段，`/ext`（會照著 X-Target 轉發）跟 `/upstream`（工作區絕對路徑、
+    工具清單、背景工作的指令列）就是可以被讀走的。
     """
+    if TRUST_REMOTE:
+        # 放在最前面：反向代理預設會把 Host 改寫成後端位址（nginx 的 proxy_pass、
+        # Apache 的 ProxyPreserveHost Off），那時候 Origin 跟 Host 永遠對不上。
+        # 這個旗標就是「把這道門整個關掉」，不是只關一半。
+        return ""
     host = (host or "").strip()
     origin = (origin or "").strip()
-    if origin and origin not in ("http://" + host, "https://" + host):
+    if origin and origin.lower() not in ("http://" + host.lower(), "https://" + host.lower()):
         return f"這個請求來自別的網站（Origin: {origin[:60]}）"
-    if TRUST_REMOTE:
+    if not origin and method.upper() not in ("GET", "HEAD"):
         return ""
-    name = (host[1:host.index("]")] if host.startswith("[") and "]" in host
-            else host.rsplit(":", 1)[0] if ":" in host else host)
+    # 大小寫、port、IPv6 的方括號一次處理掉；`localhost.` 那個結尾的點也要去掉
+    name = (urllib.parse.urlsplit("//" + host).hostname or "").rstrip(".")
     if name in LOCAL_HOSTS:
         return ""
     try:
         ipaddress.ip_address(name)
     except ValueError:
-        return f"Host 不是本機位址（{name[:60]}）"
+        return f"Host 不是本機位址（{name[:60]}）；用網域名連進來要加 --trust-remote"
     return ""
 
 
@@ -2918,8 +3067,18 @@ class Handler(BaseHTTPRequestHandler):
         # 掛在這裡而不是每支 do_* 開頭：headers 解析完、do_* 還沒跑，而且只有一處
         # 會漏。keep-alive 同一條連線來的第二個請求也會重新跑，所以綁定不會殘留。
         ok = super().parse_request()
-        if ok:
-            _CUR.s = session_for(self.headers.get("X-Tab", ""))
+        if not ok:
+            return ok
+        _CUR.s = session_for(self.headers.get("X-Tab", ""))
+        # 掛在這裡而不是 do_POST：漏掉的不只是「未來新增的方法」，現在就漏著
+        # GET —— rebinding 之後 /ext 是可讀的轉發代理，/upstream 會吐工作區路徑。
+        why = same_site(self.headers.get("Host", ""),
+                        self.headers.get("Origin", ""), self.command)
+        if why:
+            # 沒讀 body 就回應了，這條連線不能留著給下一個請求用
+            self.close_connection = True
+            self._json({"error": why + "。這支服務只接受自己那一頁發出的請求。"}, 403)
+            return False
         return ok
 
     # -- 回應工具 ---------------------------------------------------- #
@@ -3136,11 +3295,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._body_read = False
         try:
-            # 一次擋掉所有路由：漏掉哪一支的代價是那一支可以被別的網頁呼叫。
-            why = same_site(self.headers.get("Host", ""), self.headers.get("Origin", ""))
-            if why:
-                self._json({"error": why + "。這支服務只接受自己那一頁發出的請求。"}, 403)
-                return
+            # 跨站的請求在 parse_request 就擋掉了，走不到這裡
             self._route_post()
         finally:
             # 提早 return 的路徑（403、參數錯、例外）都不會讀 body，
@@ -3536,7 +3691,7 @@ class Handler(BaseHTTPRequestHandler):
             with as_agent(str(req.get("agent", ""))):
                 agent_guard(name)      # 預覽會把檔案內容算成 diff 送回去，一樣要擋
                 diff = preview_tool(name, args)
-                risk = command_risk(args.get("command", ""))[0] if name == "run_shell" else "ok"
+                risk = preview_risk(name, args)
                 # 只在風險指令上算一次：前端要用它決定「工作區內全自動」放不放行
                 scope = "ws" if risk == "risky" and ws_scoped(args.get("command", "")) else ""
                 hit = rule_match(name, args)
@@ -3636,10 +3791,18 @@ class Handler(BaseHTTPRequestHandler):
                     "jobs": jobs_state(), "tool_defs": tool_defs()})
 
     def do_DELETE(self):
-        if self.path.startswith("/api/"):
-            self._proxy("DELETE")
-        else:
-            self._send_bytes(b"Not Found", "text/plain; charset=utf-8", 404)
+        # /api/delete 會刪掉 Ollama 的模型。--host 0.0.0.0 時同網段任何人都連得到
+        # 這支服務，而 DELETE 走不到 do_POST 的那一道 —— 這裡自己擋。
+        self._body_read = False
+        try:
+            if not self._is_local():
+                self._json({"error": "只接受本機請求。"}, 403)
+            elif self.path.startswith("/api/"):
+                self._proxy("DELETE")
+            else:
+                self._send_bytes(b"Not Found", "text/plain; charset=utf-8", 404)
+        finally:
+            self._drain_body()
 
 
 def build_server(ollama: str, bind: str, port: int) -> ThreadingHTTPServer:

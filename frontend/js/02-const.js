@@ -385,8 +385,11 @@ const AUTO_MODES = [
   ['ws', '工作區內全自動', '連 rm、mv、chmod 也自動放行 —— 但只限路徑全都在工作區裡的；'
     + '動到工作區外、sudo、裝套件仍要你點頭。沙盒開著時全部不問（沙盒本身就出不去）']
 ];
+// load_skill 留在這裡是因為**它真的會跑指令的時候，risk 就不是 'ok'**
+// （serve.py 的 preview_risk），而上面那條風險檢查排在自動模式前面 ——
+// 會跑指令的那幾份一定跳確認卡，其餘的（九成）照舊自動載入。
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
-  'todo_write', 'load_skill'];   // load_skill 只是讀 serve.py 旁邊的一份說明
+  'todo_write', 'load_skill'];
 
 // 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
 // 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。

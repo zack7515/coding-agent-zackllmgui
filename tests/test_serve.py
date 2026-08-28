@@ -506,12 +506,27 @@ def test_command_risk():
     for cmd in ["python -m pytest -q", "ls -la", "git status", "grep -r foo ."]:
         assert serve.command_risk(cmd)[0] == "ok", cmd
 
-    # 旗標拆開寫是同一件事，不能因此掉一個等級
+    # 旗標怎麼寫都是同一件事：拆開、放在路徑後面、寫成長旗標、大寫。
+    # 這些以前有一半會掉到 risky（一張紅字確認卡），有的直接掉到 ok。
     for cmd in ["rm -r -f ~/Documents", "rm --recursive --force ~/Documents",
-                "rm -R -f /var/tmp/x"]:
+                "rm -R -f /var/tmp/x", "rm ~/Documents -rf", "rm -r ~/Documents -f",
+                "rm --preserve-root=no -rf /", "RM -R -F ~/x",
+                "chmod --recursive 777 /", "chmod 777 -R /",
+                "git push -f origin main", 'dd if=/dev/zero of="/dev/sda"']:
         assert serve.command_risk(cmd)[0] == "block", cmd
-    # 但也不能把不相干的長旗標湊出一個假的 -rf
-    assert serve.command_risk("rm --one-file-system -i x")[0] == "risky"
+
+    # 反過來：block 是不可申訴的（沒有任何按鈕過得去），所以不能錯殺。
+    # `git rm` 刪的東西 git 救得回來，跟 `rm` 不是同一件事。
+    for cmd in ["git rm -r -f build", "git rm -rf --cached secrets", "npm rm -r pkg",
+                "git commit -m 'note: rm -r -f is dangerous'",
+                "rm --one-file-system -i x", "git push --force-with-lease",
+                "git clean --force -d"]:
+        assert serve.command_risk(cmd)[0] == "risky", cmd
+
+    # canon 認不出來的寫法退回原字串比對，不能因此變成 ok
+    assert serve.command_risk("foo && rm -rf ~")[0] == "block"
+    assert serve.command_risk("echo $(rm -rf /)")[0] == "block"
+    assert serve.canon("rm x -r -f") == "rm -fr x --recursive --force"
 
 
 def test_same_site_blocks_other_pages():
@@ -520,49 +535,68 @@ def test_same_site_blocks_other_pages():
     assert serve.same_site(host, "http://127.0.0.1:5678") == "", "自己那一頁要放行"
     assert serve.same_site("localhost:5678", "http://localhost:5678") == ""
     assert serve.same_site(host, "") == "", "curl／測試不帶 Origin，照舊放行"
+    assert serve.same_site("LOCALHOST:5678", "http://localhost:5678") == "", "大小寫"
+    assert serve.same_site("localhost.:5678", "") == "", "結尾的點"
+    # 本機的主機名要算本機，不然 --host 0.0.0.0 給手機用那條路等於被關掉
+    import socket as _s
+    assert serve.same_site(_s.gethostname() + ":5678", "") == ""
+    # 沒帶 Origin 的 POST 只可能來自本機程式（瀏覽器的非 GET 一定帶 Origin），
+    # 但 GET 同源時不帶 —— rebinding 之後那一頁就是同源，所以 GET 一定要看 Host
+    assert serve.same_site("myhost.local:5678", "", "POST") == ""
+    assert "本機位址" in serve.same_site("evil.example:5678", "", "GET")
+    assert "trust-remote" in serve.same_site("evil.example:5678", "", "GET")
     assert "別的網站" in serve.same_site(host, "https://evil.example")
     # 沙箱 iframe 與 file:// 送的是 null，那正好是攻擊會用的值
     assert "別的網站" in serve.same_site(host, "null")
     # DNS rebinding：網域指回 127.0.0.1 的話 Origin 跟 Host 會一致，只有 Host 看得出來
     assert "本機位址" in serve.same_site("evil.example:5678", "http://evil.example:5678")
     assert serve.same_site("[::1]:5678", "http://[::1]:5678") == ""
-    # --trust-remote 等於自己把邊界關掉了，那時候主機名不再是判斷依據
+    # --trust-remote 是把這道門整個關掉。半開的話反向代理根本用不起來：
+    # nginx 的 proxy_pass 預設會把 Host 改寫成後端位址，Origin 永遠對不上。
     serve.TRUST_REMOTE = True
     try:
         assert serve.same_site("box.local:5678", "http://box.local:5678") == ""
-        assert "別的網站" in serve.same_site("box.local:5678", "https://evil.example"), \
-            "放寬的是主機名，不是跨站"
+        assert serve.same_site("127.0.0.1:5678", "https://agent.example.com") == "", \
+            "反向代理改寫過 Host 的樣子"
     finally:
         serve.TRUST_REMOTE = False
 
 
 def test_cross_site_post_is_refused_over_http():
     """跨站的 text/plain 表單 POST 不觸發預檢，所以這一道一定要在伺服器擋。"""
-    serve.ALLOW_TOOLS = True
-    server = serve.build_server("http://localhost:11434", "127.0.0.1", 8801)
+    # 埠交給系統挑，固定埠會跟同一個檔案裡的假上游撞在一起
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 0)
+    base = "http://127.0.0.1:%d" % server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    time.sleep(0.3)
-    base = "http://127.0.0.1:8801"
-    mark = Path(tempfile.gettempdir()) / "zackllmgui-csrf-should-not-exist"
-    mark.unlink(missing_ok=True)
-    body = json.dumps({"name": "run_shell",
-                       "args": {"command": f"touch {mark}"}}).encode()
-    try:
-        serve.set_workspace(str(HERE))
-        code, out = post(base + "/tool", body,
-                         {"Content-Type": "text/plain", "Origin": "https://evil.example"})
-        assert code == 403 and "別的網站" in out["error"], (code, out)
-        assert not mark.exists(), "被擋下來的請求不該執行到任何東西"
-        # 自己那一頁照跑
-        code, out = post(base + "/tool", body, {"Origin": base})
-        assert code == 200, (code, out)
-        assert mark.exists(), out
-    finally:
-        mark.unlink(missing_ok=True)
-        serve.ALLOW_TOOLS = False
-        serve.cur().ws = None
-        server.shutdown()
-        server.server_close()
+    with tempfile.TemporaryDirectory() as tmp:
+        mark = Path(tmp) / "should-not-exist"
+        body = json.dumps({"name": "run_shell",
+                           "args": {"command": f"touch {mark}"}}).encode()
+        try:
+            serve.ALLOW_TOOLS = True          # 放在 try 裡面：中途爆掉不能留給後面的測試
+            serve.set_workspace(str(HERE))
+            code, out = post(base + "/tool", body,
+                             {"Content-Type": "text/plain",
+                              "Origin": "https://evil.example"})
+            assert code == 403 and "別的網站" in out["error"], (code, out)
+            assert not mark.exists(), "被擋下來的請求不該執行到任何東西"
+            # DNS rebinding：Origin 跟 Host 一致，只有 Host 看得出來。
+            # GET 也要擋 —— /ext 是照 X-Target 轉發的，rebinding 之後讀得到回應
+            for path in ("/upstream", "/sys", "/ext"):
+                try:
+                    get(base + path, {"Host": "evil.example"})
+                    assert False, path + " 應該被擋下來"
+                except urllib.error.HTTPError as e:
+                    assert e.code == 403, (path, e.code)
+            # 自己那一頁照跑
+            code, out = post(base + "/tool", body, {"Origin": base})
+            assert code == 200, (code, out)
+            assert mark.exists(), out
+        finally:
+            serve.ALLOW_TOOLS = False
+            serve.cur().ws = None
+            server.shutdown()
+            server.server_close()
 
 
 def test_ws_scoped():
@@ -2136,10 +2170,53 @@ def test_workspace_skill_cannot_run_commands():
         assert "不代跑指令" in out, out
         assert not (ws / "ran.txt").exists(), "工作區裡的 skill 不該執行得到東西"
         assert "⛔ 不會跑" in serve.preview_tool("load_skill", {"name": "s2"})
-        # 內建的照跑：那幾份是跟 serve.py 一起裝的，等於使用者裝的
-        assert serve.skill_builtin(serve.HERE / serve.SKILLS_DIR / "release-checklist")
-        assert not serve.skill_builtin(ws / "skills" / "s2")
+        # 而且確認卡要真的跳出來：risk 不是 'ok' 才擋得住 READ_ONLY_TOOLS 的自動放行
+        assert serve.preview_risk("load_skill", {"name": "s2"}) == "ok", \
+            "不會跑的就不用紅字"
+        # 工作區外的照跑：那幾份模型改不到
+        assert serve.skill_trusted(serve.HERE / serve.SKILLS_DIR / "release-checklist")
+        assert not serve.skill_trusted(ws / "skills" / "s2")
         assert "的輸出：" in serve.skill_live("!`echo 內建`")
+        assert serve.preview_risk("load_skill", {"name": "release-checklist"}) == "risky", \
+            "會跑指令的那幾份一定要跳確認卡"
+
+    # **預設的工作區就是 os.getcwd()**，README 也叫你在 checkout 裡跑 ——
+    # 那時候 ws/skills 就是 HERE/skills，用路徑分「內建 vs 工作區」等於沒分。
+    serve.set_workspace(str(serve.HERE))
+    try:
+        assert not serve.skill_trusted(serve.HERE / serve.SKILLS_DIR / "release-checklist"), \
+            "工作區設在 checkout 上時，模型改得到內建那幾份，不能再算內建"
+    finally:
+        serve.cur().ws = None
+
+
+def test_skill_name_cannot_climb_out():
+    """`..` 是路徑不是資料夾名。Path.parent 是**字面**比對，(root/'..').parent == root。"""
+    for bad in ("..", ".", "", "../serve", "a/b", "/etc"):
+        try:
+            serve.skill_find(bad)
+            assert False, "應該擋下來：" + repr(bad)
+        except ValueError as e:
+            assert "沒有這個 skill" in str(e), e
+
+
+def test_skill_commands_go_through_the_same_gates_as_run_shell():
+    """load_skill 走到 subprocess 時掛的名字是 load_skill，deny 規則與子代理白名單
+    都是**按工具名**比對的 —— 不自己再問一次，這裡就是一個沒人看守的執行入口。"""
+    with Workspace():
+        assert serve.skill_cmd_block("git status --porcelain") == ""
+        assert "rm" in serve.skill_cmd_block("rm -rf /") or \
+            serve.skill_cmd_block("rm -rf /"), "危險指令本來就不跑"
+        serve.cur().write = True
+        info = serve.agent_open("explore")     # 型別檔說它是唯讀的
+        try:
+            with serve.as_agent(info["id"]):
+                assert "run_shell" in serve.skill_cmd_block("git status"), \
+                    "唯讀子代理不該從 skill 這條路拿到 subprocess"
+                assert "沒有執行" in serve.skill_live("!`git status`")
+        finally:
+            serve.agent_close(info["id"])
+            serve.cur().write = False
 
 
 def test_skill_listing_is_capped():
