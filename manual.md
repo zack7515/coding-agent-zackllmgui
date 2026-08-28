@@ -748,6 +748,11 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 | 跑指令自動 | 連 `run_shell`／`run_tests`／`setup_env` 也放行；`rm`、`sudo`、`pip install` 這種風險指令仍要你點頭 |
 | 工作區內全自動 | 連 `rm`、`mv`、`chmod` 也放行，**但只限路徑全都在工作區裡的那幾條**。沙盒開著時：⚠ 級全部放行 |
 
+**「改檔案自動」以上會一併打開「修改檔案」**（輸入框旁邊那支筆）。那幾檔的前提就是
+模型動得了檔案，兩邊沒對齊的話畫面會顯示全自動、那支筆卻是灰的 —— 看起來像壞掉。
+重新整理之後也照這條走：檔位記在瀏覽器裡，而寫入權限是 `serve.py` 那一端的狀態，
+重啟就回到關；接回來的時候以**檔位**為準。打開時會跳一則提示，不會靜靜地開。
+
 **刪檔案有專用工具，所以刪檔也有還原點。** `delete_file` 跟 `edit_file`
 一樣走同一支路徑限制、一樣先備份、一樣進紀錄 —— 刪錯了在「紀錄」分頁一鍵倒回來。
 模型被明確告知「要刪檔案用 delete_file，不要用 `run_shell` 下 `rm`」。
@@ -1044,7 +1049,7 @@ ollamaGUI/
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
 │   ├── test_serve.py       後端 85 項： python tests/test_serve.py
-│   ├── test_gui.js         網頁 66 項： node tests/test_gui.js
+│   ├── test_gui.js         網頁 67 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │

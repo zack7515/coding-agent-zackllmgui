@@ -1400,6 +1400,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **GPU 節點是寫死的 glob 清單**（[sandbox/bwrap.py](sandbox/bwrap.py) `GPU_NODES`） | 只有 NVIDIA 驗過，其餘照文件寫 | 在沙盒裡 `ls /dev` 看少了什麼，往清單補一條。細節見 [sandbox/README.md](sandbox/README.md) |
 | **容器後端不接 GPU** | docker／podman 裡沒有顯示卡 | `--gpus all` 需要 NVIDIA Container Toolkit，沒裝會讓 docker 直接失敗，所以不無條件加。要做就得先偵測 |
 | **重複失敗只比「工具名＋參數完全一樣」**（[07-tools.js](frontend/js/07-tools.js) `REPEAT_LIMIT`） | 差一個空白就繞過去 | 模型重試時通常原封不動送同一份。真的漏掉再做參數正規化 |
+| **檔位可以自己打開寫入權限**（[02-const.js](frontend/js/02-const.js) `autoWrites`） | 選了「改檔案自動」等於同意模型改檔案，沒有第二次確認 | 那個檔位的名字就是同意本身。反過來（兩邊各存各的）的症狀是畫面顯示全自動、那支筆卻是灰的，而使用者看不出為什麼。打開時一定跳提示 |
 | **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 兩個分頁同時在跑工具時，還原點的「屬於哪則對話」可能標錯 | 工作區已經跟著分頁走了（`Session`），但 chat id 還是行程一份。要準就把它移進 `Session`。**同一個分頁裡切對話已經不會標錯了** —— 網頁送的是「這一輪屬於哪則」（`runChat()`）而不是「現在看著哪則」 |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |
 | **「繼續」不是真的 resume** | 沒有 resume token 這種東西 | 就是拿同一份訊息再送一次，模型從最後那則接下去。Ollama 本來就這樣運作，沒有更好的做法 |
@@ -1486,7 +1487,7 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ```bash
 python tests/test_serve.py   # 85 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
-node tests/test_gui.js       # 66 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+node tests/test_gui.js       # 67 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
                              #   --no-rules 拿掉系統提示、--tools=a,b 只送幾支工具，都是量用的

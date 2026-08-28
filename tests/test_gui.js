@@ -498,6 +498,16 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   console.log('ok   分頁 id 只掛在 serve.py 的端點上');
 })();
 
+// 重新整理之後那支筆不可以是灰的。檔位在「改檔案自動」以上，前提就是模型動得了
+// 檔案 —— 另外存的那個 write 旗標會漂掉（換一台 serve.py、上次存檔時剛好是 false），
+// 而檔位是使用者自己選的意圖。症狀是「畫面顯示全自動，但要再點一次那支筆」。
+(function () {
+  const writes = new Function(grab('autoWrites') + '\nreturn autoWrites;')();
+  assert.deepStrictEqual(['off', 'read', 'edit', 'full', 'ws'].map(writes),
+    [false, false, true, true, true], '哪幾檔以「動得了檔案」為前提');
+  console.log('ok   改檔案自動以上的檔位要連動寫入權限');
+})();
+
 // 允許規則：deny > 危險指令一律問 > allow > 自動模式。
 // allow 不能蓋過危險指令 —— 那條保證是寫在文件上的，不能被設定檔悄悄拿掉。
 (function () {
@@ -943,9 +953,33 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       const renderWriteBtn = () => {}, renderFeatBtn = () => {}, renderWorkspace = () => {};
       // grab() 是從 function 這個字開始切的，async 前綴會被丟掉 —— 補回去，
       // 不然抓回來的是同步函式，裡面的 await 直接 SyntaxError
+      ` + grab('autoWrites') + `
       ` + 'async ' + grab('restoreServerState') + `
       return restoreServerState(conf);`);
     return box(calls, conf, server).then(() => calls);
+  }
+
+  {
+    // 檔位在「改檔案自動」以上，但伺服器那端的寫入是關的（重啟、或上次存檔時
+    // 剛好是 false）—— 要一併推開，不然畫面顯示全自動而那支筆是灰的
+    const calls = await run(
+      { wsPath: '/w', auto: 'full', srv: { tools: true, write: false } },
+      { wsPath: '/w', tools: true, write: false });
+    const patch = (calls.filter(function (c) { return c[0] === 'tools'; })[0] || [])[1];
+    assert.strictEqual(patch.write, true, '全自動檔位沒有把修改檔案一起打開：'
+      + JSON.stringify(calls));
+    assert.strictEqual(patch.auto, 'full');
+    const said = calls.filter(function (c) { return c[0] === 'toast'; }).map((c) => c[1]);
+    assert.ok(/修改檔案/.test(said.join()), '偷偷打開卻沒有說：' + said.join());
+  }
+
+  {
+    // 唯讀那一檔不該動到寫入權限
+    const calls = await run(
+      { wsPath: '/w', auto: 'read', srv: { tools: true, write: false } },
+      { wsPath: '/w', tools: true, write: false });
+    const patch = (calls.filter(function (c) { return c[0] === 'tools'; })[0] || [])[1];
+    assert.strictEqual((patch || {}).write, undefined, '唯讀自動不該打開寫入');
   }
 
   {
@@ -1339,7 +1373,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   const src = script.slice(script.indexOf('const FEATURES'), script.indexOf('function autoMenuItem'))
     + script.slice(script.indexOf('function autoMenuItem'), script.indexOf('function renderFeatBtn'))
     + script.slice(script.indexOf('const SW_KEY'), script.indexOf('/* ══════════════════════ 串流執行'))
-    + grab('writeReason') + grab('openFeatureMenu');
+    + grab('writeReason') + grab('openFeatureMenu') + grab('autoWrites');
 
   // srvKeys＝這個版本的 serve.py 認得哪些開關（舊版沒有 browser）
   const mk = (srvKeys, ws) => new Function(`

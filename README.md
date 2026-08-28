@@ -205,7 +205,7 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 
 ```bash
 python tests/test_serve.py    # 後端 85 項
-node   tests/test_gui.js      # 網頁 66 項
+node   tests/test_gui.js      # 網頁 67 項
 ```
 
 兩份都不需要安裝任何東西，也不需要 Ollama 在跑。

@@ -388,6 +388,13 @@ const AUTO_MODES = [
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
   'todo_write', 'load_skill'];   // load_skill 只是讀 serve.py 旁邊的一份說明
 
+// 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
+// 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。
+// 這條規則只寫一次：切檔位時與重新整理接回設定時共用同一支。
+function autoWrites(mode) {
+  return ['edit', 'full', 'ws'].indexOf(mode) >= 0;
+}
+
 function autoLabel() {
   const m = AUTO_MODES.filter(function (x) { return x[0] === S.auto; })[0] || AUTO_MODES[0];
   return m[1];

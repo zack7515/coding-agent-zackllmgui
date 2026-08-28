@@ -88,7 +88,7 @@ function autoMenuItem() {
             // 放開之後就不再一個一個問，但「能不能改檔案」是另一道開關。
             // 兩個不連動的話，使用者以為放著讓它自己跑，結果模型連檔案都動不了。
             let extra = '';
-            if ((m[0] === 'full' || m[0] === 'ws') && !S.ws.write) {
+            if (autoWrites(m[0]) && !S.ws.write) {
               const why = writeReason();
               if (why) extra = '（' + why + '，目前只能讀）';
               else {
@@ -988,6 +988,11 @@ async function restoreServerState(conf) {
   if (saved.write !== undefined && !!saved.write !== !!S.ws.write) patch.write = !!saved.write;
   if (saved.browser !== undefined && !!saved.browser !== !!S.srv.browser) patch.browser = !!saved.browser;
   if (saved.sandbox !== undefined && !!saved.sandbox !== !!S.srv.sandbox) patch.sandbox = !!saved.sandbox;
+  // **檔位比另外存的那個 write 旗標可靠。** 上面那行接的是「上次伺服器的狀態」，
+  // 而它會漂掉（換一台 serve.py、setServerTools 失敗過一次、或存檔時剛好是 false）。
+  // 檔位是使用者自己選的意圖，而且「改檔案自動」以上本來就以動得了檔案為前提 ——
+  // 所以放在後面蓋過去：不然畫面顯示全自動，那支筆卻是灰的，要人再點一次。
+  if (autoWrites(S.auto) && !S.ws.write) patch.write = true;
   // 自動模式存在瀏覽器、serve.py 重啟就回到 off。不推回去的話系統提示會停在
   // 「每一次都會問你」，而實際上沒有人在按 —— 模型會一輪讀一個檔。
   if (S.auto && S.auto !== 'off') patch.auto = S.auto;
