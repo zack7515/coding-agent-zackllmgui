@@ -95,6 +95,15 @@ def check_one(folder: Path, tools: list) -> tuple:
     elif len(body) > BODY_LIMIT:
         problems.append(f"正文 {len(body)} 字，超過 {BODY_LIMIT} —— 拆成兩個 skill")
 
+    # 正文裡的 !`指令`：寫的時候就要知道哪幾行跑不起來，不要等載入時才發現
+    cmds = serve.skill_commands(body)
+    if len(serve.SKILL_CMD.findall(body)) > serve.SKILL_CMD_MAX:
+        problems.append(f"!`指令` 超過 {serve.SKILL_CMD_MAX} 行，多的不會跑")
+    for cmd in cmds:
+        level, why = serve.command_risk(cmd)
+        if level != "ok":
+            problems.append(f"!`{cmd}` 不會執行：{why}")
+
     # 正文引用到的檔案要真的在
     for label, rel in re.findall(r"\[([^\]]*)\]\(([^)]+)\)", body):
         if rel.startswith(("http://", "https://", "#", "..")):
@@ -104,7 +113,10 @@ def check_one(folder: Path, tools: list) -> tuple:
 
     if problems:
         return False, "；".join(problems), len(desc)
-    return True, f"{len(want)} 個工具 · 描述 {len(desc)} 字 · 正文 {len(body):,} 字", len(desc)
+    note = f"{len(want)} 個工具 · 描述 {len(desc)} 字 · 正文 {len(body):,} 字"
+    if cmds:
+        note += f" · {len(cmds)} 行現場狀態"
+    return True, note, len(desc)
 
 
 def main() -> int:

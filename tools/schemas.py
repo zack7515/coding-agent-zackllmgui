@@ -8,6 +8,7 @@
     needs        條件
     ''           工具開著就有
     'ws'         還要有工作區
+    'job'        還要真的有背景指令（沒有的話這支叫了也沒東西可收）
     'write'      還要按下「修改檔案」
     'plan'       只在計畫模式出現
     'browser'    還要開「連網瀏覽」
@@ -57,7 +58,7 @@ TOOL_SCHEMAS = [
                                    "description": "丟到背景跑，立刻回傳一個 job id 而不是等它跑完。"
                                                   "預期超過 30 秒的指令都要開這個"}},
      "required": ["command"]},
-    {"name": "check_job", "needs": "ws",
+    {"name": "check_job", "needs": "job",
      "description": ("收背景指令的結果。還沒跑完的話它會先幫你等一段時間再回話，"
                      "所以不必自己重複輪詢。id 留空就列出全部"),
      "properties": {"id": {"type": "string", "description": "run_shell 丟背景時回傳的 id"},

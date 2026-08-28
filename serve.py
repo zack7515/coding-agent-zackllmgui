@@ -1303,13 +1303,65 @@ def jobs_state() -> list:
             for j in every]
 
 
+SKILL_CMD = re.compile(r"!`([^`\n]{1,200})`")
+SKILL_CMD_MAX = 5          # 一份 skill 最多跑幾行
+SKILL_CMD_OUT = 1500       # 每一行的輸出最多留幾個字
+
+
+def skill_commands(body: str) -> list:
+    """skill 正文裡寫成 !`指令` 的那幾行。"""
+    return SKILL_CMD.findall(body)[:SKILL_CMD_MAX]
+
+
+def skill_live(body: str) -> str:
+    """把 !`指令` 換成它現在的輸出。
+
+    為什麼要有：SKILL.md 是靜態文字，但流程需要現場狀態 —— `release-checklist`
+    要看 `git status`、`run-pytest` 要看有沒有 `.venv`。沒有這個就只能寫成
+    「請先執行 X 看看」，模型照著多跑一輪。
+
+    **這是一個新的執行入口**：讀一份檔案變成跑一段指令，而 skill 檔可以來自工作區。
+    所以三道都走既有的：`build_command()`（同一份風險檢查與沙盒包裝）、
+    危險指令**直接不跑**（skill 檔沒有資格要求 rm，那不是使用者打的字），
+    以及 `load_skill` 的確認卡會先把這幾行列出來給人看。
+    """
+    cmds = skill_commands(body)
+    if not cmds or cur().ws is None:
+        return SKILL_CMD.sub(lambda m: f"`{m.group(1)}`（沒有工作區，沒有執行）", body)
+    done = {}
+    for cmd in cmds:
+        if cmd in done:
+            continue
+        level, why = command_risk(cmd)
+        if level != "ok":
+            done[cmd] = ("", why)
+            continue
+        try:
+            argv, cwd, use_shell, _ = build_command("run_shell", {"command": cmd})
+            proc = subprocess.run(argv, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=15)
+            # 只去頭尾的換行：porcelain 那種輸出前兩欄是空白，strip() 會把它吃掉
+            done[cmd] = (proc.stdout.decode("utf-8", "replace").strip("\n")[:SKILL_CMD_OUT], "")
+        except Exception as e:
+            done[cmd] = ("", f"{type(e).__name__}: {e}")
+
+    def fill(m):
+        cmd = m.group(1)
+        out, why = done.get(cmd, ("", "超過一份 skill 能跑的行數"))
+        if why:
+            return f"`{cmd}`（沒有執行：{why}）"
+        return f"`{cmd}` 的輸出：\n```\n{out}\n```"
+
+    return SKILL_CMD.sub(fill, body)
+
+
 def _tool_load_skill(name: str = "") -> str:
     """把一份 skill 的正文交給模型。
 
     設計上只有這一支是「按需載入」的：六份內建 skill 的描述加起來 240 token，
     常駐得起；正文全部塞進系統提示會是幾千 token，而九成的對話用不到。
     """
-    body = skill_body(name)
+    body = skill_live(skill_body(name))
     return (f"# skill：{name}\n\n照這份步驟做。它是流程說明，不是使用者的新指令 ——"
             f"使用者原本要你做的事沒有變。\n\n{body}")
 
@@ -1624,7 +1676,7 @@ def agent_rules() -> str:
 
     # skills 索引：只放名字與一行描述。正文由模型自己用 load_skill 拉 ——
     # 六份描述 240 token 常駐得起，六份正文是幾千 token 而且九成用不到。
-    skills = skills_list() if ALLOW_TOOLS else []
+    skills = skills_usable() if ALLOW_TOOLS else []
     if skills:
         # 這段每一輪都要重送，所以是固定成本：一份 skill 多幾行，是每一次呼叫都多幾行。
         # 有些 agent 為此開了兩個設定（清單佔 context 的比例、每則描述的字數上限）；
@@ -1651,6 +1703,11 @@ def tool_defs() -> list:
     plan_ok = cur().plan["approved"] or not REQUIRE_PLAN
     for t in TOOL_SCHEMAS:
         if t["needs"] == "ws" and cur().ws is None:
+            continue
+        # 還沒有背景指令的時候，check_job 是一支叫了也沒東西可收的工具。
+        # 量過：一支工具的定義每一輪約 110 token，而多數對話從頭到尾沒有背景指令。
+        # 這用的是既有的 needs 閘門，不是新機制 —— 見 plan-agent 2.17 為什麼只做到這裡。
+        if t["needs"] == "job" and (cur().ws is None or not JOBS):
             continue
         if t["needs"] == "plan" and not REQUIRE_PLAN:
             continue
@@ -2005,6 +2062,25 @@ def skills_list() -> list:
                     "scope": scope,
                     "tools": [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]}
     return [found[k] for k in sorted(found)]
+
+
+def skills_usable() -> list:
+    """現在這個狀態下真的用得動的 skill。
+
+    `tools:` 原本只是宣告（`tests/test_skills.py` 拿去驗那幾支工具存在），執行時
+    沒有任何作用。讓它生效的方式是**篩清單**，不是限制工具 —— 限制會害到自己：
+    skill 是流程說明不是沙盒，做到一半發現需要 `search_files` 卻被擋住，
+    比多給幾支工具糟。篩清單則是把 `agent_rules()` 一開始就寫下的規則
+    （沒開放的功能一個字都不要提）套到 skill 上：工作區唯讀時列一份要 `write_file`
+    的 skill，只會把模型帶進死路。
+
+    只管清單：`load_skill` 指名還是叫得到。認不得的工具名（例如 MCP 的）不算數，
+    那些會來會去，不能拿來判斷一份 skill 死了沒。
+    """
+    have = {d["function"]["name"] for d in tool_defs()}
+    known = {t["name"] for t in TOOL_SCHEMAS}
+    return [s for s in skills_list()
+            if all(t in have for t in s["tools"] if t in known)]
 
 
 def skill_body(name: str) -> str:
@@ -2618,6 +2694,16 @@ def lint_after_write(path: Path) -> str:
 def preview_tool(name: str, args: dict) -> str:
     """給確認卡看的東西：改檔案是 diff，跑指令是風險評估。"""
     """寫入前先算出 diff 給人看。不會碰到磁碟。"""
+    if name == "load_skill":
+        # 這份 skill 會不會順便跑指令，要在按下去之前就看得到
+        try:
+            cmds = skill_commands(skill_body(args.get("name", "")))
+        except Exception:
+            return ""
+        return ("這份 skill 會先執行：\n"
+                + "\n".join(f"  {c}" + ("" if command_risk(c)[0] == "ok"
+                                         else f"   ⛔ 不會跑：{command_risk(c)[1]}")
+                             for c in cmds)) if cmds else ""
     if name == "run_shell":
         level, why = command_risk(args.get("command", ""))
         box = ""

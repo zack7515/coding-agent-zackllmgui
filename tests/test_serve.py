@@ -1969,6 +1969,76 @@ def test_worktree_borrows_the_main_venv():
             serve.cur().write = False
 
 
+def test_check_job_only_appears_once_there_is_a_job():
+    """沒有背景指令的時候，check_job 是一支叫了也沒東西可收的工具。
+
+    量過的數字：一支工具的定義每一輪約 110 token，而多數對話從頭到尾沒有背景指令。
+    用的是既有的 needs 閘門 —— **不是**另做一套「延後載入工具定義」的機制，
+    那一套量過之後不值得（見 plan-agent 2.17）。
+    """
+    with Workspace() as ws:
+        names = lambda: [d["function"]["name"] for d in serve.tool_defs()]
+        was = dict(serve.JOBS)
+        serve.JOBS.clear()                 # 前面的測試可能留了幾筆下來
+        try:
+            assert "check_job" not in names(), "還沒有背景指令就送 check_job"
+            serve.JOBS["job1"] = {"id": "job1", "cmd": "sleep 1", "code": 0}
+            assert "check_job" in names(), "有背景指令了卻收不到"
+        finally:
+            serve.JOBS.clear()
+            serve.JOBS.update(was)
+
+
+def test_skill_listing_follows_what_is_open():
+    """`tools:` 不是權限設定，但它決定「列不列給模型看」。
+
+    工作區唯讀時列一份要 write_file 的 skill，只會把模型帶進死路 ——
+    那正是 agent_rules() 一開始就寫下的規則：沒開放的功能一個字都不要提。
+    限制工具那條路刻意不走：skill 是流程說明不是沙盒。
+    """
+    skills = [{"name": "唯讀的", "description": "d", "scope": "內建",
+               "tools": ["read_file", "search_files"]},
+              {"name": "要寫檔", "description": "d", "scope": "內建",
+               "tools": ["read_file", "write_file"]},
+              {"name": "認不得的", "description": "d", "scope": "內建",
+               "tools": ["mcp__x__y"]}]
+    with Workspace() as ws:
+        was, serve.skills_list = serve.skills_list, lambda: skills
+        try:
+            serve.cur().write = True
+            assert [s["name"] for s in serve.skills_usable()] == \
+                ["唯讀的", "要寫檔", "認不得的"]
+            serve.cur().write = False
+            names = [s["name"] for s in serve.skills_usable()]
+            assert names == ["唯讀的", "認不得的"], names
+            # 認不得的工具名（MCP 那種會來會去）不能拿來判斷一份 skill 死了沒
+            assert "要寫檔" not in serve.agent_rules()
+        finally:
+            serve.skills_list = was
+
+
+def test_skill_body_can_carry_live_state():
+    """正文裡的 !`指令` 會換成它現在的輸出 —— 但危險的那些不會跑。
+
+    這是把「讀一份檔案」變成「跑一段指令」，而 skill 檔可以來自工作區。
+    所以 skill 檔沒有資格要求 rm -rf：那不是使用者打的字，不能只是跳出來問。
+    """
+    with Workspace() as ws:
+        body = "狀態：\n\n!`echo 現在的狀態`\n\n再來 !`rm -rf /` 這行。\n"
+        out = serve.skill_live(body)
+        assert "現在的狀態" in out and "```" in out, out
+        assert "沒有執行：" in out, out
+        assert out.count("```") == 2, "危險的那一行也給了輸出區塊：" + out
+        assert serve.skill_commands(body) == ["echo 現在的狀態", "rm -rf /"]
+        # 確認卡要先把要跑的列出來，人才有機會看過再按
+        (ws / "skills").mkdir()
+        (ws / "skills" / "s1").mkdir()
+        (ws / "skills" / "s1" / "SKILL.md").write_text(
+            "---\nname: s1\ndescription: d\n---\n\n!`echo 嗨`\n", encoding="utf-8")
+        assert "echo 嗨" in serve.preview_tool("load_skill", {"name": "s1"})
+        assert serve.preview_tool("load_skill", {"name": "沒這個"}) == ""
+
+
 def test_skill_listing_is_capped():
     """系統提示裡的 skill 清單每一輪都要重送，所以是固定成本。
 

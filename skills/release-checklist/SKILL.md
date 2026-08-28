@@ -9,11 +9,14 @@ tools: run_tests, run_shell, read_file
 照 [`checklist.md`](checklist.md) 一項一項來，**每一項都要有實際證據**，
 不要憑印象打勾。
 
+現在的 git 狀態（載入這份 skill 時抓的，不必再跑一次）：
+
+!`git status --porcelain`
+
 ## 步驟
 
 1. `run_tests` —— 全綠才往下走。有紅的就停在這裡回報，不要「順便修一下」。
-2. `run_shell` 跑 `git status --porcelain`，確認沒有預期外的檔案。
-   有沒看過的檔案就列出來問使用者。
+2. 看上面那份 git 狀態，確認沒有預期外的檔案。有沒看過的檔案就列出來問使用者。
 3. 讀 README 與其他文件，確認這次改的東西有寫進去。
    **文件沒更新等於功能沒做完。**
 4. 把 checklist 的結果整理成三到五行回報，讓使用者決定要不要 commit。

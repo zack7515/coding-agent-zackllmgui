@@ -9,6 +9,7 @@
     python test_agent.py qwen3.8:27b-mtp-q4_K_M   # 指定模型
     python test_agent.py --keep                   # 結束後保留暫存專案
     python test_agent.py --no-rules               # 拿掉 agent_rules，比較提示詞值不值得
+    python test_agent.py --tools=read_file,edit_file,run_tests   # 只送這幾支，量工具定義的成本
 
 它做的事跟網頁按下送出之後完全一樣：同一份 tool_defs、同一段 agent_rules、
 同一支 /tool 端點。差別只有「確認」在這裡是自動答應的（人不在場）。
@@ -154,6 +155,17 @@ def main() -> int:
     tools = state["tool_defs"]
     rules = state["agent_rules"]
 
+    # 只送指定的幾支：用來回答「工具定義每一輪都全部送，值不值得省」。
+    # 省的是每輪的固定 tokens，賠的可能是模型找不到該用的工具 —— 兩邊都要量。
+    only = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--tools=")), "")
+    if only:
+        keep_names = [n.strip() for n in only.split(",") if n.strip()]
+        tools = [t for t in tools if t["function"]["name"] in keep_names]
+        missing = [n for n in keep_names
+                   if n not in [t["function"]["name"] for t in tools]]
+        if missing:
+            sys.exit(f"沒有這幾支工具：{', '.join(missing)}")
+
     model = pick_model(want)
     ok0, out0 = pytest_passes(root)
     print(f"專案   {root}")
@@ -171,6 +183,7 @@ def main() -> int:
     messages = ([{"role": "system", "content": rules}] if rules else []) + \
                [{"role": "user", "content": TASK}]
     calls = 0
+    prompt_tokens = 0        # 每一輪都要重送的那一份，累加起來才看得出固定成本
     t0 = time.time()
 
     for rnd in range(1, MAX_ROUNDS + 1):
@@ -180,6 +193,7 @@ def main() -> int:
         if "error" in reply:
             print(f"[{rnd}] 模型回報錯誤：{reply['error']}")
             break
+        prompt_tokens += reply.get("prompt_eval_count") or 0
         msg = reply.get("message") or {}
         messages.append(msg)
 
@@ -222,7 +236,8 @@ def main() -> int:
     ok, out = pytest_passes(root)
     print("-" * 72)
     print(f"結果   pytest {'通過' if ok else '失敗'}：{out.splitlines()[-1] if out else ''}")
-    print(f"統計   {rnd} 輪 · {calls} 次工具呼叫 · {time.time() - t0:.0f} 秒")
+    print(f"統計   {rnd} 輪 · {calls} 次工具呼叫 · {time.time() - t0:.0f} 秒"
+          f" · {len(tools)} 支工具 · prompt {prompt_tokens} tokens")
     print(f"檔案   {(root / 'pkg' / 'calc.py').read_text().strip()}")
 
     server.shutdown()
