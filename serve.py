@@ -36,6 +36,7 @@ import contextlib
 import difflib
 import fnmatch
 import io
+import ipaddress
 import json
 import os
 import re
@@ -1096,13 +1097,30 @@ RISKY_CMDS = [
 ]
 
 
+def rm_norm(m) -> str:
+    """把 rm 後面的旗標併成一串：`-r -f`、`--recursive --force` 都變回 `-rf`。
+
+    不併的話拆開寫就掉一個等級 —— `rm -rf ~/x` 擋得下來，`rm -r -f ~/x` 只是
+    紅字確認卡。只認得的長旗標換算，其餘丟掉（留著的話 `--one-file-system`
+    裡的 f 跟 r 會湊成假的 -rf）。
+    """
+    flags = ""
+    for t in m.group(1).split():
+        flags += {"--recursive": "r", "--force": "f"}.get(t, "") if t.startswith("--") else t[1:]
+    return "rm -" + flags
+
+
 def command_risk(command: str) -> tuple:
     """判斷一行指令的風險。回傳 ("block"|"risky"|"ok", 原因)。
 
     這是後端的判斷，前端的確認卡直接顯示它的結論 ——
     風險判斷寫兩份的話，總有一份會過期。
+
+    **這份清單擋的是打錯字與粗心，不是對手。** 決心要繞過正規表示式的人有的是
+    寫法（`$IFS`、變數展開、寫成腳本再跑），那一層要靠沙盒，不是靠這裡。
     """
     cmd = " ".join(str(command or "").split())
+    cmd = re.sub(r"\brm((?:\s+--?[a-zA-Z][a-zA-Z-]*)+)", rm_norm, cmd)
     for pattern, why in BLOCKED_CMDS:
         if re.search(pattern, cmd, re.I):
             return ("block", why)
@@ -1320,18 +1338,23 @@ def skill_commands(body: str) -> list:
     return SKILL_CMD.findall(body)[:SKILL_CMD_MAX]
 
 
-def skill_live(body: str) -> str:
+def skill_live(body: str, run: bool = True) -> str:
     """把 !`指令` 換成它現在的輸出。
 
     為什麼要有：SKILL.md 是靜態文字，但流程需要現場狀態 —— `release-checklist`
     要看 `git status`、`run-pytest` 要看有沒有 `.venv`。沒有這個就只能寫成
     「請先執行 X 看看」，模型照著多跑一輪。
 
-    **這是一個新的執行入口**：讀一份檔案變成跑一段指令，而 skill 檔可以來自工作區。
-    所以三道都走既有的：`build_command()`（同一份風險檢查與沙盒包裝）、
-    危險指令**直接不跑**（skill 檔沒有資格要求 rm，那不是使用者打的字），
-    以及 `load_skill` 的確認卡會先把這幾行列出來給人看。
+    **這是一個新的執行入口**：讀一份檔案變成跑一段指令。所以三道都走既有的：
+    `build_command()`（同一份風險檢查與沙盒包裝）、危險指令**直接不跑**
+    （skill 檔沒有資格要求 rm，那不是使用者打的字），以及 `load_skill` 的確認卡
+    會先把這幾行列出來給人看。
+
+    `run=False` 是給**工作區裡**的 skill 用的，見 `_tool_load_skill`。
     """
+    if not run:
+        return SKILL_CMD.sub(
+            lambda m: f"`{m.group(1)}`（工作區裡的 skill 不代跑指令）", body)
     cmds = skill_commands(body)
     if not cmds or cur().ws is None:
         return SKILL_CMD.sub(lambda m: f"`{m.group(1)}`（沒有工作區，沒有執行）", body)
@@ -1367,8 +1390,14 @@ def _tool_load_skill(name: str = "") -> str:
 
     設計上只有這一支是「按需載入」的：六份內建 skill 的描述加起來 240 token，
     常駐得起；正文全部塞進系統提示會是幾千 token，而九成的對話用不到。
+
+    **工作區裡的 skill 不代跑 !`指令`。** 那個檔案模型自己寫得出來（`make-skill`
+    就是在做這件事），跑的話等於「寫一個檔案」變成「執行一行指令」——
+    自己給自己開一條繞過 run_shell 確認卡的路。同樣的道理也擋掉 clone 回來的
+    專案裡藏著的 skill。內建的那幾份是跟 serve.py 一起裝的，那是使用者裝的。
     """
-    body = skill_live(skill_body(name))
+    folder, raw = skill_find(name)
+    body = skill_live(raw, run=skill_builtin(folder))
     return (f"# skill：{name}\n\n照這份步驟做。它是流程說明，不是使用者的新指令 ——"
             f"使用者原本要你做的事沒有變。\n\n{body}")
 
@@ -2091,7 +2120,8 @@ def skills_usable() -> list:
             if all(t in have for t in s["tools"] if t in known)]
 
 
-def skill_body(name: str) -> str:
+def skill_find(name: str) -> tuple:
+    """回傳 (資料夾, 正文)。**資料夾決定它有沒有資格執行指令**，見 skill_builtin。"""
     clean = str(name or "").strip()
     # 反著找：工作區的優先，跟 skills_list() 的覆蓋規則一致
     for root in reversed(skills_roots()):
@@ -2101,9 +2131,20 @@ def skill_body(name: str) -> str:
                 or not (folder / "SKILL.md").is_file()):
             continue
         _, body = parse_skill((folder / "SKILL.md").read_text("utf-8", errors="replace"))
-        return body[:SKILL_BODY_LIMIT]
+        return folder, body[:SKILL_BODY_LIMIT]
     raise ValueError(f"沒有這個 skill：{name}")
 
+
+def skill_body(name: str) -> str:
+    return skill_find(name)[1]
+
+
+def skill_builtin(folder: Path) -> bool:
+    """這份 skill 是不是跟 serve.py 一起裝的那幾份（相對於工作區裡的）。"""
+    try:
+        return folder.parent.resolve() == (HERE / SKILLS_DIR).resolve()
+    except OSError:
+        return False
 
 
 # ══════════════════════ 子代理型別 ══════════════════════ #
@@ -2722,13 +2763,18 @@ def preview_tool(name: str, args: dict) -> str:
     if name == "load_skill":
         # 這份 skill 會不會順便跑指令，要在按下去之前就看得到
         try:
-            cmds = skill_commands(skill_body(args.get("name", "")))
+            folder, raw = skill_find(args.get("name", ""))
+            cmds = skill_commands(raw)
         except Exception:
             return ""
-        return ("這份 skill 會先執行：\n"
-                + "\n".join(f"  {c}" + ("" if command_risk(c)[0] == "ok"
-                                         else f"   ⛔ 不會跑：{command_risk(c)[1]}")
-                             for c in cmds)) if cmds else ""
+        if not cmds:
+            return ""
+        why = ("" if skill_builtin(folder) else "工作區裡的 skill 不代跑指令")
+
+        def line(c):
+            no = why or ("" if command_risk(c)[0] == "ok" else command_risk(c)[1])
+            return f"  {c}" + (f"   ⛔ 不會跑：{no}" if no else "")
+        return "這份 skill 會先執行：\n" + "\n".join(line(c) for c in cmds)
     if name == "run_shell":
         level, why = command_risk(args.get("command", ""))
         box = ""
@@ -2815,6 +2861,47 @@ def run_tool(name: str, args: dict) -> str:
         if note:
             out = out + "\n\n" + note
     return out
+
+
+# 只有瀏覽器會加 Origin，而且**跨來源的 POST 一定帶得上** —— 表單、no-cors fetch
+# 都算。名字寫成本機、實際指回 127.0.0.1 的網域（DNS rebinding）騙得過 Origin，
+# 但騙不過 Host。
+# 空字串＝沒帶 Host（HTTP/1.0、非瀏覽器的呼叫），跟沒帶 Origin 同一個理由放行。
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+
+
+def same_site(host: str, origin: str) -> str:
+    """這個 POST 是不是從自己的網頁發出來的。回傳擋掉的原因，空字串＝放行。
+
+    **沒有這一道，`_is_local()` 是擋不住瀏覽器的**：使用者開著這支服務的時候
+    逛到的任何一個網頁，都可以用一張 `enctype="text/plain"` 的表單 POST 到
+    `/tool` 執行指令 —— 那種請求不觸發預檢，送出去的來源 IP 是 127.0.0.1，
+    上面每一道關卡都在它後面。確認卡在網頁那一端，繞過網頁就等於繞過確認卡。
+
+    兩件事：
+    1. 有 Origin 就必須跟 Host 對得上。`null`（沙箱 iframe、file://）不算數 ——
+       那正好是攻擊會送出來的值。
+    2. Host 必須是 IP 或 localhost。攻擊者的網域指回 127.0.0.1 時 Origin 跟 Host
+       會一致，只有這一條看得出來。`--trust-remote` 已經自己把邊界關掉了，跳過。
+
+    **沒有帶 Origin 的請求照舊放行**：curl、測試、本機其他程式都不帶。
+    這道擋的是「瀏覽器裡的別的網頁」，本機程式本來就直接執行得了指令。
+    """
+    host = (host or "").strip()
+    origin = (origin or "").strip()
+    if origin and origin not in ("http://" + host, "https://" + host):
+        return f"這個請求來自別的網站（Origin: {origin[:60]}）"
+    if TRUST_REMOTE:
+        return ""
+    name = (host[1:host.index("]")] if host.startswith("[") and "]" in host
+            else host.rsplit(":", 1)[0] if ":" in host else host)
+    if name in LOCAL_HOSTS:
+        return ""
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return f"Host 不是本機位址（{name[:60]}）"
+    return ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3049,6 +3136,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._body_read = False
         try:
+            # 一次擋掉所有路由：漏掉哪一支的代價是那一支可以被別的網頁呼叫。
+            why = same_site(self.headers.get("Host", ""), self.headers.get("Origin", ""))
+            if why:
+                self._json({"error": why + "。這支服務只接受自己那一頁發出的請求。"}, 403)
+                return
             self._route_post()
         finally:
             # 提早 return 的路徑（403、參數錯、例外）都不會讀 body，

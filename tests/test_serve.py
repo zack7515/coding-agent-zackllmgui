@@ -506,6 +506,64 @@ def test_command_risk():
     for cmd in ["python -m pytest -q", "ls -la", "git status", "grep -r foo ."]:
         assert serve.command_risk(cmd)[0] == "ok", cmd
 
+    # 旗標拆開寫是同一件事，不能因此掉一個等級
+    for cmd in ["rm -r -f ~/Documents", "rm --recursive --force ~/Documents",
+                "rm -R -f /var/tmp/x"]:
+        assert serve.command_risk(cmd)[0] == "block", cmd
+    # 但也不能把不相干的長旗標湊出一個假的 -rf
+    assert serve.command_risk("rm --one-file-system -i x")[0] == "risky"
+
+
+def test_same_site_blocks_other_pages():
+    """別的網站不能指揮這支服務 —— 確認卡在網頁那端，繞過網頁就繞過確認卡。"""
+    host = "127.0.0.1:5678"
+    assert serve.same_site(host, "http://127.0.0.1:5678") == "", "自己那一頁要放行"
+    assert serve.same_site("localhost:5678", "http://localhost:5678") == ""
+    assert serve.same_site(host, "") == "", "curl／測試不帶 Origin，照舊放行"
+    assert "別的網站" in serve.same_site(host, "https://evil.example")
+    # 沙箱 iframe 與 file:// 送的是 null，那正好是攻擊會用的值
+    assert "別的網站" in serve.same_site(host, "null")
+    # DNS rebinding：網域指回 127.0.0.1 的話 Origin 跟 Host 會一致，只有 Host 看得出來
+    assert "本機位址" in serve.same_site("evil.example:5678", "http://evil.example:5678")
+    assert serve.same_site("[::1]:5678", "http://[::1]:5678") == ""
+    # --trust-remote 等於自己把邊界關掉了，那時候主機名不再是判斷依據
+    serve.TRUST_REMOTE = True
+    try:
+        assert serve.same_site("box.local:5678", "http://box.local:5678") == ""
+        assert "別的網站" in serve.same_site("box.local:5678", "https://evil.example"), \
+            "放寬的是主機名，不是跨站"
+    finally:
+        serve.TRUST_REMOTE = False
+
+
+def test_cross_site_post_is_refused_over_http():
+    """跨站的 text/plain 表單 POST 不觸發預檢，所以這一道一定要在伺服器擋。"""
+    serve.ALLOW_TOOLS = True
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 8801)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    base = "http://127.0.0.1:8801"
+    mark = Path(tempfile.gettempdir()) / "zackllmgui-csrf-should-not-exist"
+    mark.unlink(missing_ok=True)
+    body = json.dumps({"name": "run_shell",
+                       "args": {"command": f"touch {mark}"}}).encode()
+    try:
+        serve.set_workspace(str(HERE))
+        code, out = post(base + "/tool", body,
+                         {"Content-Type": "text/plain", "Origin": "https://evil.example"})
+        assert code == 403 and "別的網站" in out["error"], (code, out)
+        assert not mark.exists(), "被擋下來的請求不該執行到任何東西"
+        # 自己那一頁照跑
+        code, out = post(base + "/tool", body, {"Origin": base})
+        assert code == 200, (code, out)
+        assert mark.exists(), out
+    finally:
+        mark.unlink(missing_ok=True)
+        serve.ALLOW_TOOLS = False
+        serve.cur().ws = None
+        server.shutdown()
+        server.server_close()
+
 
 def test_ws_scoped():
     """「工作區內全自動」只放行動得到工作區檔案的那幾類，其他一律照樣問人。"""
@@ -2061,6 +2119,27 @@ def test_skill_body_can_carry_live_state():
             "---\nname: s1\ndescription: d\n---\n\n!`echo 嗨`\n", encoding="utf-8")
         assert "echo 嗨" in serve.preview_tool("load_skill", {"name": "s1"})
         assert serve.preview_tool("load_skill", {"name": "沒這個"}) == ""
+
+
+def test_workspace_skill_cannot_run_commands():
+    """工作區裡的 skill 只列指令不跑。
+
+    不然「寫一個檔案」就變成「執行一行指令」：模型自己寫得出 SKILL.md
+    （make-skill 就是在做這件事），寫完再 load 就繞過了 run_shell 的確認卡。
+    clone 回來的專案裡藏著的 skill 也是同一條路。
+    """
+    with Workspace() as ws:
+        (ws / "skills" / "s2").mkdir(parents=True)
+        (ws / "skills" / "s2" / "SKILL.md").write_text(
+            "---\nname: s2\ndescription: d\n---\n\n!`touch ran.txt`\n", encoding="utf-8")
+        out = serve._tool_load_skill("s2")
+        assert "不代跑指令" in out, out
+        assert not (ws / "ran.txt").exists(), "工作區裡的 skill 不該執行得到東西"
+        assert "⛔ 不會跑" in serve.preview_tool("load_skill", {"name": "s2"})
+        # 內建的照跑：那幾份是跟 serve.py 一起裝的，等於使用者裝的
+        assert serve.skill_builtin(serve.HERE / serve.SKILLS_DIR / "release-checklist")
+        assert not serve.skill_builtin(ws / "skills" / "s2")
+        assert "的輸出：" in serve.skill_live("!`echo 內建`")
 
 
 def test_skill_listing_is_capped():
