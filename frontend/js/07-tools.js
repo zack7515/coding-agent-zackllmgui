@@ -1401,7 +1401,8 @@ async function runSubagent(args, depth, parent) {
   box.stopped = false;
   try {
     const info = await agentCall({ action: 'open', type: type.name,
-                                   parent: parent || '', chat: S.currentId });
+                                   parent: parent || '', chat: S.currentId,
+                                   task: task });
     box.sid = info.id;
     box.id = box.id || info.id;
     log('· 子代理 ' + info.id + '（第 ' + info.depth + ' 層'
@@ -1445,10 +1446,12 @@ async function runSubagent(args, depth, parent) {
     let note = '';
     try {
       const r = await agentCall({ action: 'close', id: sid });
-      if (r.kept) {
-        note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，留在分支 ' + r.branch
-          + '（' + r.path + '）。要收下就 git merge ' + r.branch
-          + '，不要就 git worktree remove。';
+      if (r.committed) {
+        note = '\n[worktree] 改了 ' + r.changes + ' 個檔案，已經 commit 在分支 '
+          + r.branch + '。要收下就 ' + r.merge + '。\n' + (r.diff || '');
+      } else if (r.kept) {
+        note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，收不掉（' + (r.error || '')
+          + '），留在 ' + r.path + '。';
       }
     } catch (e) { /* 已經收掉了就算了 */ }
     return text + note + '\n[子代理 ' + box.id + '] 要追問就用 task 帶 resume:"' + box.id + '"';
@@ -1461,6 +1464,13 @@ async function runSubagent(args, depth, parent) {
       if (stopped()) {
         el.querySelector('.st').textContent = '已中斷';
         return await finish('（子代理被中斷了，任務沒有完成）');
+      }
+      // 預算是整輪共用的，所以子代理自己也要看 —— 只在主迴圈看的話，三個平行子代理
+      // 會各自燒完 60 輪，主迴圈要等它們全部回來才發現超支。
+      const over = budgetStop(S.run);
+      if (over) {
+        el.querySelector('.st').textContent = '超出預算';
+        return await finish('（停在這裡：' + over + '）');
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
@@ -1477,7 +1487,13 @@ async function runSubagent(args, depth, parent) {
         images: function () { },
         content: function (t) { text += t; },
         tools: function (tc) { calls = (calls || []).concat(tc); },
-        done: function () { }
+        // 子代理的 token 也要算進同一本帳：不算的話三個平行子代理各跑 60 輪，
+        // budgetStop() 完全看不到，外部 API 的帳單就沒有任何上限擋著。
+        done: function (d) {
+          if (!S.run || !d) return;
+          S.run.tokens += (d.prompt_eval_count || 0) + (d.eval_count || 0);
+          renderRunBar();
+        }
       });
 
       const m = { role: 'assistant', content: text };

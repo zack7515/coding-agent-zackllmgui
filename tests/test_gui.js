@@ -1103,7 +1103,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   const mk = (replies, opt) => new Function(`
     const conf = ${JSON.stringify(opt || {})};
-    const S = { model: 'm', srv: {}, run: { calls: 0 }, streamTools: [], toolDefs: [],
+    const S = { model: 'm', srv: {}, run: { calls: 0, tokens: 0 }, streamTools: [], toolDefs: [],
                 subs: {}, agentTypes: ${JSON.stringify(TYPES)},
                 abort: { signal: { aborted: !!conf.aborted } } };
     let turn = 0;
@@ -1114,8 +1114,10 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       const r = ${JSON.stringify(replies)}[turn++] || {};
       if (r.content) on.content(r.content);
       if (r.tools) on.tools(r.tools);
-      on.done({});
+      on.done({ prompt_eval_count: 100, eval_count: 20 });
     };
+    const budgetStop = (run) => (conf.budget && run.tokens > conf.budget ? '超出預算' : '');
+    const renderRunBar = () => {};
     const execTool = async (n, a, msg, agent) => {
       calls.push([n, agent || '']);
       msg.content = conf.toolErr || ('OK:' + n);
@@ -1136,8 +1138,10 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       if (body.action === 'stop') {
         return { ok: true, json: async () => ({ stopped: [body.id], jobs: ['job1'] }) };
       }
-      return { ok: true, json: async () => ({ kept: !!conf.dirty, changes: conf.dirty || 0,
-                                              branch: 'zackllmgui/wt1', path: '/tmp/wt1' }) };
+      return { ok: true, json: async () => ({
+        committed: !!conf.dirty, changes: conf.dirty || 0, kept: false,
+        commits: conf.dirty ? 1 : 0, merge: 'git merge zackllmgui/wt1',
+        branch: 'zackllmgui/wt1', path: '/tmp/wt1' }) };
     };
     const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
     const toolDefs = () => ['read_file', 'search_files', 'write_file', 'run_shell',
@@ -1216,12 +1220,13 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(clean.indexOf('看完了') === 0 && clean.indexOf('[worktree]') < 0,
     '沒改動就不該留 worktree：' + clean);
 
-  // 有改動就留著並且講清楚改在哪個分支 —— 跑了十分鐘的結果不能靜靜刪掉
+  // 有改動就 commit 到自己的分支，並且講清楚怎麼收下 ——
+  // 跑了十分鐘的結果不能靜靜刪掉，也不能只丟一個資料夾路徑要人自己想辦法
   const dirty = mk([{ content: '改好了' }], { dirty: 3 });
   const kept = await dirty.runSubagent({ prompt: '做事', type: 'work' });
-  assert.ok(/zackllmgui\/wt1/.test(kept) && /3 個檔案改動/.test(kept),
+  assert.ok(/zackllmgui\/wt1/.test(kept) && /改了 3 個檔案/.test(kept),
     '有改動卻沒說改在哪：' + kept);
-  assert.ok(/merge/.test(kept), '沒告訴主代理怎麼收下這些改動');
+  assert.ok(/git merge/.test(kept), '沒告訴主代理怎麼收下這些改動');
 
   // 唯讀的一樣要登記（伺服器要知道它只能讀），只是不開 worktree
   const ro = mk([{ content: '找到了' }]);
@@ -1280,6 +1285,19 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual(stop.calls.length, 0, '按了停止還在呼叫工具');
   assert.deepStrictEqual(stop.agentOps.map((x) => x[0]), ['open', 'close'],
     '停止時 worktree 沒收掉');
+
+  // 用量算進同一本帳，而且**子代理自己也要看預算**。只在主迴圈看的話，
+  // 三個平行子代理會各自燒完 60 輪，主迴圈要等它們全部回來才發現超支。
+  const paid = mk([{ tools: [{ function: { name: 'read_file', arguments: '{}' } }] },
+                   { content: '做完了' }]);
+  await paid.runSubagent({ prompt: '花錢', type: 'explore' });
+  assert.strictEqual(paid.S.run.tokens, 240, '子代理的 token 沒算進主迴圈的預算');
+
+  const broke = mk(Array(9).fill(
+    { tools: [{ function: { name: 'read_file', arguments: '{}' } }] }), { budget: 200 });
+  const stopped = await broke.runSubagent({ prompt: '一直花', type: 'explore' });
+  assert.ok(/超出預算/.test(stopped), '超支了還在跑：' + stopped);
+  assert.strictEqual(broke.calls.length, 2, '超支之後不該再叫工具');
 
   // 沒給 prompt 就不要開一個什麼都不知道的子代理
   assert.ok(/錯誤/.test(await mk([]).runSubagent({})));

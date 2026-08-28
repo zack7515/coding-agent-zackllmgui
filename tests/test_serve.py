@@ -1044,7 +1044,51 @@ def test_mcp_stdio():
             except ValueError as e:
                 assert "沒有在跑" in str(e)
         finally:
-            serve.mcp_stop_all()
+            serve.mcp_stop()
+
+
+def test_mcp_follows_the_workspace():
+    """MCP 連線要跟著分頁的工作區走。
+
+    工作區、修改權限、自動模式、待辦、計畫都跟著分頁走了，MCP 原本沒有：
+    連線是整個行程一份，B 分頁載入時會先把全部關掉再開自己的，於是 A 分頁的工具
+    安靜地指向 B 的目錄（連 server 的 cwd 都是 B 的）。這裡驗兩件事：
+    **兩邊是不同的行程**，而且 **B 載入不會弄死 A**。
+    """
+    a = Path(tempfile.mkdtemp(prefix="zack-mcp-a-"))
+    b = Path(tempfile.mkdtemp(prefix="zack-mcp-b-"))
+    for d in (a, b):
+        (d / "fake_mcp.py").write_text(MCP_FAKE, encoding="utf-8")
+        (d / serve.MCP_CONFIG).write_text(json.dumps({
+            "servers": {"fake": {"command": sys.executable, "args": ["fake_mcp.py"]}}}),
+            encoding="utf-8")
+    was = serve.ALLOW_TOOLS
+    serve.ALLOW_TOOLS = True
+    sa, sb = serve.session_for("mcp-A"), serve.session_for("mcp-B")
+    sa.ws, sb.ws = a.resolve(), b.resolve()
+    try:
+        serve._CUR.s = sa
+        serve.mcp_load()
+        pa = serve.mcps()["fake"]["proc"]
+        serve._CUR.s = sb
+        serve.mcp_load()
+        pb = serve.mcps()["fake"]["proc"]
+        assert pa.pid != pb.pid, "兩個分頁共用同一個 MCP 行程"
+        if sys.platform.startswith("linux"):
+            assert os.readlink(f"/proc/{pa.pid}/cwd") == str(a.resolve())
+            assert os.readlink(f"/proc/{pb.pid}/cwd") == str(b.resolve())
+
+        serve._CUR.s = sa
+        assert serve.mcps()["fake"]["proc"].pid == pa.pid, "A 的連線被 B 換掉了"
+        assert serve.run_tool("mcp__fake__echo", {"text": "A 還活著"}) == "A 還活著"
+    finally:
+        serve.mcp_stop()
+        serve._CUR.s = None
+        serve.SESSIONS.pop("mcp-A", None)
+        serve.SESSIONS.pop("mcp-B", None)
+        serve.ALLOW_TOOLS = was
+        shutil.rmtree(a, ignore_errors=True)
+        shutil.rmtree(b, ignore_errors=True)
 
 
 def test_sandbox_wrap_and_gate():
@@ -1811,6 +1855,20 @@ def test_task_enum_follows_agent_files():
         assert "resume" in task["parameters"]["properties"], "追問不到就只能重跑一次"
 
 
+def git_repo(ws: Path) -> None:
+    """把假工作區換成真的 git 儲存庫（worktree 那幾項都要真的 git）。"""
+    shutil.rmtree(ws / ".git")
+    for a in (["init", "-q"], ["config", "user.email", "t@t"],
+              ["config", "user.name", "t"], ["add", "-A"], ["commit", "-qm", "base"]):
+        subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+
+
+def git_out(ws: Path, *args) -> str:
+    return subprocess.run(["git", "-c", "core.quotepath=false"] + list(args),
+                          cwd=ws, capture_output=True, text=True, timeout=30).stdout
+
+
 def test_worktree_isolates_writes():
     """隔離型子代理寫的檔案要落在自己的 worktree，主工作區看不到。
 
@@ -1818,12 +1876,7 @@ def test_worktree_isolates_writes():
     會同時動同一個檔案，而且沒有任何徵兆 —— 所以這裡驗的是**檔案在哪個資料夾**。
     """
     with Workspace() as ws:
-        shutil.rmtree(ws / ".git")
-        for a in (["init", "-q"], ["config", "user.email", "t@t"],
-                  ["config", "user.name", "t"], ["add", "-A"],
-                  ["commit", "-qm", "base"]):
-            subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+        git_repo(ws)
         serve.cur().write = True
         info = serve.agent_open("work")
         aid = info["id"]
@@ -1837,10 +1890,18 @@ def test_worktree_isolates_writes():
             assert not (ws / "只在分支.txt").exists(), "子代理的檔案寫進主工作區了"
             assert (Path(info["path"]) / "只在分支.txt").is_file(), "檔案沒落在 worktree"
 
-            # 有改動就要留著並且講清楚 —— 跑了十分鐘的結果不能靜靜刪掉
+            # 有改動就 commit 到自己的分支，然後資料夾才收得掉。
+            # 「留住成果」與「收掉目錄」不可以是二選一 —— 不 commit 的話改動只是
+            # 目錄裡的未追蹤檔案，diff 看不到、merge 沒東西可合，目錄也刪不得。
             out = serve.agent_close(aid)
-            assert out["kept"] is True and out["changes"] >= 1, out
+            assert out["committed"] is True and out["changes"] == 1, out
+            assert out["kept"] is False and out["commits"] == 1, out
             assert out["branch"] == info["branch"]
+            assert not Path(info["path"]).exists(), "commit 完了資料夾還留著"
+            files = git_out(ws, "show", "--name-only", "--format=", info["branch"])
+            assert "只在分支.txt" in files, files
+            # 主代理只拿到一個分支名的話，要收不收沒有依據
+            assert "只在分支.txt" in out["diff"] and "1 file" in out["diff"], out["diff"]
         finally:
             if aid in serve.cur().agents:
                 serve.agent_close(aid, force=True)
@@ -1849,15 +1910,66 @@ def test_worktree_isolates_writes():
             serve.cur().write = False
 
 
+def test_orphan_worktrees_are_findable_and_closeable():
+    """serve.py 重啟之後，磁碟上的 worktree 還要收得掉。
+
+    這是加 worktree 隔離時留下的洞：登記活在行程裡（Session.agents），worktree 活在
+    磁碟上。行程一重啟登記就沒了，那幾份資料夾沒有人認得 —— 列不出來，也就中斷不了、
+    收不掉，只能一直積在專案裡。**這裡驗的是「不必另外存狀態也找得回來」**：
+    分支名 zackllmgui/<tag> 本身就是登記，git 自己記得。
+    """
+    with Workspace() as ws:
+        git_repo(ws)
+        serve.cur().write = True
+        info = serve.agent_open("work", task="找出登入的流程")
+        with serve.as_agent(info["id"]):
+            serve.run_tool("write_file", {"path": "跑到一半.txt", "content": "x"})
+
+        serve.cur().agents.clear()          # ← 這就是「serve.py 重啟過」
+        left = serve.worktree_orphans()
+        assert len(left) == 1, left
+        o = left[0]
+        assert o["branch"] == info["branch"] and o["changes"] == 1, o
+        assert o["commits"] == 0 and o["msg"] == "", "拿了 base commit 的訊息當說明"
+        assert o["id"] == "w" + info["branch"].split("/")[1], o
+
+        out = serve.agent_close(o["id"])
+        assert out["committed"] is True and out["commits"] == 1, out
+        assert not Path(info["path"]).exists(), "收不掉"
+        files = git_out(ws, "show", "--name-only", "--format=", o["branch"])
+        assert "跑到一半.txt" in files, files
+        # 自己的備份目錄不可以跟著進去 —— merge 過來會倒進使用者的專案
+        assert serve.BACKUP_DIR not in files, files
+        assert serve.worktree_orphans() == [], "收完還列得出來"
+        serve.cur().write = False
+
+
+def test_close_never_deletes_a_branch_that_has_commits():
+    """**乾淨不等於沒東西。** 子代理自己 commit 過的話，工作目錄是乾淨的，
+    但分支上有成果 —— 只看乾不乾淨就 branch -D，那是把十分鐘的工作刪掉。
+    """
+    with Workspace() as ws:
+        git_repo(ws)
+        serve.cur().write = True
+        info = serve.agent_open("work")
+        wt = Path(info["path"])
+        (wt / "自己提交的.txt").write_text("x", encoding="utf-8")
+        for a in (["add", "-A"], ["commit", "-qm", "子代理自己提交"]):
+            subprocess.run(["git"] + a, cwd=wt, stdout=subprocess.DEVNULL, timeout=30)
+
+        out = serve.agent_close(info["id"])
+        assert out["changes"] == 0 and out["committed"] is False, out
+        assert out["commits"] == 1 and out["merge"], out
+        assert not wt.exists(), "資料夾沒收掉"
+        branches = git_out(ws, "branch", "--list", info["branch"])
+        assert info["branch"] in branches, "分支被刪掉了，成果沒了"
+        serve.cur().write = False
+
+
 def test_worktree_cleans_up_when_untouched():
     """沒改動的自動清掉。忘了收的 worktree 會在專案裡越積越多。"""
     with Workspace() as ws:
-        shutil.rmtree(ws / ".git")
-        for a in (["init", "-q"], ["config", "user.email", "t@t"],
-                  ["config", "user.name", "t"], ["add", "-A"],
-                  ["commit", "-qm", "base"]):
-            subprocess.run(["git"] + a, cwd=ws, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+        git_repo(ws)
         info = serve.agent_open("work")
         out = serve.agent_close(info["id"])
         assert out["kept"] is False, out

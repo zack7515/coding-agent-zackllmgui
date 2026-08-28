@@ -725,6 +725,34 @@ async function openAgents() {
     boxEl.appendChild(p);
   }
 
+  // 沒人認得的 worktree：serve.py 重啟過，登記沒了但資料夾還在磁碟上。
+  // 這裡是唯一收得掉它們的地方 —— 列不出來就等於收不掉。
+  (data.orphans || []).forEach(function (o) {
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    const info = document.createElement('div');
+    const bits = [o.id, '沒人認得的 worktree', o.branch];
+    if (o.changes) bits.push(o.changes + ' 個未提交的改動');
+    if (o.gone) bits.push('資料夾不在了');
+    if (o.msg) bits.push(o.msg);
+    info.textContent = bits.join(' · ');
+    row.appendChild(info);
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = '收掉';
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      try {
+        const r = await agentCall({ action: 'close', id: o.id });
+        info.textContent += r.commits
+          ? ' · 資料夾收掉了，成果留在 ' + r.branch + '（' + r.merge + '）'
+          : ' · 收掉了（分支上是空的，一起刪了）';
+      } catch (e) { info.textContent += ' · 收不掉：' + e.message; }
+    });
+    row.appendChild(btn);
+    boxEl.appendChild(row);
+  });
+
   list.forEach(function (a) {
     const row = document.createElement('div');
     row.className = 'agent-row';

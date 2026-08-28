@@ -202,7 +202,10 @@ TODO_FILE = ".zackllmgui-todos.md"
 MCP_CONFIG = ".zackllmgui-mcp.json"
 RULES_FILE = ".zackllmgui-rules.json"   # 允許規則：兩份都讀，專案的優先
 MCP_TOOL_CAP = 12                  # 一台 server 最多收這麼多支工具，否則每輪光工具定義就燒掉幾千 token
-MCP = {}                           # server 名 -> {"proc", "tools", "lock", "id", "error"}
+MCP = {}                           # 工作區 -> {server 名 -> {"proc", "tools", "lock", "id", "error"}}
+# 為什麼多包一層：工作區、修改權限、自動模式、待辦、計畫都跟著分頁走了，MCP 不跟的話
+# 兩個分頁開兩個專案時，拿到的是「先啟動的那個專案」的 server（連 cwd 都是它的），
+# 另一個分頁的工具會安靜地指向錯的目錄。
 
 # ── 操作紀錄與 rewind ───────────────────────────────────────────── #
 # 每一次改檔案都記一行。備份本來就有了，缺的是「先後順序」——
@@ -1742,9 +1745,23 @@ def mcp_config_path() -> Path:
     return HERE / MCP_CONFIG
 
 
+def mcp_key() -> str:
+    rec = getattr(_CUR, "agent", None)
+    return str((rec or {}).get("root") or cur().ws or HERE)
+
+
+def mcps() -> dict:
+    """這個分頁（或這個子代理）的 MCP 連線。
+
+    子代理走 root：worktree 是同一個專案的另一份 checkout，為它再開一整套 server
+    是白花行程。沒有 worktree 的子代理 root 是 None，自然落回上層的工作區。
+    """
+    return MCP.setdefault(mcp_key(), {})
+
+
 def _mcp_rpc(server: str, method: str, params: dict, timeout: float = 30):
     """送一次 JSON-RPC 並等對應 id 的回覆。通知（沒有 id）直接跳過。"""
-    st = MCP[server]
+    st = mcps()[server]
     proc = st["proc"]
     with st["lock"]:
         st["id"] += 1
@@ -1770,7 +1787,7 @@ def _mcp_rpc(server: str, method: str, params: dict, timeout: float = 30):
 
 
 def _mcp_notify(server: str, method: str, params: dict) -> None:
-    st = MCP[server]
+    st = mcps()[server]
     with st["lock"]:
         st["proc"].stdin.write(json.dumps({"jsonrpc": "2.0", "method": method,
                                            "params": params}) + "\n")
@@ -1784,7 +1801,7 @@ def mcp_start(name: str, spec: dict) -> None:
         cwd=str(cur().ws) if cur().ws else None,
         env={**os.environ, **(spec.get("env") or {})},
         text=True, encoding="utf-8", bufsize=1)
-    MCP[name] = {"proc": proc, "tools": [], "lock": threading.Lock(), "id": 0, "error": ""}
+    mcps()[name] = {"proc": proc, "tools": [], "lock": threading.Lock(), "id": 0, "error": ""}
     _mcp_rpc(name, "initialize", {
         "protocolVersion": "2024-11-05", "capabilities": {},
         "clientInfo": {"name": "ZackLLMGUI", "version": "1.0"}}, timeout=20)
@@ -1796,22 +1813,23 @@ def mcp_start(name: str, spec: dict) -> None:
     if len(tools) > MCP_TOOL_CAP:
         # 一個檔案系統 server 就可能塞二十支工具，全送給模型等於每輪多燒好幾千 token
         tools = tools[:MCP_TOOL_CAP]
-        MCP[name]["error"] = f"工具超過 {MCP_TOOL_CAP} 支，只取前面幾支（用 tools 欄位自己挑）"
-    MCP[name]["tools"] = tools
+        mcps()[name]["error"] = f"工具超過 {MCP_TOOL_CAP} 支，只取前面幾支（用 tools 欄位自己挑）"
+    mcps()[name]["tools"] = tools
 
 
-def mcp_stop_all() -> None:
-    for st in MCP.values():
-        try:
-            st["proc"].terminate()
-        except Exception:
-            pass
-    MCP.clear()
+def mcp_stop(key: str = "") -> None:
+    """關掉 server。不給 key 就是全部 —— 收攤的時候用。"""
+    for k in ([key] if key else list(MCP)):
+        for st in MCP.pop(k, {}).values():
+            try:
+                st["proc"].terminate()
+            except Exception:
+                pass
 
 
 def mcp_load() -> dict:
-    """重讀設定檔並重開所有 server。回傳每一台的狀態。"""
-    mcp_stop_all()
+    """重讀設定檔並重開這個工作區的 server。回傳每一台的狀態。"""
+    mcp_stop(mcp_key())
     cfg_file = mcp_config_path()
     if not cfg_file.is_file():
         return {"config": str(cfg_file), "servers": []}
@@ -1825,7 +1843,7 @@ def mcp_load() -> dict:
         try:
             mcp_start(name, spec)
         except Exception as e:
-            MCP[name] = {"proc": None, "tools": [], "lock": threading.Lock(), "id": 0,
+            mcps()[name] = {"proc": None, "tools": [], "lock": threading.Lock(), "id": 0,
                          "error": f"{type(e).__name__}: {e}"}
     return mcp_status()
 
@@ -1833,13 +1851,13 @@ def mcp_load() -> dict:
 def mcp_status() -> dict:
     return {"config": str(mcp_config_path()),
             "servers": [{"name": n, "tools": [t.get("name") for t in st["tools"]],
-                         "error": st["error"]} for n, st in MCP.items()]}
+                         "error": st["error"]} for n, st in mcps().items()]}
 
 
 def mcp_tool_defs() -> list:
     """MCP 工具併進來時加前綴，免得跟本地工具或彼此撞名。"""
     out = []
-    for server, st in MCP.items():
+    for server, st in mcps().items():
         for t in st["tools"]:
             schema = t.get("inputSchema") or {"type": "object", "properties": {}}
             out.append({"type": "function", "function": {
@@ -1851,7 +1869,7 @@ def mcp_tool_defs() -> list:
 
 def mcp_call(full_name: str, args: dict) -> str:
     _, server, tool = full_name.split("__", 2)
-    if server not in MCP or MCP[server]["proc"] is None:
+    if server not in mcps() or mcps()[server]["proc"] is None:
         raise ValueError(f"MCP server {server} 沒有在跑")
     res = _mcp_rpc(server, "tools/call", {"name": tool, "arguments": args}, timeout=120)
     parts = []
@@ -2033,7 +2051,8 @@ def agent_types() -> list:
 def git_at(root: Path, *args) -> str:
     """在指定的資料夾跑 git。跟 git_run() 不同：那一支固定跑在工作區根目錄，
     這一支要能指到 worktree 或主 repo 兩邊。"""
-    p = subprocess.run(["git", "-C", str(root)] + list(args),
+    # quotepath=false：不然中文檔名會變成 "\345\255..." 一路送到畫面上
+    p = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(root)] + list(args),
                        capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip()[:400] or "git 失敗")
@@ -2046,7 +2065,8 @@ AGENT_NEVER = ("ask_user_question", "todo_write")
 SUB_DEPTH_MAX = 2     # 子代理再開子代理的層數上限。網頁那一層也擋，但真正算數的是這裡
 
 
-def agent_open(type_name: str = "", parent: str = "", chat: str = "") -> dict:
+def agent_open(type_name: str = "", parent: str = "", chat: str = "",
+               task: str = "") -> dict:
     """登記一個子代理。**每一種都要登記，不只隔離型的。**
 
     為什麼不只在需要 worktree 時才登記：工具白名單如果只靠網頁「不送那幾支定義」，
@@ -2075,7 +2095,7 @@ def agent_open(type_name: str = "", parent: str = "", chat: str = "") -> dict:
            "isolation": "", "ws": ws, "branch": "", "root": None,
            "parent": str(parent or ""), "depth": depth, "chat": str(chat or "")[:64],
            "started": time.time(), "calls": 0, "last": None,
-           "stopped": False, "why": ""}
+           "stopped": False, "why": "", "task": str(task or "")[:200]}
     # 下一層跑在上一層的 worktree 裡：它是同一件工作的細分，而各開一份的話
     # 下一層是從 HEAD 開出來的，看不到上一層還沒提交的修改。
     if t["isolation"] == "worktree" and not (up and up["isolation"]):
@@ -2122,6 +2142,85 @@ def worktree_add() -> dict:
         pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
     git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
     return {"ws": dst.resolve(), "branch": branch, "root": root}
+
+
+def branch_unique(root: Path, branch: str) -> int:
+    """這個分支上有幾個主 HEAD 沒有的 commit。**刪分支前要問的唯一問題。**
+
+    「工作目錄乾淨」不等於「分支上沒東西」—— 子代理自己 commit 過、或是上一次收的
+    時候幫它 commit 過，工作目錄都會是乾淨的。只看乾不乾淨就刪分支會把成果刪掉。
+    """
+    try:
+        return len([ln for ln in git_at(root, "rev-list", branch, "^HEAD").splitlines()
+                    if ln.strip()])
+    except Exception:
+        return 1                 # 問不出來就當它有東西：不刪比刪錯好
+
+
+def agent_commit_msg(rec: dict) -> str:
+    return f"子代理 {rec['id']}（{rec['type']}）：{rec.get('task') or '沒有說明'}"
+
+
+def worktree_orphans() -> list:
+    """磁碟上有、但這個分頁的登記裡沒有的 worktree。
+
+    **不必另外存狀態**：分支名 `zackllmgui/<tag>` 就是登記，git 自己記得。
+    `Session.agents` 活在行程裡，`serve.py` 改過原始碼會自己重啟 —— 重啟之後
+    磁碟上那幾份就沒有人認得，列不出來也就收不掉。這一支把它們找回來。
+
+    只列不刪：分支上可能是子代理跑了十分鐘的成果，「沒有人認得」不等於「可以刪」。
+    """
+    root = ws_root().resolve()
+    if not (root / ".git").exists():
+        return []
+    live = {r["branch"] for r in cur().agents.values() if r["branch"]}
+    try:
+        blocks = git_at(root, "worktree", "list", "--porcelain").split("\n\n")
+    except Exception:
+        return []
+    out = []
+    for block in blocks:
+        info = dict(ln.split(" ", 1) for ln in block.splitlines() if " " in ln)
+        branch = info.get("branch", "").replace("refs/heads/", "", 1)
+        path = info.get("worktree", "")
+        if not branch.startswith("zackllmgui/") or branch in live:
+            continue
+        rec = {"id": "w" + branch.split("/", 1)[1], "branch": branch,
+               "path": path, "changes": 0, "gone": not Path(path).is_dir(),
+               "msg": "", "commits": branch_unique(root, branch), "secs": 0}
+        try:
+            # 分支上有自己的 commit 才拿它的訊息 —— 沒有的話那是開分支時的
+            # 那個 base commit，講的是別人的事
+            if rec["commits"]:
+                rec["msg"] = git_at(root, "log", "-1", "--format=%s", branch).strip()[:200]
+            rec["secs"] = int(time.time() - Path(path).stat().st_mtime)
+        except Exception:
+            pass
+        try:
+            rec["changes"] = len([
+                ln for ln in git_at(Path(path), "status", "--porcelain").splitlines()
+                if ln.strip()
+                and not ln[3:].strip('"').startswith((BACKUP_DIR, WORKTREE_DIR))])
+        except Exception:
+            pass
+        out.append(rec)
+    return out
+
+
+def orphan_rec(aid: str) -> dict:
+    """把一筆孤兒 worktree 補成 agent_close() 看得懂的樣子。
+
+    它是死的（沒有 tools、沒有 chat），只夠拿來收 —— 收掉正是唯一還能對它做的事。
+    """
+    root = ws_root().resolve()
+    for o in worktree_orphans():
+        if o["id"] == str(aid):
+            return {"id": o["id"], "type": "orphan", "tools": [], "isolation": "worktree",
+                    "ws": Path(o["path"]), "branch": o["branch"], "root": root,
+                    "parent": "", "depth": 1, "chat": "", "started": time.time(),
+                    "calls": 0, "last": None, "stopped": True,
+                    "why": "沒人認得的 worktree", "task": o["msg"] or "serve.py 重啟前留下的"}
+    return None
 
 
 def agent_view(rec: dict) -> dict:
@@ -2205,17 +2304,20 @@ def agent_trace(aid: str) -> dict:
 def agent_close(aid: str, force: bool = False) -> dict:
     """收掉一個子代理（連同它底下沒收的後代）。
 
-    worktree 照它們的規則：**沒有改動才自動清掉**。有改動就留著並且講清楚改在哪個
-    分支 —— 子代理跑了十分鐘的結果，不能因為主代理沒接住就靜靜刪掉。
+    **有改動就先 commit 到自己的分支，再收掉目錄。** 不 commit 的話那些改動只是
+    worktree 目錄裡的未追蹤檔案：分支上是空的、`git diff` 看不到、`git merge` 也沒
+    東西可合，而且目錄一旦沒人認得（serve.py 重啟）就只能整份留著。落到分支上之後，
+    「收掉目錄」與「留住成果」不再是二選一 —— 子代理跑了十分鐘的結果不會靜靜消失。
     """
     s = cur()
-    rec = s.agents.get(str(aid))
+    rec = s.agents.get(str(aid)) or orphan_rec(str(aid))
     if rec is None:
         raise ValueError(f"沒有這個子代理：{aid}")
     for kid in [r for r in agent_kin(aid) if r["id"] != str(aid)]:
         s.agents.pop(kid["id"], None)
     out = {"id": str(aid), "branch": rec["branch"], "path": str(rec["ws"]),
-           "kept": False, "changes": 0, "stat": ""}
+           "kept": False, "changes": 0, "stat": "", "committed": False,
+           "commits": 0, "merge": ""}
     if rec["isolation"] != "worktree":
         s.agents.pop(str(aid), None)
         return out
@@ -2230,13 +2332,39 @@ def agent_close(aid: str, force: bool = False) -> dict:
     if lines:
         out["changes"] = len(lines)
         out["stat"] = "\n".join(lines)[:2000]
-        if not force:
-            out["kept"] = True
-            s.agents.pop(str(aid), None)
-            return out
+        try:
+            # 只收子代理做的事：自己的備份目錄與巢狀 worktree 不算，
+            # 掃進去的話合併過來會把我們的內部檔案倒進使用者的專案
+            git_at(rec["ws"], "add", "-A", "--", ".",
+                   f":(exclude){BACKUP_DIR}", f":(exclude){WORKTREE_DIR}")
+            git_at(rec["ws"], "commit", "-q", "-m", agent_commit_msg(rec))
+            out["committed"] = True
+            out["merge"] = f"git merge {rec['branch']}"
+        except Exception as e:
+            # commit 不進去（例如這台 git 連身分都沒設）就退回舊行為：整份留著。
+            # 寧可讓資料夾積在專案裡，也不能把改動丟掉 —— 除非呼叫的人指名要丟。
+            if not force:
+                out["kept"] = True
+                out["error"] = f"改動 commit 不進去，先留著：{e}"
+                s.agents.pop(str(aid), None)
+                return out
+    out["commits"] = branch_unique(rec["root"], rec["branch"])
+    if out["commits"]:
+        # 主代理只拿到一個分支名的話，要收不收沒有依據。commit 之後 diff 才算得出來
+        try:
+            out["diff"] = git_at(rec["root"], "diff", "--stat",
+                                 f"HEAD...{rec['branch']}").strip()[:2000]
+        except Exception:
+            pass
     try:
-        git_at(rec["root"], "worktree", "remove", "--force", str(rec["ws"]))
-        git_at(rec["root"], "branch", "-D", rec["branch"])
+        if Path(rec["ws"]).is_dir():
+            git_at(rec["root"], "worktree", "remove", "--force", str(rec["ws"]))
+        else:
+            git_at(rec["root"], "worktree", "prune")     # 資料夾被手動刪掉的情況
+        if not out["commits"]:
+            git_at(rec["root"], "branch", "-D", rec["branch"])
+        elif not out["merge"]:
+            out["merge"] = f"git merge {rec['branch']}"
     except Exception as e:
         out["kept"] = True
         out["error"] = str(e)
@@ -3247,7 +3375,7 @@ class Handler(BaseHTTPRequestHandler):
             act = str(req.get("action", "open"))
             if act == "open":
                 self._json(agent_open(str(req.get("type", "")), str(req.get("parent", "")),
-                                      str(req.get("chat", ""))))
+                                      str(req.get("chat", "")), str(req.get("task", ""))))
             elif act == "close":
                 self._json(agent_close(str(req.get("id", "")), bool(req.get("force"))))
             elif act == "stop":
@@ -3256,6 +3384,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(agent_trace(str(req.get("id", ""))))
             elif act == "list":
                 self._json({"agents": [agent_view(v) for v in cur().agents.values()],
+                            "orphans": worktree_orphans(),
                             "types": agent_types(), "depth_max": SUB_DEPTH_MAX})
             else:
                 raise ValueError(f"不認得的動作：{act}")
@@ -3373,6 +3502,16 @@ def main() -> int:
           "，只接受本機請求，每次執行前網頁都會先問你")
     if cur().ws:
         print(f"  工作區   {cur().ws}" + ("（可修改檔案）" if cur().write else "（唯讀）"))
+        # 上一次跑到一半就關掉的話，登記沒了但 worktree 還在磁碟上。開機講一次，
+        # 不然它們會安靜地積在專案裡 —— 只講不動，分支上可能有還沒收的成果。
+        try:
+            left = worktree_orphans()
+        except Exception:
+            left = []
+        for o in left:
+            print(f"  子代理   {o['id']} 還留著：{o['branch']}"
+                  + (f"（{o['changes']} 個未提交的改動）" if o["changes"] else "")
+                  + " —— 網頁的 /agents 可以收")
     if TRUST_REMOTE:
         print("  注意     --trust-remote：連得到這個網頁的人都能在這台機器上執行指令")
     try:
@@ -3392,7 +3531,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n已結束")
     finally:
-        mcp_stop_all()
+        mcp_stop()
         server.shutdown()
         server.server_close()
     return 0

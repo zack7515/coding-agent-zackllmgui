@@ -5247,7 +5247,8 @@ async function runSubagent(args, depth, parent) {
   box.stopped = false;
   try {
     const info = await agentCall({ action: 'open', type: type.name,
-                                   parent: parent || '', chat: S.currentId });
+                                   parent: parent || '', chat: S.currentId,
+                                   task: task });
     box.sid = info.id;
     box.id = box.id || info.id;
     log('· 子代理 ' + info.id + '（第 ' + info.depth + ' 層'
@@ -5291,10 +5292,12 @@ async function runSubagent(args, depth, parent) {
     let note = '';
     try {
       const r = await agentCall({ action: 'close', id: sid });
-      if (r.kept) {
-        note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，留在分支 ' + r.branch
-          + '（' + r.path + '）。要收下就 git merge ' + r.branch
-          + '，不要就 git worktree remove。';
+      if (r.committed) {
+        note = '\n[worktree] 改了 ' + r.changes + ' 個檔案，已經 commit 在分支 '
+          + r.branch + '。要收下就 ' + r.merge + '。\n' + (r.diff || '');
+      } else if (r.kept) {
+        note = '\n[worktree] 有 ' + r.changes + ' 個檔案改動，收不掉（' + (r.error || '')
+          + '），留在 ' + r.path + '。';
       }
     } catch (e) { /* 已經收掉了就算了 */ }
     return text + note + '\n[子代理 ' + box.id + '] 要追問就用 task 帶 resume:"' + box.id + '"';
@@ -5307,6 +5310,13 @@ async function runSubagent(args, depth, parent) {
       if (stopped()) {
         el.querySelector('.st').textContent = '已中斷';
         return await finish('（子代理被中斷了，任務沒有完成）');
+      }
+      // 預算是整輪共用的，所以子代理自己也要看 —— 只在主迴圈看的話，三個平行子代理
+      // 會各自燒完 60 輪，主迴圈要等它們全部回來才發現超支。
+      const over = budgetStop(S.run);
+      if (over) {
+        el.querySelector('.st').textContent = '超出預算';
+        return await finish('（停在這裡：' + over + '）');
       }
       el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
 
@@ -5323,7 +5333,13 @@ async function runSubagent(args, depth, parent) {
         images: function () { },
         content: function (t) { text += t; },
         tools: function (tc) { calls = (calls || []).concat(tc); },
-        done: function () { }
+        // 子代理的 token 也要算進同一本帳：不算的話三個平行子代理各跑 60 輪，
+        // budgetStop() 完全看不到，外部 API 的帳單就沒有任何上限擋著。
+        done: function (d) {
+          if (!S.run || !d) return;
+          S.run.tokens += (d.prompt_eval_count || 0) + (d.eval_count || 0);
+          renderRunBar();
+        }
       });
 
       const m = { role: 'assistant', content: text };
@@ -6190,6 +6206,34 @@ async function openAgents() {
       + '（最多 ' + data.depth_max + ' 層）';
     boxEl.appendChild(p);
   }
+
+  // 沒人認得的 worktree：serve.py 重啟過，登記沒了但資料夾還在磁碟上。
+  // 這裡是唯一收得掉它們的地方 —— 列不出來就等於收不掉。
+  (data.orphans || []).forEach(function (o) {
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    const info = document.createElement('div');
+    const bits = [o.id, '沒人認得的 worktree', o.branch];
+    if (o.changes) bits.push(o.changes + ' 個未提交的改動');
+    if (o.gone) bits.push('資料夾不在了');
+    if (o.msg) bits.push(o.msg);
+    info.textContent = bits.join(' · ');
+    row.appendChild(info);
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = '收掉';
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      try {
+        const r = await agentCall({ action: 'close', id: o.id });
+        info.textContent += r.commits
+          ? ' · 資料夾收掉了，成果留在 ' + r.branch + '（' + r.merge + '）'
+          : ' · 收掉了（分支上是空的，一起刪了）';
+      } catch (e) { info.textContent += ' · 收不掉：' + e.message; }
+    });
+    row.appendChild(btn);
+    boxEl.appendChild(row);
+  });
 
   list.forEach(function (a) {
     const row = document.createElement('div');
