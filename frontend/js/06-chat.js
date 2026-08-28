@@ -134,7 +134,7 @@ function saveConfig() {
     userName: S.userName,
     showThink: S.showThink, params: S.params, tools: S.tools,
     provider: S.provider, oa: S.oa, paramsVersion: 3, tab: S.tab, auto: S.auto,
-    sysChips: S.sysChips,
+    sysChips: S.sysChips, verify: S.verify, subModel: S.subModel,
     hideSidebar: document.body.classList.contains('hide-sidebar'),
     hideParams: document.body.classList.contains('hide-params'),
     sideW: savedSideWidth('--side-w'), paramsW: savedSideWidth('--params-w'),
@@ -520,6 +520,8 @@ const SQUEEZE_AT = 0.8;         // 用到這個比例才開始省
 const SQUEEZE_TO = 0.7;         // 省到掉回這裡就停，不必一次清光
 const SQUEEZE_KEEP = 3;         // 最後幾則工具輸出留原文（剛做完的事還要用）
 const SQUEEZE_MIN = 400;        // 比這個短的輸出，省下來也沒差
+// 這些工具的輸出「再叫一次就有」，所以先省它們
+const REREADABLE = ['read_file', 'list_dir', 'search_files', 'fetch_url', 'load_skill'];
 
 function squeezeTools(msgs) {
   const limit = ctxLimit();
@@ -532,23 +534,59 @@ function squeezeTools(msgs) {
 
   const idx = [];
   msgs.forEach(function (m, i) { if (m.role === 'tool') idx.push(i); });
-  for (let k = 0; k < idx.length - SQUEEZE_KEEP && used > limit * SQUEEZE_TO; k++) {
-    const m = msgs[idx[k]];
+  // **先省再讀一次就有的那些。** read_file 的輸出省掉只是多一次呼叫，
+  // run_shell 的省掉是資訊消失（那條指令跑過了，重跑不見得安全也不見得一樣）。
+  // sort 是穩定的，所以同一組裡面還是舊的先省。
+  const order = idx.slice(0, Math.max(0, idx.length - SQUEEZE_KEEP));
+  const fresh = function (i) { return REREADABLE.indexOf(msgs[i].tool_name) < 0; };
+  order.sort(function (a, b) { return fresh(a) - fresh(b); });
+  for (let k = 0; k < order.length && used > limit * SQUEEZE_TO; k++) {
+    const m = msgs[order[k]];
     const body = String(m.content || '');
     if (body.length < SQUEEZE_MIN) continue;
     const stub = '（較早的 ' + (m.tool_name || '工具') + ' 輸出共 ' + body.length +
-      ' 字，為了留下 context 已省略。需要的話再呼叫一次。）';
+      ' 字，為了留下 context 已省略。' +
+      (fresh(order[k]) ? '需要的話重跑一次。）' : '需要的話再呼叫一次。）');
     used -= Math.round((estTokens(body) - estTokens(stub)) * S.ctxRatio);
-    msgs[idx[k]] = Object.assign({}, m, { content: stub });
+    msgs[order[k]] = Object.assign({}, m, { content: stub });
     S.run.squeezed += 1;
   }
   if (S.run.squeezed) renderRunBar();
   return msgs;
 }
 
+// 兩次沒過就交還給人。**修不好的東西不該無限重試** —— 那是最貴的失敗模式：
+// 沒有人在看，模型會用光輪數在同一個錯誤上打轉。
+const VERIFY_TRIES = 2;
+
+async function verifyGate(c) {
+  const cmd = verifyCmd();
+  if (!cmd || !S.run.wroteFiles || !toolsReady()) return '';
+  if ((S.run.verified || 0) >= VERIFY_TRIES) return '';
+  let data;
+  try {
+    const res = await fetch(apiUrl('/verify'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd })
+    });
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  } catch (e) {
+    // 驗收本身壞掉不能變成「一直不讓它收工」：講一聲就放行
+    toast('驗證指令跑不起來：' + e.message);
+    return '';
+  }
+  if (!data.exit) { toast('驗證通過：' + cmd); return ''; }
+  S.run.verified = (S.run.verified || 0) + 1;
+  return '`' + cmd + '` 沒有通過（exit ' + data.exit + '）：\n\n'
+    + tailLines(String(data.output || ''), 60)
+    + '\n\n修到它過，然後再說做完了。'
+    + (S.run.verified >= VERIFY_TRIES ? '（這是最後一次自動驗收）' : '');
+}
+
 function apiMessages(c) {
   const out = [];
-  const sys = [($('system').value || '').trim(), agentRules()]
+  const sys = [($('system').value || '').trim(), agentRules(), repoMap()]
     .filter(Boolean).join('\n\n');
   if (sys) out.push({ role: 'system', content: sys });
   c.messages.forEach(function (m, i) {
@@ -889,6 +927,18 @@ async function runStream(c, depth) {
 
   // 排隊的插話優先：使用者剛講的話比自動檢查重要
   if (flushQueue(c)) { await runStream(c, (depth || 0) + 1); return; }
+
+  // 收尾條件：動過檔案的話，先跑一次驗證指令。沒過就把輸出丟回去讓它接著修。
+  const bad = await verifyGate(c);
+  if (bad) {
+    const vm = { role: 'user', nudge: true, text: '（自動驗收）' + bad, content: bad };
+    c.messages.push(vm);
+    saveChats();
+    $('thread').appendChild(buildUserMsg(vm));
+    pin();
+    await runStream(c, (depth || 0) + 1);
+    return;
+  }
 
   const nag = finishCheck(S.run);
   if (!nag) { markTurnDone(c); return; }

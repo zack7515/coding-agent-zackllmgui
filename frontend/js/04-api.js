@@ -291,6 +291,8 @@ function applyAgentState(info) {
   S.ws = Object.assign({ path: '', write: false }, info.workspace || {});
   S.toolDefs = info.tool_defs || [];
   S.agentRules = info.agent_rules || '';
+  S.repoMap = info.repo_map || '';
+  S.verifyHint = info.verify_hint || '';
   S.todos = info.todos || [];
   S.jobs = info.jobs || [];      // 重整頁面之後背景指令還在，這裡接得回來
   S.plan = !!info.plan;
@@ -341,6 +343,7 @@ async function loadUpstream() {
   S.ws = { path: '', write: false, git: false, python: '', files: 0 };
   S.toolDefs = [];
   S.agentRules = '';
+  S.repoMap = '';
   S.todos = [];
   S.atFiles = null;
   S.mcp = null;

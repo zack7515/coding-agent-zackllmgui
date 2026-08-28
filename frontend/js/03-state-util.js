@@ -9,7 +9,8 @@ const S = {
   oa: { base: 'https://api.openai.com/v1', key: '' },
   srv: { tools: false, toolsLocal: false, extract: false, ext: false },
   ws: { path: '', write: false, git: false, python: '', files: 0 },
-  toolDefs: [], agentRules: '', tab: 'params', fv: null, todos: [], plan: false,
+  toolDefs: [], agentRules: '', repoMap: '', tab: 'params', fv: null, todos: [], plan: false,
+  verify: {}, verifyHint: '', subModel: '',   // 驗證指令依工作區存；子代理模型見 subModelMenuItem
   jobs: [],                                // 背景指令，活在 serve.py 那個行程裡
   pre: null,                               // 背景先算好的壓縮摘要
   streamTools: ['run_shell', 'run_tests'], mcp: null, cpus: 0, layers: {},

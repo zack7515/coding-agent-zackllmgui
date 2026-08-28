@@ -27,6 +27,9 @@ function toolsReason() {
 // 規則字串由 serve.py 依「開了哪些工具」拼出來（見 agent_rules()）。
 // 跟工具定義一樣只留一份，介面與測試用的是同一段文字。
 function agentRules() { return toolsReady() ? (S.agentRules || '') : ''; }
+// 專案地圖跟規則一起走：兩者都是「這一輪之前就固定」的東西，所以更新時機一樣。
+// **中途不要動它** —— 改到系統提示等於 Ollama 那一端的 prefix cache 整段作廢。
+function repoMap() { return toolsReady() ? (S.repoMap || '') : ''; }
 
 // 功能開關清單。之後要加新功能（MCP、網頁搜尋…）在這裡加一筆就會出現在選單裡。
 const FEATURES = [{
@@ -69,6 +72,53 @@ const FEATURES = [{
 }];
 
 // 自動模式不是開／關，是三段，所以自己一個選單項目
+// 這一台只 load 得動一個模型的時候，子代理用哪個就是「要不要換權重」的取捨：
+// 同一個模型＝零成本，換一個小的＝每次進出子代理都要重新載入。所以預設是跟主模型
+// 一樣，想換的人自己去選 —— 這個判斷跟 VRAM 有關，程式猜不出來。
+function subModelMenuItem() {
+  return {
+    label: '子代理模型：' + (S.subModel || '跟主模型一樣'),
+    meta: S.subModel ? '換模型會重新載入權重' : '',
+    action: function () {
+      const pick = function (name) {
+        return function () {
+          S.subModel = name;
+          saveConfig();
+          toast(name ? '子代理改用 ' + name : '子代理跟主模型一樣');
+        };
+      };
+      const rows = [{ label: '跟主模型一樣', meta: '不必換權重，最省',
+                      checked: !S.subModel, action: pick('') }];
+      (S.models || []).forEach(function (m) {
+        rows.push({ label: m.name, checked: S.subModel === m.name, action: pick(m.name) });
+      });
+      showMenu($('featBtn'), rows);
+    }
+  };
+}
+
+// 這一格是「模型說做完了」跟「真的做完了」之間的差別。沒有它，收尾條件是模型自己
+// 的判斷 —— agent_rules 只能好聲好氣拜託它記得跑測試，而小模型會忘。
+function verifyCmd() { return (S.verify || {})[S.ws.path || ''] || ''; }
+
+function verifyMenuItem() {
+  const now = verifyCmd();
+  return {
+    label: '驗證指令：' + (now || '（未設定）'),
+    meta: now ? '模型說做完時會先跑一次' : (S.verifyHint ? '偵測到：' + S.verifyHint : ''),
+    action: function () {
+      if (!S.ws.path) { toast('要先設工作區'); return; }
+      const v = prompt('模型說「做完了」的時候，先跑哪一行指令？\n'
+        + '沒過就把輸出丟回去讓它自己修（最多兩次）。留空＝關掉。',
+        now || S.verifyHint || '');
+      if (v === null) return;
+      S.verify[S.ws.path] = String(v).trim();
+      saveConfig();
+      toast(String(v).trim() ? '驗證指令：' + String(v).trim() : '已關掉自動驗收');
+    }
+  };
+}
+
 function autoMenuItem() {
   return {
     label: '自動模式：' + autoLabel(),
@@ -139,6 +189,7 @@ function openFeatureMenu() {
     };
   });
   rows.push('-', autoMenuItem());
+  if (S.srv.tools) rows.push(verifyMenuItem(), subModelMenuItem());
   // 一條規則都沒有就不佔一列：規則只從確認卡的「以後都放行」長出來，
   // 沒有人會為了設定它而打開選單。有東西了才需要一個看得到、刪得掉的地方。
   if ((S.rules || []).length) {
@@ -179,6 +230,7 @@ async function setServerTools(patch) {
   if (data.sandbox !== undefined) S.srv.sandbox = !!data.sandbox;
   S.toolDefs = data.tool_defs || [];
   S.agentRules = data.agent_rules || '';
+  if (data.repo_map !== undefined) S.repoMap = data.repo_map || '';
   if (data.agents) S.agentTypes = data.agents;
   renderWriteBtn();
 }
@@ -1026,6 +1078,8 @@ async function applyWorkspace(path) {
   S.atFiles = null;                    // 換了工作區，@ 的檔案清單就過期了
   S.toolDefs = data.tool_defs || [];
   S.agentRules = data.agent_rules || '';
+  if (data.repo_map !== undefined) S.repoMap = data.repo_map || '';
+  if (data.verify_hint !== undefined) S.verifyHint = data.verify_hint || '';
   if (data.agents) S.agentTypes = data.agents;
   renderWorkspace();
   ensureFileList();                    // 先拉起來：模型寫的「檔案:行號」要靠它才連得起來
@@ -1445,7 +1499,7 @@ async function runSubagent(args, depth, parent) {
     + '- 問不到使用者，卡住就把卡在哪裡寫進結論。\n'
     + '- 做完用不超過 15 行回報結論，帶上關鍵的檔案與行號。\n'
     + '- 你的過程不會被主代理看到，只有最後這段文字會，所以結論要能單獨讀懂。\n\n'
-    + (agentRules() || '') }];
+    + [agentRules(), repoMap()].filter(Boolean).join('\n\n') }];
   const msgs = box.msgs;
   msgs.push({ role: 'user', content: task });
   let wrap = false;                 // 收工具了嗎（context 快滿的時候）
@@ -1497,7 +1551,7 @@ async function runSubagent(args, depth, parent) {
 
       let text = '';
       let calls = null;
-      const payload = { model: type.model || S.model, messages: msgs,
+      const payload = { model: type.model || S.subModel || S.model, messages: msgs,
                         tools: wrap ? [] : subTools(type, at), stream: true };
       const opts = buildOptions();
       if (Object.keys(opts).length) payload.options = opts;
@@ -1586,6 +1640,8 @@ function callArgs(call) {
 // 給 finishCheck 用的兩個訊號。只在工具**成功**之後記 ——
 // 寫失敗的測試檔不算寫過，跑失敗的測試倒是算跑過（跑了就會看到紅字）。
 function noteFinishSignals(name, args) {
+  // 沒動過檔案就不必驗收：模型只是讀了一輪東西回答問題
+  if (WRITE_TOOLS.indexOf(name) >= 0) S.run.wroteFiles = true;
   if (looksLikeTestRun(name, args)) S.run.ranTests = true;
   // delete_file 也在 WRITE_TOOLS 裡，但**刪掉一個測試檔不算寫了測試** ——
   // 算進去的話「寫了測試沒跑」會對著一個已經不存在的檔案叫

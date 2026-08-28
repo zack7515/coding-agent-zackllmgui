@@ -429,6 +429,18 @@ assert.strictEqual(tight.msgs[tight.msgs.length - 2].content.length, 4000,
   '最後一則工具輸出被動到了');
 assert.strictEqual(tight.msgs[0].content, '做事', '使用者說的話不可以被省略');
 assert.strictEqual(tight.msgs[5].content, '好了', '模型的回覆不可以被省略');
+// **先省再讀一次就有的那些。** run_shell 的輸出省掉是資訊消失（那條指令跑過了），
+// read_file 的省掉只是多一次呼叫。只夠省一則的時候，該省的是後者。
+const one = sq2([
+  { role: 'user', content: '做事' },
+  { role: 'tool', tool_name: 'run_shell', content: big(4000) },
+  { role: 'tool', tool_name: 'read_file', content: big(4000) },
+  { role: 'tool', tool_name: 'read_file', content: big(200) },
+  { role: 'tool', tool_name: 'read_file', content: big(200) },
+  { role: 'tool', tool_name: 'read_file', content: big(200) }], 2000);
+assert.strictEqual(one.n, 1, '只該省一則：' + one.n);
+assert.strictEqual(one.msgs[1].content.length, 4000, 'run_shell 的輸出被先省掉了');
+assert.ok(/已省略/.test(one.msgs[2].content), 'read_file 才是該先省的那一則');
 console.log('ok   context 快滿時自動省略較早的工具輸出');
 
 // 模型什麼都沒吐出來的時候要說得出為什麼。之前是直接吞掉的：
@@ -1149,7 +1161,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   const mk = (replies, opt) => new Function(`
     const conf = ${JSON.stringify(opt || {})};
-    const S = { model: 'm', srv: {}, run: { calls: 0, tokens: 0 }, ctxRatio: 1,
+    const S = { model: 'm', subModel: conf.subModel || '',
+                srv: {}, run: { calls: 0, tokens: 0 }, ctxRatio: 1,
                 streamTools: [], toolDefs: [],
                 subs: {}, agentTypes: ${JSON.stringify(TYPES)},
                 abort: { signal: { aborted: !!conf.aborted } } };
@@ -1157,8 +1170,10 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const calls = [];       // [工具名, 跑在哪個 worktree]
     const agentOps = [];
     const tools = [];       // 每一輪送出去的工具清單
+    const models = [];      // 每一輪用了哪個模型
     const chatStream = async (payload, signal, on) => {
       tools.push(payload.tools || []);
+      models.push(payload.model);
       await new Promise((r) => setTimeout(r, 0));   // 讓「中斷」那顆鈕有機會插進來
       const r = ${JSON.stringify(replies)}[turn++] || {};
       if (r.content) on.content(r.content);
@@ -1200,6 +1215,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
                             'task', 'ask_user_question', 'todo_write']
       .map((n) => ({ function: { name: n } }));
     const agentRules = () => 'rules';
+    const repoMap = () => '專案地圖';
     const buildOptions = () => ({});
     const thinkValue = () => null;
     const clicks = [];
@@ -1215,7 +1231,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const pin = () => {};
     ${src}
     return { runSubagent, subTools, subWrites, agentType, startSubagents, callArgs,
-             calls, agentOps, clicks, tools, S, rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
+             calls, agentOps, clicks, tools, models, S,
+             rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
   `)();
 
   const box = mk([]);
@@ -1365,7 +1382,20 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   // 沒給 prompt 就不要開一個什麼都不知道的子代理
   assert.ok(/錯誤/.test(await mk([]).runSubagent({})));
-  console.log('ok   子代理：型別來自檔案、worktree 隔離、停得住、深度有底');
+  // 子代理用哪個模型：型別檔寫死的優先，其次是介面上選的「子代理模型」，
+  // 都沒有才跟主模型。這一台只 load 得動一個模型的時候，最後那個才是零成本的。
+  const done = [{ content: '看完了' }];
+  let mm = mk(done);
+  await mm.runSubagent({ prompt: 'x', type: 'explore' });
+  assert.deepStrictEqual(mm.models, ['m'], '沒選就該跟主模型');
+  mm = mk(done, { subModel: 'small' });
+  await mm.runSubagent({ prompt: 'x', type: 'explore' });
+  assert.deepStrictEqual(mm.models, ['small'], '選了子代理模型卻沒用');
+  mm = mk(done, { subModel: 'small' });
+  await mm.runSubagent({ prompt: 'x', type: 'work' });
+  assert.deepStrictEqual(mm.models, ['big'], '型別檔寫死的模型應該最優先');
+
+  console.log('ok   子代理：型別來自檔案、worktree 隔離、停得住、深度有底、模型選得動');
 })();
 
 // 4. 開關：要驗證伺服器真的照做，還有全自動與修改檔案的連動（都得 await）
@@ -1817,3 +1847,65 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// 收尾條件：模型說「做完了」不等於做完了。動過檔案的話先跑一次驗證指令，
+// 沒過就把輸出丟回去讓它接著修 —— 這是「放著跑三十分鐘」會不會收斂的分水嶺。
+// 兩次沒過就交還給人：修不好的東西無限重試是最貴的失敗模式（沒有人在看）。
+(async function () {
+  const mk = function (opt) {
+    return new Function(`
+      const conf = ${JSON.stringify(opt)};
+      const toasts = [];
+      const S = { ws: { path: '/proj' }, verify: conf.verify || {},
+                  srv: { tools: true }, tools: true,
+                  run: { wroteFiles: conf.wrote, verified: conf.verified || 0 } };
+      let sent = 0;
+      const toolsReady = () => true;
+      const apiUrl = (p) => p;
+      const toast = (t) => toasts.push(t);
+      const fetch = async () => { sent += 1; return conf.res
+        ? { ok: true, json: async () => conf.res }
+        : { ok: false, status: 500, json: async () => ({ error: '壞了' }) }; };
+      ${grab('VERIFY_TRIES', 'const')}
+      ${grab('TAIL_KEEP', 'const')}
+      ${grab('tailLines')}
+      ${grab('verifyCmd')}
+      async ${grab('verifyGate')}
+      return { gate: verifyGate, S: S, toasts: toasts, sent: () => sent };`)();
+  };
+  const V = { '/proj': 'npm test' };
+
+  // 沒設定就不驗，也不該打伺服器
+  let b = mk({ wrote: true, verify: {} });
+  assert.strictEqual(await b.gate(), '', '沒設驗證指令就不該攔');
+  assert.strictEqual(b.sent(), 0, '沒設定卻還是打了 /verify');
+
+  // 這一輪沒動過檔案：只是讀了東西回答問題，不必驗收
+  b = mk({ wrote: false, verify: V, res: { exit: 1, output: '壞了' } });
+  assert.strictEqual(await b.gate(), '', '沒動過檔案不該攔');
+  assert.strictEqual(b.sent(), 0);
+
+  // 過了就放行，而且要講一聲
+  b = mk({ wrote: true, verify: V, res: { exit: 0, output: 'ok' } });
+  assert.strictEqual(await b.gate(), '', '驗證過了卻還是攔著');
+  assert.ok(b.toasts.join('').indexOf('驗證通過') >= 0, b.toasts);
+
+  // 沒過就回一段話，而且要帶上指令、離開碼與輸出
+  b = mk({ wrote: true, verify: V, res: { exit: 1, output: 'FAILED test_a' } });
+  const msg = await b.gate();
+  assert.ok(msg.indexOf('npm test') >= 0 && msg.indexOf('exit 1') >= 0
+    && msg.indexOf('FAILED test_a') >= 0, msg);
+  assert.strictEqual(b.S.run.verified, 1, '沒有記下已經驗過幾次就會無限重試');
+
+  // 兩次之後交還給人
+  b = mk({ wrote: true, verify: V, verified: 2, res: { exit: 1, output: 'x' } });
+  assert.strictEqual(await b.gate(), '', '第三次還在攔');
+  assert.strictEqual(b.sent(), 0, '已經放棄了還去跑一次');
+
+  // 驗收本身壞掉不能變成「永遠不讓它收工」
+  b = mk({ wrote: true, verify: V, res: null });
+  assert.strictEqual(await b.gate(), '', '/verify 壞掉時應該放行');
+  assert.ok(b.toasts.join('').indexOf('跑不起來') >= 0, b.toasts);
+
+  console.log('ok   收尾驗證指令（沒過就丟回去，兩次就放手）');
+})();

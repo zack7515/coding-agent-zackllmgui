@@ -37,6 +37,8 @@ async function init() {
   S.provider = conf.provider === 'openai' ? 'openai' : 'ollama';
   S.tab = TABS.indexOf(conf.tab) >= 0 ? conf.tab : 'params';
   S.auto = ['off', 'read', 'edit', 'full', 'ws'].indexOf(conf.auto) >= 0 ? conf.auto : 'off';
+  if (conf.verify && typeof conf.verify === 'object') S.verify = conf.verify;
+  S.subModel = String(conf.subModel || '');
   if (Array.isArray(conf.sysChips)) {
     const ids = SYS_METRICS.map(function (m) { return m[0]; });
     S.sysChips = conf.sysChips.filter(function (x) { return ids.indexOf(x) >= 0; });

@@ -1403,14 +1403,16 @@ def skill_commands(body: str) -> list:
     return SKILL_CMD.findall(body)[:SKILL_CMD_MAX]
 
 
-def skill_cmd_block(cmd: str) -> str:
-    """skill 裡的這一行為什麼不跑。空字串＝可以跑。
+def auto_cmd_block(cmd: str) -> str:
+    """這一行為什麼不能在**沒有確認卡**的情況下跑。空字串＝可以跑。
 
-    走的是跟 run_shell 完全一樣的三道。少任何一道，`load_skill` 就是一個沒人
-    看守的執行入口：`run_tool()` 的 deny 規則與 `agent_guard()` 都是**按工具名**
-    比對的，而這裡走到 subprocess 時掛的名字是 load_skill —— 使用者為 run_shell
-    寫的 deny 規則會整條錯過，宣告唯讀的子代理（agents/explore.md）也照樣拿得到
-    subprocess。風險那一級則是因為 skill 檔沒有資格要求 rm：那不是使用者打的字。
+    兩條路共用：skill 正文裡的 !`指令`，以及收尾時的驗證指令。兩條都是
+    「沒有人在按執行」的執行入口，所以走的關卡要跟 run_shell 完全一樣。
+    少任何一道就是一個沒人看守的入口：`run_tool()` 的 deny 規則與 `agent_guard()`
+    都是**按工具名**比對的，而這兩條路走到 subprocess 時掛的名字不是 run_shell ——
+    使用者為 run_shell 寫的 deny 規則會整條錯過，宣告唯讀的子代理
+    （agents/explore.md）也照樣拿得到 subprocess。
+    風險那一級則是因為這兩條路的字都不是使用者當場打的。
     """
     try:
         agent_guard("run_shell")
@@ -1431,7 +1433,7 @@ def skill_live(body: str, run: bool = True) -> str:
     「請先執行 X 看看」，模型照著多跑一輪。
 
     **這是一個新的執行入口**：讀一份檔案變成跑一段指令。所以每一道都走既有的，
-    見 `skill_cmd_block()`；跑的時候也走 `build_command()`，風險檢查與沙盒包裝
+    見 `auto_cmd_block()`；跑的時候也走 `build_command()`，風險檢查與沙盒包裝
     只有那一份。
 
     `run=False` 是給模型改得到的 skill 用的，見 `_tool_load_skill`。
@@ -1446,7 +1448,7 @@ def skill_live(body: str, run: bool = True) -> str:
     for cmd in cmds:
         if cmd in done:
             continue
-        no = skill_cmd_block(cmd)
+        no = auto_cmd_block(cmd)
         if no:
             done[cmd] = ("", no)
             continue
@@ -1581,6 +1583,30 @@ def _tool_run_tests(target: str = "", k: str = "") -> str:
                           stderr=subprocess.STDOUT, timeout=TEST_TIMEOUT)
     out = proc.stdout.decode("utf-8", "replace")
     return f"[{' '.join(cmd)}]\n[exit {proc.returncode}]\n" + tail_of(out)
+
+
+def verify_detect() -> str:
+    """猜一條「跑完就知道有沒有壞」的指令。**只是給介面預填，不會自己跑。**
+
+    真正會被執行的那一條是使用者在介面上確認過、存在瀏覽器那一端的字串。
+    **刻意不從專案裡讀設定檔**：那等於 clone 回來的專案可以指定一條會自動執行的
+    指令，跟 3.7 節那個 skill 的洞是同一條路（`write_file` 也擋不住它 ——
+    專案本來就可以附一個檔案）。
+    """
+    ws = cur().ws
+    if ws is None:
+        return ""
+    pkg = ws / "package.json"
+    if pkg.is_file():
+        try:
+            meta = json.loads(pkg.read_text("utf-8", errors="replace"))
+            if "test" in (meta.get("scripts") or {}):
+                return "npm test"
+        except (ValueError, OSError):
+            pass
+    if (ws / "tests").is_dir() or list(ws.glob("test_*.py")):
+        return " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
+    return ""
 
 
 def sandbox_state() -> dict:
@@ -1754,6 +1780,83 @@ def sys_usage() -> dict:
             "cores": os.cpu_count() or 0, "ollama_local": ollama_is_local()}
     SYS_CACHE.update(at=now, data=data)
     return data
+
+
+# ══════════════════════ 專案地圖 ══════════════════════ #
+# 模型每接到一個任務都要先摸清專案：list_dir、search_files、read_file 來回三五輪，
+# 而**每一輪的成本是重吃一次整份 context**（本機模型真正貴的地方）。那幾輪買到的
+# 東西其實是固定的：有哪些檔案、每個檔案裡有什麼。既然固定，就先算好放進系統提示。
+#
+# aider 的 repo map 是同一個想法。這裡刻意做得更小：只列頂層符號，不做呼叫關係
+# 排序（那要 tree-sitter，而且排錯了比沒有更糟）。
+#
+# **這段只能在對話最前面、而且中途不要變。** 動到前面的內容等於放棄 Ollama 那一端
+# 的 prefix cache，整段 context 重算 —— 所以更新時機跟 agent_rules() 綁在一起
+# （載入、切工作區、切工具開關），不隨檔案改動即時更新。
+#
+# ponytail: 只認得 Python（ast）與 JS/TS（一條正規表示式）。其他語言只列檔名 ——
+# 檔名本身就已經是九成的價值。要加語言就往 file_symbols() 加一個分支。
+
+MAP_LIMIT = 6000           # 字元上限。這段每一輪都要重送，跟 skill 清單一樣是固定成本
+MAP_FILES = 400            # 掃到這麼多檔就停
+MAP_SYMS = 30              # 一個檔案最多列幾個符號（真正的煞車是 MAP_LIMIT）
+MAP_BYTES = 400_000        # 比這個大的檔案不解析（解析成本不值得）
+_MAP_CACHE = {}            # 檔案 -> (mtime, 符號字串)。只有改過的檔案要重解析
+
+JS_SYM = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+                    r"(?:function\s+(\w+)|class\s+(\w+)"
+                    r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?[(<])", re.M)
+
+
+def file_symbols(p: Path) -> str:
+    """一個檔案裡有哪些頂層符號。回傳空字串＝只列檔名就好。"""
+    try:
+        if p.stat().st_size > MAP_BYTES:
+            return ""
+        if p.suffix == ".py":
+            tree = ast.parse(p.read_text("utf-8", errors="replace"), str(p))
+            names = [n.name for n in tree.body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        elif p.suffix in (".js", ".mjs", ".ts", ".jsx", ".tsx"):
+            names = [m.group(1) or m.group(2) or m.group(3)
+                     for m in JS_SYM.finditer(p.read_text("utf-8", errors="replace"))]
+        else:
+            return ""
+    except (SyntaxError, ValueError, OSError, RecursionError):
+        return ""            # 解析不動就當作沒有符號，檔名照樣列得出來
+    if not names:
+        return ""
+    more = f"…（共 {len(names)} 個）" if len(names) > MAP_SYMS else ""
+    return ", ".join(names[:MAP_SYMS]) + more
+
+
+def repo_map() -> str:
+    """專案地圖：有哪些檔案、每個檔案裡有什麼。"""
+    if cur().ws is None:
+        return ""
+    lines, n, cut = [], 0, False
+    for f in ws_walk():
+        n += 1
+        if n > MAP_FILES:
+            cut = True
+            break
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            continue
+        hit = _MAP_CACHE.get(f)
+        if not hit or hit[0] != mt:
+            hit = (mt, file_symbols(f))
+            _MAP_CACHE[f] = hit
+        lines.append(ws_rel(f) + ("：" + hit[1] if hit[1] else ""))
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    if len(body) > MAP_LIMIT:
+        body = body[:MAP_LIMIT].rsplit("\n", 1)[0]
+        cut = True
+    return ("專案地圖（冒號後面是那個檔案裡的頂層符號，要看內容還是要 read_file）：\n"
+            + body + ("\n…（只列出一部分，其餘用 search_files 找）" if cut else ""))
 
 
 def agent_rules() -> str:
@@ -2884,7 +2987,7 @@ def preview_risk(name: str, args: dict) -> str:
         except Exception:
             return "ok"
         will_run = [c for c in skill_commands(raw)
-                    if skill_trusted(folder) and not skill_cmd_block(c)]
+                    if skill_trusted(folder) and not auto_cmd_block(c)]
         return "risky" if will_run else "ok"
     return "ok"
 
@@ -2904,7 +3007,7 @@ def preview_tool(name: str, args: dict) -> str:
         why = ("" if skill_trusted(folder) else "模型改得到這份 skill，不代跑指令")
 
         def line(c):
-            no = why or skill_cmd_block(c)
+            no = why or auto_cmd_block(c)
             return f"  {c}" + (f"   ⛔ 不會跑：{no}" if no else "")
         return "這份 skill 會先執行：\n" + "\n".join(line(c) for c in cmds)
     if name == "run_shell":
@@ -3262,6 +3365,8 @@ class Handler(BaseHTTPRequestHandler):
                         "workspace": workspace_info(),
                         "tool_defs": tool_defs(),
                         "agent_rules": agent_rules(),
+                        "repo_map": repo_map(),
+                        "verify_hint": verify_detect(),
                         "todos": cur().todos, "jobs": jobs_state(),
                         "plan": cur().plan["on"], "browser": ALLOW_BROWSER,
                         "sandbox": ALLOW_SANDBOX, "sandbox_info": sandbox_state(),
@@ -3311,6 +3416,8 @@ class Handler(BaseHTTPRequestHandler):
             self._do_ext("POST")
         elif self.path == "/tool":
             self._do_tool()
+        elif self.path == "/verify":
+            self._do_verify()
         elif self.path == "/tools":
             self._do_tools_toggle()
         elif self.path == "/workspace":
@@ -3655,7 +3762,7 @@ class Handler(BaseHTTPRequestHandler):
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
                     "auto": cur().auto, "sandbox_info": sandbox_state(),
                     "tool_defs": tool_defs(), "agent_rules": agent_rules(),
-                    "agents": agent_types()})
+                    "repo_map": repo_map(), "agents": agent_types()})
 
     # -- 工作區 ------------------------------------------------------ #
 
@@ -3676,6 +3783,8 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  工作區   {info.get('path') or '（未設定）'}")
         info["tool_defs"] = tool_defs()
         info["agent_rules"] = agent_rules()
+        info["repo_map"] = repo_map()       # 換了工作區，地圖當然要跟著換
+        info["verify_hint"] = verify_detect()
         info["agents"] = agent_types()      # 專案自己的 agents/ 會蓋掉內建的
         self._json(info)
 
@@ -3699,6 +3808,42 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
         self._json({"diff": diff, "risk": risk, "rule": hit, "scope": scope})
+
+    def _do_verify(self) -> None:
+        """跑一次收尾用的驗證指令。
+
+        **這是第三條沒有確認卡的執行路徑**（另外兩條：skill 的 !`指令`、
+        自動模式放行的工具），所以兩件事寫死：指令只能來自使用者在介面上打的字
+        （`verify_detect()` 只負責預填，專案裡的檔案一個字都不讀），
+        而且照樣過 `auto_cmd_block()` —— 跟 skill 那條同一道關卡。
+        """
+        if not ALLOW_TOOLS or not self._is_local():
+            self._json({"error": "工具未啟用"}, 403)
+            return
+        try:
+            req = json.loads(self._read_body(8192) or b"{}")
+            cmd = " ".join(str(req.get("command", "")).split())
+            if not cmd:
+                self._json({"error": "沒有設定驗證指令"}, 400)
+                return
+            why = auto_cmd_block(cmd)
+            if why:
+                self._json({"error": f"這條指令不會自動執行：{why}"}, 400)
+                return
+            argv, cwd, use_shell, _ = build_command("run_shell", {"command": cmd})
+            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, start_new_session=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                out = proc.communicate(timeout=TEST_TIMEOUT)[0]
+            except subprocess.TimeoutExpired:
+                kill_tree(proc)          # sh 的孫子不殺就會留下來，見 kill_tree
+                self._json({"error": f"驗證指令跑超過 {TEST_TIMEOUT} 秒已中止"}, 400)
+                return
+        except Exception as e:
+            self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            return
+        self._json({"command": cmd, "exit": proc.returncode,
+                    "output": tail_of(out.decode("utf-8", "replace"))})
 
     def _do_view(self) -> None:
         """把工作區裡的檔案內容送給介面顯示。
