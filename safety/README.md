@@ -113,6 +113,12 @@ if target != root and root not in target.parents:
 可以平行跑而不互相蓋檔案，**不是為了把它關起來**。同一支 `ws_path()` 擋著它的檔案
 工具（root 換成 worktree），`run_shell` 一樣是逃生口，一樣要靠沙盒。
 
+**它會在你的 repo 裡建 commit，但只建在自己的分支上。** 收掉一個有改動的 `work`
+子代理時，`agent_close()` 會在**它自己的 worktree 裡** `git add -A` + `commit`，
+落在 `zackllmgui/<id>` 分支。你的分支、你的工作目錄、你的 index 都不會被動到 ——
+`git worktree` 的每一份有自己的 HEAD 與 index。**合併永遠是人自己下的**，
+這支程式不會替你 merge。不想要那一支就 `git branch -D zackllmgui/<id>`。
+
 有一點要知道：`work` 型宣告的是 `tools: *`，所以**它拿得到主代理有的每一支工具** ——
 包括 `run_shell`。放著跑之前，該問的是「主代理有沒有這個權限」，不是「子代理有沒有」。
 只想要答案就交辦 `explore`（工具清單裡只有讀類的），或自己在 `agents/` 寫一份

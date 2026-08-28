@@ -313,9 +313,10 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
   | `explore`（預設） | 只有唯讀工具 | 跟主代理共用工作區 |
   | `work` | 全部 | **自己的 git worktree**，改動落在獨立分支 |
 
-  唯讀是靠工具清單擋的，不是靠提示詞求它別寫。`work` 跑完如果有改動，worktree 會
-  **留著**並告訴你改在哪個分支（`git merge` 收下，或 `git worktree remove` 丟掉）；
-  沒改動就自動清掉。有了隔離之後，同一輪交辦好幾件 **兩種都能平行跑**。
+  唯讀是靠工具清單擋的，不是靠提示詞求它別寫。`work` 跑完如果有改動，會**自動 commit
+  到它自己的分支**然後把資料夾收掉，回報時附上 `git diff --stat` 與一句
+  `git merge zackllmgui/xxxx`；要收下就貼那句，不要就 `git branch -D`。
+  沒改動的連分支一起清掉。有了隔離之後，同一輪交辦好幾件 **兩種都能平行跑**。
 
   子代理可以再開下一層（深度上限 2 層，且要那個型別的 `tools` 裡有 `task`），
   下一層跑在同一份 worktree 裡。結論最後一行會給一個 id，主代理可以用
@@ -325,6 +326,10 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
   也會被伺服器拒絕。每個子代理卡片上有一顆「中斷」；卡片捲走了就打 `/agents` ——
   它列出還在跑的每一個（id、型別、第幾層、上層是誰、丟了哪些背景指令），
   按下去會連同它的後代與**背景指令**一起停掉。
+
+  `serve.py` 重啟過的話（改了原始碼它會自己重啟），跑到一半的子代理登記就沒了，
+  但資料夾還在磁碟上。那幾份會列在 `/agents` 最上面（id 是 `w` 開頭），
+  按「收掉」一樣是先 commit 再移除 —— **不會弄丟東西**。啟動時也會在終端機講一行。
 - **沙盒**（功能與工具 → 沙盒執行，預設關）：`run_shell` 與 `run_tests` 關進沙盒 ——
   **跑不出工作區、沒有網路**。這補的是唯一跑得出工作區的洞：檔案工具有路徑限制擋著，
   `run_shell` 沒有。**一個作業系統一種做法**，開啟時會先偵測跑 `serve.py` 那一台：
@@ -972,10 +977,11 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
 | 設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**（小，不會撞到配額） | 同上 |
 | 改檔案前的備份 | `<工作區>/.zackllmgui-backup/<時間戳>/<相對路徑>` | 你的專案裡 |
 | 還原點的順序紀錄 | `<工作區>/.zackllmgui-backup/journal.jsonl` | 同上 |
-| MCP 設定 | `<工作區>/.zackllmgui-mcp.json`，或 `serve.py` 旁邊 | 同上 |
+| MCP 設定 | `<工作區>/.zackllmgui-mcp.json`，或 `serve.py` 旁邊 | 同上（連線跟著分頁的工作區走，兩個專案各起各的） |
 | skills | `serve.py` 旁邊的 `skills/`（內建）＋ `<工作區>/skills/`（你自己的） | 兩邊都讀 |
 | 子代理型別 | `serve.py` 旁邊的 `agents/`＋`<工作區>/agents/`，規則同 skills | 兩邊都讀 |
-| 子代理的 worktree | `<工作區>/.zackllmgui-worktrees/<id>/`，改動在 `zackllmgui/<id>` 分支上 | 你的專案裡（沒改動就自動清掉） |
+| 子代理的 worktree | 跑的時候在 `<工作區>/.zackllmgui-worktrees/<id>/` | 你的專案裡（收掉時資料夾就沒了） |
+| 子代理改的東西 | **`zackllmgui/<id>` 分支上的一筆 commit** —— 收掉子代理時自動提交 | 你的專案裡。要收下就 `git merge zackllmgui/<id>`，不要就 `git branch -D` |
 | git 紀錄 | `<工作區>/.git` | **完全是你的**，這支程式只讀狀態與下 commit／stash |
 
 **為什麼不統一收進一個資料夾？** 因為它們的擁有者不一樣。備份與 journal 是這支程式
@@ -1019,7 +1025,7 @@ ollamaGUI/
 │       └── 09-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 75 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 78 項： python tests/test_serve.py
 │   ├── test_gui.js         網頁 63 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
