@@ -12,7 +12,10 @@ function renderThinkSeg() {
   const list = enabled ? opts : THINK_TOGGLE;
 
   const values = list.map(function (o) { return o[1]; });
-  if (values.indexOf(S.think) < 0) S.think = values[0];
+  // **只在控制項真的能用的時候才正規化。** S.caps 是跟伺服器問回來的，第一次
+  // render 時還是空的 —— 那時候 list 是 THINK_TOGGLE（值只有 true/false），
+  // 存好的 'high' 不在裡面就被洗成 false，於是每次重新整理都跳回「關」。
+  if (enabled && values.indexOf(S.think) < 0) S.think = values[0];
 
   seg.innerHTML = '';
   seg.classList.toggle('disabled', !enabled);

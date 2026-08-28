@@ -604,8 +604,11 @@ async function send() {
   else $('thread').appendChild(buildUserMsg(msg));
 
   $('input').value = '';
+  // chat 記的是**這一輪屬於哪則對話**，不是「現在看著哪則」。放著跑的時候使用者
+  // 常常切去看別的對話，而工具還在跑 —— 用 S.currentId 的話那幾筆還原點會記到
+  // 被看著的那則底下，原本那則的「紀錄」分頁就變成空的。
   S.run = { rounds: 0, calls: 0, tokens: 0, squeezed: 0, fails: {},
-            wroteTests: '', ranTests: false, nagged: false,
+            wroteTests: '', ranTests: false, nagged: false, chat: c.id,
             t0: performance.now() };
   delete c.stopWhy;              // 上一輪停在哪裡，跟這一輪沒關係了
   S.queued = [];                 // 新的一輪，上一輪沒送出的插話不留著
@@ -670,7 +673,7 @@ function countdown(bodyEl, ms, attempt, why) {
 
 // 跑到一半使用者又打字：不中斷，排進佇列，**下一次送模型時夾帶過去**。
 //
-// 這是 Claude Code 的做法（binary 裡的 queuedMessages 與那句寫死的
+// 這是商用 agent 的做法（binary 裡的 queuedMessages 與那句寫死的
 // "The user sent a new message while you were working:"）—— 它把插話當成
 // 「邊跑邊修方向」而不是打斷，所以已經跑到一半的工具不會白費。
 //
@@ -739,7 +742,8 @@ async function resumeRun() {
   // 輪數與預算都重新算：中斷之後接著跑本來就是新的一段，
   // 不重算的話按下「繼續」會立刻又撞到同一個上限，變成一顆沒有作用的按鈕。
   S.run = { rounds: 0, calls: 0, tokens: 0, squeezed: 0, fails: {},
-            wroteTests: '', ranTests: false, nagged: false, t0: performance.now() };
+            wroteTests: '', ranTests: false, nagged: false, chat: c.id,
+            t0: performance.now() };
   await runStream(c, 0);
   renderResumeBar();
 }

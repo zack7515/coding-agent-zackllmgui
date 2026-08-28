@@ -803,7 +803,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 })();
 
 // 跑到一半使用者又打字：不中斷，排隊，下一次送模型時夾帶過去。
-// 這是 Claude Code 的做法（queuedMessages + "The user sent a new message while
+// 這是商用 agent 的做法（queuedMessages + "The user sent a new message while
 // you were working:"）。另外兩條路都比較差：鎖住輸入框等於長任務只能乾等；
 // 打字就立刻中斷會浪費正在跑的工具。
 (function () {
@@ -997,7 +997,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 })();
 
 // 收工前的檢查：模型說「做完了」的那一刻要能被攔一次。
-// 對照 Claude Code 的 Stop hook（回傳 additionalContext 就讓對話繼續）。
+// 對照商用 agent 的 Stop hook（回傳 additionalContext 就讓對話繼續）。
 // 條件寫死成「寫了測試卻沒跑過」—— 「改了程式就要跑測試」在沒有測試的專案上
 // 永遠是誤報，而會誤報的自動提醒最後一定會被使用者關掉。
 (function () {
@@ -1042,7 +1042,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   const src = script.slice(script.indexOf('const REPEAT_LIMIT'),
                            script.indexOf('/* ══════════════════════ 子代理'));
   const box = new Function(`
-    const S = { run: { calls: 0, fails: {} }, streamTools: [], todos: [] };
+    const S = { run: { calls: 0, fails: {}, chat: 'run-A' }, currentId: 'viewing-B',
+                streamTools: [], todos: [] };
     let nextOk = false;
     const sent = [];
     const toolPreview = async () => ({ diff: '', risk: 'ok' });
@@ -1056,11 +1057,14 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const touchTree = () => {};
     const apiUrl = (p) => p;
     const fetch = async (u, o) => {
-      sent.push(JSON.parse(o.body).name);
+      const body = JSON.parse(o.body);
+      sent.push(body.name);
+      chats.push(body.chat);
       return { ok: nextOk, json: async () => nextOk ? { result: '好了' } : { error: '壞了' } };
     };
+    const chats = [];
     ${src}
-    return { S, sent, execTool, callKey, ok: (v) => { nextOk = v; } };
+    return { S, sent, chats, execTool, callKey, ok: (v) => { nextOk = v; } };
   `)();
 
   const call = () => box.execTool('read_file', { path: 'a.py' },
@@ -1085,6 +1089,14 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     // 成功過就重新計算
     assert.strictEqual(box.S.run.fails[box.callKey('read_file', { path: 'b.py' })], undefined);
     console.log('ok   重複失敗的呼叫會被擋下來');
+
+    // 還原點要記在**發動這一輪的那則對話**底下。放著跑的時候使用者常常切去看
+    // 別的對話，用 S.currentId 的話那幾筆會記到被看著的那則，原本那則的
+    // 「紀錄」分頁就變成空的 —— 而檔案其實改了。
+    assert.ok(box.chats.length > 0);
+    assert.ok(box.chats.every((c) => c === 'run-A'),
+      '工具呼叫帶的是「現在看著哪則」而不是「這一輪屬於哪則」：' + box.chats.join());
+    console.log('ok   還原點記在發動它的那則對話底下');
   });
 })();
 
@@ -1120,6 +1132,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       on.done({ prompt_eval_count: 100, eval_count: 20 });
     };
     const budgetStop = (run) => (conf.budget && run.tokens > conf.budget ? '超出預算' : '');
+    const runChat = () => 'run-A';
     const estTokens = (t) => String(t || '').length;
     const ctxLimit = () => conf.ctx || 1e9;
     const renderRunBar = () => {};
@@ -1482,6 +1495,33 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(script.indexOf('await autoCompact(c)') > script.indexOf('blockComposer(\'\')'),
     '壓縮要在這一輪的工具結果都進去之後才做');
   console.log('ok   壓縮不會切開工具呼叫，滿了會自己壓');
+
+  // 思考等級要活過重新整理。能力（S.caps）是跟伺服器問回來的，第一次 render 時
+  // 還是空的 —— 那時候把 S.think 正規化成開關的 true/false，存好的 'high' 就被洗掉，
+  // 症狀是「每次重新整理都跳回關閉」
+  const think = new Function(`
+    const S = { caps: {}, model: 'm', think: 'high' };
+    const THINK_LEVELS = [['關', false], ['低', 'low'], ['中', 'medium'],
+                          ['高', 'high'], ['最高', 'max']];
+    const THINK_TOGGLE = [['關閉', false], ['開啟', true]];
+    const seg = { innerHTML: '', classList: { toggle() {} }, appendChild() {} };
+    const note = {};
+    const $ = (id) => (id === 'thinkSeg' ? seg : note);
+    const saveConfig = () => {};
+    const document = { createElement: () => ({ addEventListener() {} }) };
+    ${grab('thinkOptions')}
+    ${grab('renderThinkSeg')}
+    return { render: renderThinkSeg, S: S };
+  `)();
+  think.render();
+  assert.strictEqual(think.S.think, 'high', '能力還沒問回來就把存好的等級洗掉了');
+  think.S.caps.m = ['thinking'];
+  think.render();
+  assert.strictEqual(think.S.think, 'high', '能力回來之後等級沒留住');
+  think.S.think = '不存在的等級';
+  think.render();
+  assert.strictEqual(think.S.think, false, '支援分級時，認不得的值該退回第一個');
+  console.log('ok   思考等級活得過重新整理');
 
   // 背景先算好的摘要不能存進對話：Promise 進了 localStorage 會變成 {}，
   // 而 {} 是 truthy 的 —— 重整之後會被當成「算好了」然後炸掉

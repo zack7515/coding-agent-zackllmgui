@@ -138,11 +138,12 @@ function openFeatureMenu() {
       }
     };
   });
-  rows.push('-', autoMenuItem(), {
-    label: '允許規則…',
-    meta: (S.rules || []).length ? (S.rules.length + ' 條') : '',
-    action: openRules
-  });
+  rows.push('-', autoMenuItem());
+  // 一條規則都沒有就不佔一列：規則只從確認卡的「以後都放行」長出來，
+  // 沒有人會為了設定它而打開選單。有東西了才需要一個看得到、刪得掉的地方。
+  if ((S.rules || []).length) {
+    rows.push({ label: '允許規則…', meta: S.rules.length + ' 條', action: openRules });
+  }
   showMenu($('featBtn'), rows);
 }
 
@@ -249,7 +250,7 @@ async function runStreamed(name, args, agent) {
 }
 
 /* ══════════════════════ 待辦清單 ══════════════════════ */
-// Claude Code 與 grok-build 都有這個：模型跑十幾輪之後會忘記原始目標，
+// 幾套 agent 都有這個：模型跑十幾輪之後會忘記原始目標，
 // 把清單攤在輸入框上方，人跟模型都看得到還剩什麼沒做。
 // 一項「還在等別人」跟一項「可以開始了」是兩回事。全部混在一起顯示的話，
 // 看起來就像它有五件事沒做，其實只有一件真的能動。
@@ -1142,16 +1143,6 @@ function renderRules() {
   });
 }
 
-async function addRuleFromDialog() {
-  const tool = $('rlTool').value.trim() || '*';
-  const pattern = $('rlPattern').value.trim() || '*';
-  try {
-    await addRule(tool, pattern, $('rlAction').value);
-    $('rlPattern').value = '';
-    renderRules();
-  } catch (e) { toast('加不上去：' + e.message); }
-}
-
 function confirmTool(name, args, pre) {
   return new Promise(function (resolve) {
     const write = WRITE_TOOLS.indexOf(name) >= 0;
@@ -1228,6 +1219,10 @@ const REPEAT_LIMIT = 2;
 // ponytail: 比的是「工具名＋參數完全一樣」。差一個空白就繞過去了，
 //           但模型重試時通常是原封不動送同一份。真的漏掉再做正規化。
 
+// 這一輪屬於哪則對話。跑起來之後使用者可能切去看別的對話，而還原點要記在
+// **發動它的那一則**底下，不是被看著的那一則。
+function runChat() { return (S.run && S.run.chat) || S.currentId; }
+
 function callKey(name, args) {
   try { return name + '\u0000' + JSON.stringify(args || {}); }
   catch (e) { return name; }               // 參數塞不進 JSON 就只比工具名
@@ -1283,7 +1278,7 @@ async function execTool(name, args, msg, agent) {
     }
     const res = await fetch(apiUrl('/tool'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args, chat: S.currentId,
+      body: JSON.stringify({ name: name, args: args, chat: runChat(),
                              agent: agent || '' })
     });
     const data = await res.json();
@@ -1316,12 +1311,12 @@ async function execTool(name, args, msg, agent) {
 // 「掃過整個專案找出所有用到 X 的地方」這種事，自己做會把幾十個檔案的內容
 // 灌進主對話，之後每一輪都要重送。子代理有自己的 context，只有結論回來。
 //
-// 型別定義在 agents/*.md（照 Claude Code 的 .claude/agents/），由 serve.py 讀進來 ——
+// 型別定義在 agents/*.md（照常見的 agents/ 慣例），由 serve.py 讀進來 ——
 // 加一種子代理是加一個檔案，不是改這裡的程式碼。
 
 // 跟 MAX_TOOL_ROUNDS 一樣是**失控煞車不是預算**：交辦出去的事沒有人在旁邊看。
 const SUB_ROUNDS = 60;
-// 深度上限是硬的。Claude Code 用提示詞當成本煞車（「不要隨便開子代理」），
+// 深度上限是硬的。那套 agent 用提示詞當成本煞車（「不要隨便開子代理」），
 // 那是因為有人在看帳單；這裡的前提是放著跑三十分鐘沒人看，所以要機制。
 const SUB_DEPTH_MAX = 2;
 // 這兩支永遠不給，型別檔寫了也沒用：問了沒人看得懂上下文、
@@ -1402,7 +1397,7 @@ async function runSubagent(args, depth, parent) {
   box.stopped = false;
   try {
     const info = await agentCall({ action: 'open', type: type.name,
-                                   parent: parent || '', chat: S.currentId,
+                                   parent: parent || '', chat: runChat(),
                                    task: task });
     box.sid = info.id;
     box.id = box.id || info.id;

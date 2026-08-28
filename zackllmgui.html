@@ -1093,18 +1093,8 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
 <div class="overlay hidden" id="rlOverlay">
   <div class="dialog wide">
     <h2>允許規則<button class="help-btn" id="rlHelp" title="規則怎麼比對">!</button></h2>
-    <div class="dialog-row">
-      <input id="rlTool" spellcheck="false" placeholder="工具（run_shell、edit_file、* ）"
-        style="flex:1; font-family:var(--mono);">
-      <input id="rlPattern" spellcheck="false" placeholder="樣式（pytest*、secrets/**）"
-        style="flex:1; font-family:var(--mono);">
-      <select id="rlAction" class="field" style="width:88px;">
-        <option value="allow">放行</option>
-        <option value="ask">要問</option>
-        <option value="deny">禁止</option>
-      </select>
-      <button class="mini" id="rlAdd">加入</button>
-    </div>
+    <!-- 手動新增的表單拿掉了：沒有人會自己填 tool + pattern + action。
+         規則只從確認卡的「以後都放行」長出來，這裡只負責看一眼與刪掉。 -->
     <div class="row-list" id="rlList"></div>
     <div class="note" style="font-family:var(--mono); font-size:11px;" id="rlPath"></div>
     <div class="dialog-actions">
@@ -1379,7 +1369,7 @@ const PRESETS = [
    '禁止：加入原文沒有的內容、擅自刪掉整段、把口語稿改成公文腔。']
 ];
 
-// 壓縮對話用的指令。做法參考 Claude Code 的 /compact：留下之後還會用到的事實，
+// 壓縮對話用的指令。做法參考常見的 /compact：留下之後還會用到的事實，
 // 丟掉寒暄與已經解決的枝節。
 const COMPACT_PROMPT =
   '你的工作是把一段對話紀錄壓縮成摘要，讓另一個模型只看摘要就能無縫接續這場對話。\n\n' +
@@ -1536,7 +1526,7 @@ function waitText(ms, thinking, showThink) {
 }
 
 // 現在正在做的那一項：第一個還沒完成的待辦。
-// 對照 Claude Code 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
+// 對照商用 agent 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
 // 說明「跑了多少」，這一句說明「在幹嘛」，兩者缺一不可。
 function currentTodo(todos) {
   const t = (todos || []).filter(function (x) { return !x.done; })[0];
@@ -1544,7 +1534,7 @@ function currentTodo(todos) {
 }
 
 // 「模型說做完了」的那一刻要攔一次的依據。
-// 對照 Claude Code 的 Stop hook：它的回傳可以帶 additionalContext，
+// 對照商用 agent 的 Stop hook：它的回傳可以帶 additionalContext，
 // schema 原文寫「the conversation continues so the model can act on it」——
 // 也就是模型要停下來時還能被推回去繼續。這裡不做成可設定的 hook（那個拿掉了），
 // 條件寫死成一條：**寫了測試卻一次都沒跑過**。
@@ -2471,7 +2461,10 @@ function renderThinkSeg() {
   const list = enabled ? opts : THINK_TOGGLE;
 
   const values = list.map(function (o) { return o[1]; });
-  if (values.indexOf(S.think) < 0) S.think = values[0];
+  // **只在控制項真的能用的時候才正規化。** S.caps 是跟伺服器問回來的，第一次
+  // render 時還是空的 —— 那時候 list 是 THINK_TOGGLE（值只有 true/false），
+  // 存好的 'high' 不在裡面就被洗成 false，於是每次重新整理都跳回「關」。
+  if (enabled && values.indexOf(S.think) < 0) S.think = values[0];
 
   seg.innerHTML = '';
   seg.classList.toggle('disabled', !enabled);
@@ -3296,8 +3289,11 @@ async function send() {
   else $('thread').appendChild(buildUserMsg(msg));
 
   $('input').value = '';
+  // chat 記的是**這一輪屬於哪則對話**，不是「現在看著哪則」。放著跑的時候使用者
+  // 常常切去看別的對話，而工具還在跑 —— 用 S.currentId 的話那幾筆還原點會記到
+  // 被看著的那則底下，原本那則的「紀錄」分頁就變成空的。
   S.run = { rounds: 0, calls: 0, tokens: 0, squeezed: 0, fails: {},
-            wroteTests: '', ranTests: false, nagged: false,
+            wroteTests: '', ranTests: false, nagged: false, chat: c.id,
             t0: performance.now() };
   delete c.stopWhy;              // 上一輪停在哪裡，跟這一輪沒關係了
   S.queued = [];                 // 新的一輪，上一輪沒送出的插話不留著
@@ -3362,7 +3358,7 @@ function countdown(bodyEl, ms, attempt, why) {
 
 // 跑到一半使用者又打字：不中斷，排進佇列，**下一次送模型時夾帶過去**。
 //
-// 這是 Claude Code 的做法（binary 裡的 queuedMessages 與那句寫死的
+// 這是商用 agent 的做法（binary 裡的 queuedMessages 與那句寫死的
 // "The user sent a new message while you were working:"）—— 它把插話當成
 // 「邊跑邊修方向」而不是打斷，所以已經跑到一半的工具不會白費。
 //
@@ -3431,7 +3427,8 @@ async function resumeRun() {
   // 輪數與預算都重新算：中斷之後接著跑本來就是新的一段，
   // 不重算的話按下「繼續」會立刻又撞到同一個上限，變成一顆沒有作用的按鈕。
   S.run = { rounds: 0, calls: 0, tokens: 0, squeezed: 0, fails: {},
-            wroteTests: '', ranTests: false, nagged: false, t0: performance.now() };
+            wroteTests: '', ranTests: false, nagged: false, chat: c.id,
+            t0: performance.now() };
   await runStream(c, 0);
   renderResumeBar();
 }
@@ -4009,11 +4006,12 @@ function openFeatureMenu() {
       }
     };
   });
-  rows.push('-', autoMenuItem(), {
-    label: '允許規則…',
-    meta: (S.rules || []).length ? (S.rules.length + ' 條') : '',
-    action: openRules
-  });
+  rows.push('-', autoMenuItem());
+  // 一條規則都沒有就不佔一列：規則只從確認卡的「以後都放行」長出來，
+  // 沒有人會為了設定它而打開選單。有東西了才需要一個看得到、刪得掉的地方。
+  if ((S.rules || []).length) {
+    rows.push({ label: '允許規則…', meta: S.rules.length + ' 條', action: openRules });
+  }
   showMenu($('featBtn'), rows);
 }
 
@@ -4120,7 +4118,7 @@ async function runStreamed(name, args, agent) {
 }
 
 /* ══════════════════════ 待辦清單 ══════════════════════ */
-// Claude Code 與 grok-build 都有這個：模型跑十幾輪之後會忘記原始目標，
+// 幾套 agent 都有這個：模型跑十幾輪之後會忘記原始目標，
 // 把清單攤在輸入框上方，人跟模型都看得到還剩什麼沒做。
 // 一項「還在等別人」跟一項「可以開始了」是兩回事。全部混在一起顯示的話，
 // 看起來就像它有五件事沒做，其實只有一件真的能動。
@@ -5013,16 +5011,6 @@ function renderRules() {
   });
 }
 
-async function addRuleFromDialog() {
-  const tool = $('rlTool').value.trim() || '*';
-  const pattern = $('rlPattern').value.trim() || '*';
-  try {
-    await addRule(tool, pattern, $('rlAction').value);
-    $('rlPattern').value = '';
-    renderRules();
-  } catch (e) { toast('加不上去：' + e.message); }
-}
-
 function confirmTool(name, args, pre) {
   return new Promise(function (resolve) {
     const write = WRITE_TOOLS.indexOf(name) >= 0;
@@ -5099,6 +5087,10 @@ const REPEAT_LIMIT = 2;
 // ponytail: 比的是「工具名＋參數完全一樣」。差一個空白就繞過去了，
 //           但模型重試時通常是原封不動送同一份。真的漏掉再做正規化。
 
+// 這一輪屬於哪則對話。跑起來之後使用者可能切去看別的對話，而還原點要記在
+// **發動它的那一則**底下，不是被看著的那一則。
+function runChat() { return (S.run && S.run.chat) || S.currentId; }
+
 function callKey(name, args) {
   try { return name + '\u0000' + JSON.stringify(args || {}); }
   catch (e) { return name; }               // 參數塞不進 JSON 就只比工具名
@@ -5154,7 +5146,7 @@ async function execTool(name, args, msg, agent) {
     }
     const res = await fetch(apiUrl('/tool'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args, chat: S.currentId,
+      body: JSON.stringify({ name: name, args: args, chat: runChat(),
                              agent: agent || '' })
     });
     const data = await res.json();
@@ -5187,12 +5179,12 @@ async function execTool(name, args, msg, agent) {
 // 「掃過整個專案找出所有用到 X 的地方」這種事，自己做會把幾十個檔案的內容
 // 灌進主對話，之後每一輪都要重送。子代理有自己的 context，只有結論回來。
 //
-// 型別定義在 agents/*.md（照 Claude Code 的 .claude/agents/），由 serve.py 讀進來 ——
+// 型別定義在 agents/*.md（照常見的 agents/ 慣例），由 serve.py 讀進來 ——
 // 加一種子代理是加一個檔案，不是改這裡的程式碼。
 
 // 跟 MAX_TOOL_ROUNDS 一樣是**失控煞車不是預算**：交辦出去的事沒有人在旁邊看。
 const SUB_ROUNDS = 60;
-// 深度上限是硬的。Claude Code 用提示詞當成本煞車（「不要隨便開子代理」），
+// 深度上限是硬的。那套 agent 用提示詞當成本煞車（「不要隨便開子代理」），
 // 那是因為有人在看帳單；這裡的前提是放著跑三十分鐘沒人看，所以要機制。
 const SUB_DEPTH_MAX = 2;
 // 這兩支永遠不給，型別檔寫了也沒用：問了沒人看得懂上下文、
@@ -5273,7 +5265,7 @@ async function runSubagent(args, depth, parent) {
   box.stopped = false;
   try {
     const info = await agentCall({ action: 'open', type: type.name,
-                                   parent: parent || '', chat: S.currentId,
+                                   parent: parent || '', chat: runChat(),
                                    task: task });
     box.sid = info.id;
     box.id = box.id || info.id;
@@ -6953,12 +6945,8 @@ async function init() {
 
   $('avatarBtn').addEventListener('click', renameUser);
   $('hostHelp').addEventListener('click', openHostHelp);
-  $('rlAdd').addEventListener('click', addRuleFromDialog);
   $('rlClose').addEventListener('click', function () {
     $('rlOverlay').classList.add('hidden');
-  });
-  $('rlPattern').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); addRuleFromDialog(); }
   });
   $('rlHelp').addEventListener('click', openRulesHelp);
   $('thinkHelp').addEventListener('click', openThinkHelp);

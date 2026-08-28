@@ -99,7 +99,7 @@ DENY_FILES = re.compile(r"^(\.env(\..*)?|.*\.env|.*\.pem|.*\.key|.*\.pfx|id_rsa.
                         r"\.zackllmgui-.*\.json)$", re.I)
 MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看的
 AT_FILE_CAP = 3000                 # 輸入框打 @ 時最多列幾個檔案
-# 專案自己的說明檔。Claude Code 讀 CLAUDE.md、Codex 與 grok-build 讀 AGENTS.md，
+# 專案自己的說明檔。不同的 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），
 # 這裡三種都收，找到第一個就用。
 AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GROK.md", ".cursorrules")
 PROJECT_MD_LIMIT = 6000
@@ -123,7 +123,7 @@ class Session:
         self.auto = "off"                              # 只影響系統提示怎麼寫，不決定放不放行
         self.todos = []                                # [{"text": ..., "done": bool}]
         self.todo_mtime = 0.0                          # 上次自己寫進去的時間戳，用來分辨「誰改的」
-        self.plan = {"text": "", "approved": False}
+        self.plan = {"text": "", "approved": False, "on": False}
         self.agents = {}                               # 子代理 id -> {"ws", "branch"}
         self.seen = time.time()
 
@@ -153,7 +153,8 @@ def session_for(tab: str) -> "Session":
         s.seen = time.time()
         return s
 
-REQUIRE_PLAN = False               # 開了就要先送計畫、人核准之後才給寫入工具
+# 計畫模式住在 Session.plan["on"]：工作區、修改權限、自動模式、待辦、MCP 都跟著
+# 分頁走，這一個沒跟的話，A 分頁打開計畫模式會把 B 分頁的寫入工具一起收走。
 TRUST_REMOTE = False               # --trust-remote：非本機的瀏覽器也能開工具與設工作區
 # 連網瀏覽（搜尋 + 開頁 + 跟連結走）。預設關著：它會讓模型主動連出去，
 # 那跟「讀本機檔案」是不同性質的權限，該由使用者自己按下去。
@@ -768,7 +769,7 @@ def unified(old: str, new: str, name: str, labels=("現在", "改後")) -> str:
 # 連續失敗上限，白燒兩輪。
 #
 # 所以這裡記一份「讀的時候檔案長什麼樣」，錯誤訊息才分得出是哪一種失敗。
-# Claude Code 是用同一份狀態直接**擋下**未讀先改；這裡不擋 —— old 要完全吻合
+# 有些 agent 是用同一份狀態直接**擋下**未讀先改；這裡不擋 —— old 要完全吻合
 # 本來就擋住了錯誤的修改，多擋一層只會讓猜對的情況也不能改。這裡只換訊息。
 # ponytail: 一個永遠不清的 dict，鍵是絕對路徑。上限是「讀過幾個檔案」，
 #           一次 session 幾百筆，不值得做淘汰。真的要淘汰再換 OrderedDict。
@@ -844,7 +845,7 @@ def rg_rows(pattern: str):
     這是這個專案既有的「裝了就用」慣例（ruff / eslint 也是這樣）——
     沒裝 rg 就走下面的純 Python 迴圈，不會變成必要相依。
     """
-    # PATH 上沒有的話還可以指過去：VSCode 與 Claude Code 都自帶一份 rg，
+    # PATH 上沒有的話還可以指過去：VSCode 與幾套 agent 擴充都自帶一份 rg，
     # 但那份不在 PATH 上（實測 `rg` 只是 shell function，subprocess 看不到）。
     exe = os.environ.get("ZACKLLMGUI_RG") or shutil.which("rg")
     if not exe or not Path(exe).exists():
@@ -1675,7 +1676,7 @@ def agent_rules() -> str:
     if len(TOOL_SCHEMAS) and ALLOW_TOOLS:
         r.append("- 多步驟的工作先用 todo_write 列出待辦，每完成一項就整份重送並標成完成。")
         r.append("- 需要使用者決定的事用 ask_user_question 問，不要自己猜。")
-    if REQUIRE_PLAN and not cur().plan["approved"]:
+    if cur().plan["on"] and not cur().plan["approved"]:
         r.append("- 目前是計畫模式：先用 submit_plan 送出計畫，"
                  "使用者核准之前不會有修改檔案的工具可用。")
     r.append("- 做完後用三到五行說明你改了什麼、驗證結果如何，不要複述工具輸出。")
@@ -1706,7 +1707,7 @@ def tool_defs() -> list:
     沒開放的工具不會出現在清單裡 —— 不是讓模型呼叫了再拒絕。小模型看到工具就會想用。
     """
     out = []
-    plan_ok = cur().plan["approved"] or not REQUIRE_PLAN
+    plan_ok = cur().plan["approved"] or not cur().plan["on"]
     for t in TOOL_SCHEMAS:
         if t["needs"] == "ws" and cur().ws is None:
             continue
@@ -1715,7 +1716,7 @@ def tool_defs() -> list:
         # 這用的是既有的 needs 閘門，不是新機制 —— 見 plan-agent 2.17 為什麼只做到這裡。
         if t["needs"] == "job" and (cur().ws is None or not JOBS):
             continue
-        if t["needs"] == "plan" and not REQUIRE_PLAN:
+        if t["needs"] == "plan" and not cur().plan["on"]:
             continue
         if t["needs"] == "browser" and not ALLOW_BROWSER:
             continue
@@ -1745,7 +1746,7 @@ def tool_defs() -> list:
 def _tool_todo_write(items) -> str:
     """模型自己維護的待辦清單。
 
-    Claude Code 與 grok-build 都有這個工具，理由一樣：跑十幾輪之後，
+    幾套 agent 都有這個工具，理由一樣：跑十幾輪之後，
     模型會忘記最初的目標。把清單寫出來、每輪重看一次，它才記得自己在做什麼。
     """
     if isinstance(items, str):
@@ -1790,7 +1791,8 @@ def _tool_submit_plan(plan: str) -> str:
     text = str(plan or "").strip()
     if not text:
         raise ValueError("plan 是空的")
-    cur().plan = {"text": text[:8000], "approved": True}   # 網頁按下「核准」才會送到這裡
+    # 就地更新不要換掉整個 dict：計畫模式的開關（"on"）也住在這裡面
+    cur().plan.update(text=text[:8000], approved=True)     # 網頁按下「核准」才會送到這裡
     return "計畫已核准，可以開始執行。動手前再確認一次每一步都在計畫裡。"
 
 
@@ -2105,7 +2107,7 @@ def skill_body(name: str) -> str:
 
 
 # ══════════════════════ 子代理型別 ══════════════════════ #
-# 照 Claude Code 的 `.claude/agents/*.md` 做：**一種子代理是一個檔案，不是一段程式碼**。
+# 照常見的 `agents/*.md` 慣例做：**一種子代理是一個檔案，不是一段程式碼**。
 # 加一種不必改 serve.py，寫一份 md 丟進 agents/ 就好。每一種自己宣告拿得到哪些工具 ——
 # 唯讀是靠工具清單擋的，不是靠提示詞求它別寫（Explore 那一支的做法也是這樣）。
 #
@@ -2213,7 +2215,7 @@ def agent_open(type_name: str = "", parent: str = "", chat: str = "",
 def worktree_add() -> dict:
     """給子代理一份自己的 git worktree。
 
-    照 Claude Code 的 `isolation: "worktree"` 做。兩個會改檔案的子代理平行跑時，
+    照那套商用 agent 的 `isolation: "worktree"` 做。兩個會改檔案的子代理平行跑時，
     原本只有「不要平行」一條路（同時動同一個檔案，收拾比省下的時間貴）；
     各給一份 checkout 之後，衝突變成 merge 問題，而 merge 有現成工具。
 
@@ -3015,7 +3017,7 @@ class Handler(BaseHTTPRequestHandler):
                         "tool_defs": tool_defs(),
                         "agent_rules": agent_rules(),
                         "todos": cur().todos, "jobs": jobs_state(),
-                        "plan": REQUIRE_PLAN, "browser": ALLOW_BROWSER,
+                        "plan": cur().plan["on"], "browser": ALLOW_BROWSER,
                         "sandbox": ALLOW_SANDBOX, "sandbox_info": sandbox_state(),
                         "mcp": mcp_status(),
                         "agents": agent_types(),
@@ -3398,12 +3400,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             cur().auto = want
         if "plan" in req:
-            global REQUIRE_PLAN
-            REQUIRE_PLAN = bool(req.get("plan"))
-            cur().plan["approved"] = not REQUIRE_PLAN
+            cur().plan["on"] = bool(req.get("plan"))
+            cur().plan["approved"] = not cur().plan["on"]
         print(f"  工具     {'已啟用' if ALLOW_TOOLS else '已關閉'}"
               f"{'，可修改檔案' if cur().write else ''}（由網頁切換）")
-        self._json({"tools": ALLOW_TOOLS, "write": cur().write, "plan": REQUIRE_PLAN,
+        self._json({"tools": ALLOW_TOOLS, "write": cur().write, "plan": cur().plan["on"],
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
                     "auto": cur().auto, "sandbox_info": sandbox_state(),
                     "tool_defs": tool_defs(), "agent_rules": agent_rules(),

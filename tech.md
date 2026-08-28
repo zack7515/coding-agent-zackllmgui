@@ -334,7 +334,7 @@ code block 的語言標籤）。內容清空等於刪除，晶片旁邊的 × �
 
 ## 壓縮（compact）
 
-做法參考 Claude Code 的 `/compact`：**摘要不是為了給人看，是為了給下一輪的模型看**，
+做法參考常見的 `/compact`：**摘要不是為了給人看，是為了給下一輪的模型看**，
 所以指令要求模型輸出六個固定小節（目標／已完成／關鍵事實／程式碼／待辦／注意事項），
 並明講「檔名、指令、參數、數值一律照抄」。摘要漏掉一個路徑，接下來的對話就會開始亂猜。
 
@@ -513,7 +513,7 @@ code block 的語言標籤）。內容清空等於刪除，晶片旁邊的 × �
 
 ### 子代理：型別是檔案、worktree 隔離、深度上限
 
-全自動變成常態用法之後，子代理有四個地方站不住。改法整體照 Claude Code 的
+全自動變成常態用法之後，子代理有四個地方站不住。改法整體照那套商用 agent 的
 `Agent` 工具（那份契約在這個專案的開發過程裡讀得到，不是憑印象）。
 
 **輪數 8 輪**是「每次呼叫都要人確認」時代留下的值 —— 那時每一輪都有人在看。放著跑
@@ -528,7 +528,7 @@ code block 的語言標籤）。內容清空等於刪除，晶片旁邊的 × �
 
 #### 型別是一個檔案，不是一段程式碼
 
-照 `.claude/agents/*.md` 做：`agents/<名字>.md`，frontmatter 宣告 `tools`、
+照常見的 `agents/*.md` 慣例做：`agents/<名字>.md`，frontmatter 宣告 `tools`、
 `isolation`、`model`，正文就是那一種的系統提示。工作區裡也可以放一份 `agents/`，
 同名時工作區的贏 —— 規則跟 `skills/` 一模一樣，所以只多一個概念不是兩個。
 
@@ -980,7 +980,7 @@ bug**，只是要壓的時機剛好比較少落在那裡。
 
 `search_files` 原本一定要給內容 regex，`list_dir` 一次只看一層 ——
 於是「這個專案的測試檔在哪」要走三四輪 `list_dir`。多開一支 `glob` 工具是
-一種做法（Claude Code 就是），但這裡選了讓同一支多一個模式：
+一種做法（有些 agent 就是），但這裡選了讓同一支多一個模式：
 **只給 `glob` 不給 `pattern` 就回檔名清單**。少一支工具＝送給模型的工具定義
 少一段，而且模型不必再判斷「這次該用哪一支」。
 
@@ -1118,14 +1118,14 @@ const FEATURES = [{
 
 ### 像 IDE agent 的那幾樣東西
 
-參考 Claude Code、Codex 與 grok-build 共有的做法，補了四件小而有效的：
+參考幾套 IDE agent 共有的做法，補了四件小而有效的：
 
 | 東西 | 為什麼 | 在哪 |
 |---|---|---|
 | `todo_write` | 十幾輪之後模型會忘記目標。清單攤在輸入框上方，人跟模型都看得到 | `_tool_todo_write()` / `renderTodos()` |
 | `ask_user_question` | 讓它問，不要猜。**這支不在伺服器執行** —— 伺服器沒有人可以答 | `askUser()`（前端）；`run_tool()` 會直接拒絕 |
-| `submit_plan` + 計畫模式 | 先講計畫、人核准，寫入工具才出現在 `tool_defs()` 裡 | `REQUIRE_PLAN` / `PLAN` |
-| `AGENTS.md` 自動讀入 | Claude Code 讀 CLAUDE.md、Codex 與 grok-build 讀 AGENTS.md，都是同一個慣例 | `project_md()`，接在 `agent_rules()` 最後 |
+| `submit_plan` + 計畫模式 | 先講計畫、人核准，寫入工具才出現在 `tool_defs()` 裡 | `Session.plan`（`on` / `approved` / `text`） |
+| `AGENTS.md` 自動讀入 | 不同 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），講的是同一件事 | `project_md()`，接在 `agent_rules()` 最後 |
 
 計畫模式的閘門做在 `tool_defs()` 而不是 `run_tool()`：沒核准之前，
 寫入工具**根本不會出現在送給模型的清單裡**。跟其他分層一樣的理由——
@@ -1197,7 +1197,7 @@ function autoApprove(name, risk, rule, scope) {
 所以「這行指令動得到工作區外嗎」的答案是「不管它怎麼寫，都不行」——
 不必再從字串去猜。這一條的實際效果是 `pip install`、`cd x && make`
 這種掃不動的寫法在沙盒裡也不用問，而那正是「放著跑」最常撞到的第二道牆。
-（Claude Code 的 `sandbox.autoAllowBashIfSandboxed` 是同一個設計。）
+（有些 agent 的 `sandbox.autoAllowBashIfSandboxed` 是同一個設計。）
 `rm -rf pkg` 在這一格照樣被拒絕執行 —— 那條的理由（備份救不回來）跟問不問無關。
 
 因為要先知道風險等級才能決定放不放行，`toolPreview()` 一定會先跑一次
@@ -1394,16 +1394,16 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 |---|---|---|
 | **自動 lint 只認 `ruff` 與 `eslint`**，判斷寫死（[serve.py](serve.py) `LINT_TIMEOUT` 上方） | 其他語言沒有檢查 | 加一個分支就好。typecheck（mypy／tsc）要先解決「跑整包很慢」，那不是加一行的事 |
 | **收工前檢查只有一條規則**（寫了測試沒跑），一輪只攔一次（[02-const.js](frontend/js/02-const.js) `finishCheck`） | 其他「沒做完就說做完」的樣子攔不到 | 改成一串 check 依序跑。但先想清楚誤報的代價 —— 會誤報的自動提醒最後一定會被關掉 |
-| **`edit_file` 的讀取狀態只換訊息、不擋操作**（[serve.py](serve.py) `READ_STATE`） | 未讀先改仍然做得到 | Claude Code 是直接擋的。這裡不擋是因為 `old` 要完全吻合本來就擋住了錯誤的修改 |
+| **`edit_file` 的讀取狀態只換訊息、不擋操作**（[serve.py](serve.py) `READ_STATE`） | 未讀先改仍然做得到 | 有些 agent 是直接擋的。這裡不擋是因為 `old` 要完全吻合本來就擋住了錯誤的修改 |
 | **`READ_STATE` 永遠不清** | 一次 session 幾百筆，記憶體無所謂 | 真要淘汰換 `OrderedDict` 加上限 |
 | **原始碼指紋比 mtime 不比內容**（[serve.py](serve.py) `source_stamp`） | `touch` 與 `git checkout` 會誤觸 | 誤判的代價只是多重啟一次。真的嫌吵再換成讀檔算 sha1 |
 | **GPU 節點是寫死的 glob 清單**（[sandbox/bwrap.py](sandbox/bwrap.py) `GPU_NODES`） | 只有 NVIDIA 驗過，其餘照文件寫 | 在沙盒裡 `ls /dev` 看少了什麼，往清單補一條。細節見 [sandbox/README.md](sandbox/README.md) |
 | **容器後端不接 GPU** | docker／podman 裡沒有顯示卡 | `--gpus all` 需要 NVIDIA Container Toolkit，沒裝會讓 docker 直接失敗，所以不無條件加。要做就得先偵測 |
 | **重複失敗只比「工具名＋參數完全一樣」**（[07-tools.js](frontend/js/07-tools.js) `REPEAT_LIMIT`） | 差一個空白就繞過去 | 模型重試時通常原封不動送同一份。真的漏掉再做參數正規化 |
-| **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 同一個分頁裡，還原點的「屬於哪則對話」可能標錯 | 工作區已經跟著分頁走了（`Session`），但 chat id 還是行程一份。要準就把它移進 `Session` |
+| **`CURRENT_CHAT` 是一個全域變數**（[serve.py](serve.py)） | 兩個分頁同時在跑工具時，還原點的「屬於哪則對話」可能標錯 | 工作區已經跟著分頁走了（`Session`），但 chat id 還是行程一份。要準就把它移進 `Session`。**同一個分頁裡切對話已經不會標錯了** —— 網頁送的是「這一輪屬於哪則」（`runChat()`）而不是「現在看著哪則」 |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |
 | **「繼續」不是真的 resume** | 沒有 resume token 這種東西 | 就是拿同一份訊息再送一次，模型從最後那則接下去。Ollama 本來就這樣運作，沒有更好的做法 |
-| **子代理的深度上限是寫死的 2 層**（[serve.py](serve.py) `SUB_DEPTH_MAX`） | 更深的分工做不到 | Claude Code 用提示詞當煞車（有人在看帳單），這裡放著跑沒人看，所以是硬的。要放寬先想清楚「誰來收」 |
+| **子代理的深度上限是寫死的 2 層**（[serve.py](serve.py) `SUB_DEPTH_MAX`） | 更深的分工做不到 | 那套 agent 用提示詞當煞車（有人在看帳單），這裡放著跑沒人看，所以是硬的。要放寬先想清楚「誰來收」 |
 | **孤兒 worktree 只列不自動刪**（[serve.py](serve.py) `worktree_orphans`） | 重啟之後要人自己去 `/agents` 按一下才收得掉 | 「沒有人認得」不等於「可以刪」，分支上可能有成果。自動刪要先決定「什麼叫確定沒用了」，那是設計題不是工程題 |
 | **`/agents` 只看得到自己這個分頁的子代理** | 從別的分頁拿到 id 就追不到 | `Session` 之間刻意不互通（那正是多分頁隔離的意思）。要跨分頁查就得再開一支不分 Session 的端點，那會把隔離開一個洞 |
 | **worktree 的改動要人自己 merge** | 主代理拿到的是 diffstat 加一句 `git merge zackllmgui/xxxx`，最後那一下要人下 | 自動合撞到衝突會把工作區弄成一半合完的狀態，比「你自己 merge」更難收拾。見 [plan-agent.md](plan-agent.md) 2.13 |
@@ -1462,6 +1462,10 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
   詳見 [safety/README.md](safety/README.md) 與 `plan-agent.md` 第 5 節。
 - 子代理的 worktree **不是安全邊界**，是為了讓兩個會寫檔案的子代理平行跑而不互相蓋。
   它的檔案工具一樣由 `ws_path()` 擋，`run_shell` 一樣是逃生口。
+- **子代理改的檔案，在主工作區的「紀錄」分頁看不到還原點。** 備份與 journal 都寫在
+  它自己的 worktree 底下，worktree 收掉時一起消失。這不是遺失：它的改動已經 commit
+  在 `zackllmgui/xxxx` 分支上，要退回去用 git（不合、或 `git branch -D`）——
+  主工作區從頭到尾沒有被動過，所以本來就沒有東西要還原。
 - `/run` 的串流斷線就沒了：關掉分頁看不到同一次執行的輸出。
   要跨分頁存活的指令請用 `run_shell` 的 `background`，那條有 id、活在 serve.py 的行程裡。
 - **工具迴圈跑在瀏覽器裡。** 背景指令活得過關分頁，模型迴圈活不過 ——
@@ -1480,9 +1484,9 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 84 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 85 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
-node tests/test_gui.js       # 64 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+node tests/test_gui.js       # 66 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
                              #   --no-rules 拿掉系統提示、--tools=a,b 只送幾支工具，都是量用的

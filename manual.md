@@ -247,7 +247,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
   `prompt_eval_count` 回頭校正，用久了會貼近該模型的 tokenizer
 - 超過 75% 時用量條本身就能點下去壓縮；輸入框旁邊也有壓縮鍵，⋯ 選單裡同樣有
 - **壓縮**會請模型把較早的訊息濃縮成一份結構化摘要（目標／已完成／關鍵事實／
-  程式碼／待辦／注意事項），只保留最後兩輪原文。做法參考 Claude Code 的 `/compact`
+  程式碼／待辦／注意事項），只保留最後兩輪原文。做法參考常見的 `/compact`
 - 壓縮後可以**還原一次**（⋯ → 還原上次壓縮），摘要不理想時不會把對話弄丟
 - **過 75% 就先在背景把摘要算好**，真的按下去時直接換上，不用等那幾十秒
   （只在沒有在產生回覆時算 —— 本機通常只有一張卡，兩個生成搶同一張只會兩邊都慢）
@@ -285,7 +285,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 | 需要再開一道 | `write_file`、`edit_file` | 勾「允許修改檔案」 |
 | 計畫模式時 | `submit_plan` | 勾「計畫模式」，核准後才放行寫入工具 |
 
-**做得比較像 IDE agent 的幾件事**（參考 Claude Code、Codex、grok-build 的共同做法）：
+**做得比較像 IDE agent 的幾件事**（參考幾套 IDE agent 的共同做法）：
 
 - **待辦清單**：模型用 `todo_write` 列出步驟，輸入框上方會顯示「還剩 N 項」。
   跑十幾輪之後它才不會忘記最初的目標。
@@ -435,7 +435,10 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 原本的「在這些檔案裡找內容」。在這之前「測試檔在哪」只能一輪一輪 `list_dir`，
 而每多一輪就要模型重新吃一次整份 context —— 那是這個介面最貴的東西。
 
-**允許規則**（功能與工具 → 允許規則…）把「這次要不要放行」寫下來一次，不用每天重新點：
+**允許規則**把「這次要不要放行」寫下來一次，不用每天重新點。
+**規則只從確認卡上那顆「以後都放行」長出來** —— 沒有手動新增的表單，因為沒有人會
+自己去填 tool + pattern + action。有規則之後，功能與工具選單才會多出「允許規則…」
+那一列，點進去可以看目前有哪幾條、把不要的刪掉：
 
 | | |
 |---|---|
@@ -609,7 +612,7 @@ check_job  {"id": "job1", "wait": 60}
 實測：任務只說「算出 shapes 總數，寫成 wafer_counter.py」，跑到一半補一句
 「順便也把測試寫一寫」，模型收到之後待辦多了兩項（找測試慣例、跑測試確認會紅過）。
 
-> 這是 Claude Code 的做法。它的 binary 裡有 `queuedMessages`，以及一句寫死的
+> 這是商用 agent 的做法。它的 binary 裡有 `queuedMessages`，以及一句寫死的
 > `The user sent a new message while you were working:` —— 插話被當成**邊跑邊修方向**，
 > 不是打斷。另外兩條路都比較差：鎖住輸入框等於長任務跑十分鐘只能乾等；
 > 打字就立刻中斷會浪費正在跑的工具。
@@ -657,7 +660,7 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 
 會做這個是因為「改完要檢查」不該靠模型自律 —— 實測過，提示詞的效力遠不如
 工具描述與錯誤訊息。aider 的 `--auto-lint` 預設就是開的，這裡照抄。
-Claude Code 與 Cline 也有 hooks，但兩者都要使用者自己寫設定檔。
+其他 agent 也有 hooks，但都要使用者自己寫設定檔。
 
 **收工前的檢查**（同樣沒有設定，也沒有開關）
 
@@ -676,7 +679,7 @@ Claude Code 與 Cline 也有 hooks，但兩者都要使用者自己寫設定檔�
 刻意**不做**「改了程式就要跑測試」：那條在沒有測試的專案上永遠是誤報，
 而會誤報的自動提醒最後一定會被關掉。寫了測試沒跑，沒有第二種解釋。
 
-> 這是照 Claude Code 的 `Stop` hook 做的 —— 它的回傳可以帶 `additionalContext`，
+> 這是照商用 agent 的 `Stop` hook 做的 —— 它的回傳可以帶 `additionalContext`，
 > schema 上寫「the conversation continues so the model can act on it」。
 > 差別是那邊要使用者自己寫設定檔，這裡條件寫死。
 
@@ -695,7 +698,7 @@ Claude Code 與 Cline 也有 hooks，但兩者都要使用者自己寫設定檔�
 可是真正的原因常常是前兩種 —— 它會一直換，然後撞上前端的連續失敗上限，
 白燒兩輪。模型**自己**剛寫過的檔案不算「被改動」，不然它連改兩次就會被誤導。
 
-> Claude Code 是用同一份狀態直接**擋下**未讀先改（`File has not been read yet.
+> 有些 agent 是用同一份狀態直接**擋下**未讀先改（`File has not been read yet.
 > Read it first before writing to it.`）。這裡不擋：`old` 要完全吻合本來就擋住了
 > 錯誤的修改，多擋一層只會讓猜對的情況也不能改。這裡只換訊息。
 
@@ -1040,8 +1043,8 @@ ollamaGUI/
 │       └── 09-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 84 項： python tests/test_serve.py
-│   ├── test_gui.js         網頁 64 項： node tests/test_gui.js
+│   ├── test_serve.py       後端 85 項： python tests/test_serve.py
+│   ├── test_gui.js         網頁 66 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │

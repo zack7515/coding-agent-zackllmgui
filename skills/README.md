@@ -22,7 +22,7 @@
 塞進系統提示就是 90% 的時間在浪費 context。做成 skill 之後，
 **平常的成本是一行描述（約 20～30 token），用到才付全文的成本。**
 
-這個做法在 Claude Code、grok-build（它們的 `skills` 工具）都一樣。
+這個做法在幾套 IDE agent（它們的 `skills` 工具）都一樣。
 
 ---
 

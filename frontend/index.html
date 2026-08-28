@@ -240,18 +240,8 @@
 <div class="overlay hidden" id="rlOverlay">
   <div class="dialog wide">
     <h2>允許規則<button class="help-btn" id="rlHelp" title="規則怎麼比對">!</button></h2>
-    <div class="dialog-row">
-      <input id="rlTool" spellcheck="false" placeholder="工具（run_shell、edit_file、* ）"
-        style="flex:1; font-family:var(--mono);">
-      <input id="rlPattern" spellcheck="false" placeholder="樣式（pytest*、secrets/**）"
-        style="flex:1; font-family:var(--mono);">
-      <select id="rlAction" class="field" style="width:88px;">
-        <option value="allow">放行</option>
-        <option value="ask">要問</option>
-        <option value="deny">禁止</option>
-      </select>
-      <button class="mini" id="rlAdd">加入</button>
-    </div>
+    <!-- 手動新增的表單拿掉了：沒有人會自己填 tool + pattern + action。
+         規則只從確認卡的「以後都放行」長出來，這裡只負責看一眼與刪掉。 -->
     <div class="row-list" id="rlList"></div>
     <div class="note" style="font-family:var(--mono); font-size:11px;" id="rlPath"></div>
     <div class="dialog-actions">

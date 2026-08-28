@@ -322,7 +322,7 @@ def test_tool_defs_layers():
     """工具要依「有沒有工作區／有沒有開放修改」逐級開放，沒開放的不能出現在定義裡。"""
     serve.cur().ws = None
     serve.cur().write = False
-    serve.REQUIRE_PLAN = False
+    serve.cur().plan["on"] = False
     names = [t["function"]["name"] for t in serve.tool_defs()]
     # 不需要檔案系統的永遠在（load_skill 只要有 skills 資料夾就算）
     assert names == ["fetch_url", "todo_write", "ask_user_question", "load_skill"], names
@@ -342,6 +342,30 @@ def test_tool_defs_layers():
             assert f["description"] and f["parameters"]["type"] == "object", f
 
 
+def test_plan_mode_follows_the_tab():
+    """計畫模式要跟著分頁走。
+
+    工作區、修改權限、自動模式、待辦、MCP 都跟著分頁走了，這一個原本是行程一份 ——
+    A 分頁打開計畫模式，B 分頁的寫入工具會跟著被收走，而 B 什麼都沒做。
+    """
+    a, b = serve.session_for("plan-A"), serve.session_for("plan-B")
+    try:
+        with Workspace() as ws:
+            for s in (a, b):
+                s.ws, s.write = ws, True
+                s.plan.update(on=False, approved=True)
+            serve._CUR.s = a
+            a.plan.update(on=True, approved=False)
+            assert "edit_file" not in [t["function"]["name"] for t in serve.tool_defs()]
+            serve._CUR.s = b
+            assert "edit_file" in [t["function"]["name"] for t in serve.tool_defs()], \
+                "A 打開計畫模式把 B 的寫入工具收走了"
+    finally:
+        serve._CUR.s = None
+        serve.SESSIONS.pop("plan-A", None)
+        serve.SESSIONS.pop("plan-B", None)
+
+
 def test_todo_write():
     """待辦清單：字串、物件、標成完成三種寫法都要收得下來。"""
     out = serve.run_tool("todo_write", {"items": ["讀 calc.py", {"text": "修好 add", "done": True}]})
@@ -357,7 +381,7 @@ def test_plan_gate():
     """計畫模式：核准之前不給修改檔案的工具。"""
     with Workspace():
         serve.cur().write = True
-        serve.REQUIRE_PLAN = True
+        serve.cur().plan["on"] = True
         serve.cur().plan["approved"] = False
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "submit_plan" in names, names
@@ -366,12 +390,12 @@ def test_plan_gate():
         serve.run_tool("submit_plan", {"plan": "1. 改 calc.py\n2. 跑測試"})
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "edit_file" in names, names
-        serve.REQUIRE_PLAN = False
+        serve.cur().plan["on"] = False
         serve.cur().plan["approved"] = False
 
 
 def test_project_md():
-    """AGENTS.md / CLAUDE.md 要被讀進工具規則裡（Claude Code 與 Codex 的慣例）。"""
+    """AGENTS.md / CLAUDE.md 要被讀進工具規則裡（幾套 agent 的共同慣例）。"""
     with Workspace() as ws:
         assert serve.project_md() == ("", "")
         (ws / "AGENTS.md").write_text("這個專案一律用四格縮排。", encoding="utf-8")

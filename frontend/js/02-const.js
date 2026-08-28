@@ -119,7 +119,7 @@ const PRESETS = [
    '禁止：加入原文沒有的內容、擅自刪掉整段、把口語稿改成公文腔。']
 ];
 
-// 壓縮對話用的指令。做法參考 Claude Code 的 /compact：留下之後還會用到的事實，
+// 壓縮對話用的指令。做法參考常見的 /compact：留下之後還會用到的事實，
 // 丟掉寒暄與已經解決的枝節。
 const COMPACT_PROMPT =
   '你的工作是把一段對話紀錄壓縮成摘要，讓另一個模型只看摘要就能無縫接續這場對話。\n\n' +
@@ -276,7 +276,7 @@ function waitText(ms, thinking, showThink) {
 }
 
 // 現在正在做的那一項：第一個還沒完成的待辦。
-// 對照 Claude Code 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
+// 對照商用 agent 的 spinner，它會顯示 `Next: <下一項待辦>` —— 輪數與 token 數
 // 說明「跑了多少」，這一句說明「在幹嘛」，兩者缺一不可。
 function currentTodo(todos) {
   const t = (todos || []).filter(function (x) { return !x.done; })[0];
@@ -284,7 +284,7 @@ function currentTodo(todos) {
 }
 
 // 「模型說做完了」的那一刻要攔一次的依據。
-// 對照 Claude Code 的 Stop hook：它的回傳可以帶 additionalContext，
+// 對照商用 agent 的 Stop hook：它的回傳可以帶 additionalContext，
 // schema 原文寫「the conversation continues so the model can act on it」——
 // 也就是模型要停下來時還能被推回去繼續。這裡不做成可設定的 hook（那個拿掉了），
 // 條件寫死成一條：**寫了測試卻一次都沒跑過**。

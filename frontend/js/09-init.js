@@ -119,12 +119,8 @@ async function init() {
 
   $('avatarBtn').addEventListener('click', renameUser);
   $('hostHelp').addEventListener('click', openHostHelp);
-  $('rlAdd').addEventListener('click', addRuleFromDialog);
   $('rlClose').addEventListener('click', function () {
     $('rlOverlay').classList.add('hidden');
-  });
-  $('rlPattern').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); addRuleFromDialog(); }
   });
   $('rlHelp').addEventListener('click', openRulesHelp);
   $('thinkHelp').addEventListener('click', openThinkHelp);

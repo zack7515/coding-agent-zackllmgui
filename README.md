@@ -56,6 +56,9 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 
 ![檔案分頁](docs/shots/files.png)
 
+> 這個例子錄的是**單一代理**跑完一件事。後來加的子代理、worktree、自動壓縮不在裡面 ——
+> 那些看功能一覽。裡面每一支工具現在跑起來都還是一樣。
+
 > **venv 還是沙盒？兩個都是。** 沙盒是箱子，venv 是箱子裡的環境：
 > `setup_env` 在沙盒裡建 `.venv`，`run_tests` 再用那個 `.venv` 的 python 跑，全程沒有離開箱子。
 
@@ -67,7 +70,7 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 | **本機工具** | 讀檔、寫檔、列目錄、搜尋、`run_shell`、`run_tests`、`setup_env`、git、連網瀏覽 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
 | **沙盒** | Linux 用 bubblewrap、macOS 用 sandbox-exec、Windows 用容器。**預設關**，按鈕開。**顯示卡會自動接進去** |
-| **權限規則** | allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
+| **權限規則** | 確認卡上的「以後都放行」把這次的判斷寫成一條規則，不用每天重新點。allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
 | **改完自動檢查** | 模型寫完 `.py`／`.js` 自動跑 linter，錯誤直接回灌給它。不用設定、沒有開關 |
 | **收工前攔一次** | 寫了測試卻沒跑過就說「做完了」？推回去讓它跑完再收工 |
 | **中斷可以續跑** | 按停止之後一鍵接著跑，從斷掉的字接下去，不是重講一遍 |
@@ -145,7 +148,7 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 > 只跑**唯讀**的檢查，不跑 `black`／`prettier` 這種會改檔案的。
 > 在模型背後改掉檔案，它手上的內容就過期了，下一次 `edit_file` 的比對會對不上。
 > 這是 aider 的 `--auto-lint`（預設開）那一套 ——
-> 不是 Claude Code／Cline 那種要你自己寫一份 hooks 設定檔的做法。
+> 不是那些要你自己寫一份 hooks 設定檔的做法。
 
 ## 文件
 
@@ -201,8 +204,8 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 84 項
-node   tests/test_gui.js      # 網頁 64 項
+python tests/test_serve.py    # 後端 85 項
+node   tests/test_gui.js      # 網頁 66 項
 ```
 
 兩份都不需要安裝任何東西，也不需要 Ollama 在跑。
