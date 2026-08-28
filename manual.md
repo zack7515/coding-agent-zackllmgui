@@ -1129,6 +1129,8 @@ Stable Diffusion 這類後端，那是另一個專案。理由與細節寫在 [t
 
 **向量檢索（RAG）**：附加檔案是直接把全文放進 context，沒有切塊、沒有 embedding、
 沒有向量庫。檔案大到塞不下 `num_ctx` 時用量條會轉紅，這時請自己節錄。
+這一項是**還沒做**不是不做（見 [plan-agent.md](plan-agent.md) 2.2）——
+但只會為了**文件**做：找程式碼時 `search_files` 幾乎都贏過向量檢索。
 
 > PySide6 桌面版在 conda 環境會因為 `Library\bin` 內版本不同的 `Qt6Core.dll`
 > 而報 `DLL load failed`，必須用非 conda 的 Python 建 venv。網頁版沒有這個問題，
