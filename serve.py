@@ -81,6 +81,12 @@ ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁�
 BACKUP_DIR = ".zackllmgui-backup"
 WORKTREE_DIR = ".zackllmgui-worktrees"   # 隔離型子代理各自的 git worktree
 WORKTREE_MAX = 8                   # 同時最多幾份，忘了收的不會無限長
+WORKTREE_LINK = ("node_modules",)  # 開 worktree 時從主 repo 連過去的資料夾
+# ponytail: 一個名字就夠了。第二個出現時這裡是加一個字串，不是開一份設定檔 ——
+# 條件很嚴：純相依、名字全世界一樣、重建很貴。vendor/target 都還沒真的遇到。
+# .venv 刻意不連：那一份是 detect_python() 用讀的借過去的，連過去的話子代理的
+# setup_env 會裝進主專案。
+WORKTREE_SKIP = (BACKUP_DIR, WORKTREE_DIR) + WORKTREE_LINK
 # 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
 DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
              "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", "dist",
@@ -2188,7 +2194,7 @@ def agent_open(type_name: str = "", parent: str = "", chat: str = "",
     aid = f"a{int(time.time() * 1000) % 100000000:08d}{len(s.agents)}"
     ws = up["ws"] if up else ws_root().resolve()
     rec = {"id": aid, "type": t["name"], "tools": list(t["tools"]),
-           "isolation": "", "ws": ws, "branch": "", "root": None,
+           "isolation": "", "ws": ws, "branch": "", "root": None, "linked": [],
            "parent": str(parent or ""), "depth": depth, "chat": str(chat or "")[:64],
            "started": time.time(), "calls": 0, "last": None,
            "stopped": False, "why": "", "task": str(task or "")[:200]}
@@ -2197,7 +2203,7 @@ def agent_open(type_name: str = "", parent: str = "", chat: str = "",
     if t["isolation"] == "worktree" and not (up and up["isolation"]):
         info = worktree_add()
         rec.update(isolation="worktree", ws=info["ws"], branch=info["branch"],
-                   root=info["root"])
+                   root=info["root"], linked=info["linked"])
     elif up and up["isolation"]:
         rec.update(isolation="inherited", branch=up["branch"], root=up["root"])
     s.agents[aid] = rec
@@ -2237,7 +2243,20 @@ def worktree_add() -> dict:
     except Exception:
         pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
     git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
-    return {"ws": dst.resolve(), "branch": branch, "root": root}
+    # 沒進版控的東西不會跟過來，而 node_modules 重建一次要幾分鐘、還多佔一份磁碟。
+    # **連過去等於共用**：子代理在裡面 npm install 會動到主專案那一份，
+    # 兩個子代理同時裝也會互相蓋。agents/work.md 有告訴它不要自己裝。
+    linked = []
+    for name in WORKTREE_LINK:
+        src, at = root / name, dst / name
+        if not src.is_dir() or at.exists() or at.is_symlink():
+            continue          # 有進版控的話 checkout 裡已經有了，不能蓋掉真的那一份
+        try:
+            os.symlink(src, at, target_is_directory=True)
+            linked.append(name)
+        except Exception:
+            pass              # Windows 沒權限就算了：子代理自己會發現裝不起來
+    return {"ws": dst.resolve(), "branch": branch, "root": root, "linked": linked}
 
 
 def branch_unique(root: Path, branch: str) -> int:
@@ -2296,7 +2315,7 @@ def worktree_orphans() -> list:
             rec["changes"] = len([
                 ln for ln in git_at(Path(path), "status", "--porcelain").splitlines()
                 if ln.strip()
-                and not ln[3:].strip('"').startswith((BACKUP_DIR, WORKTREE_DIR))])
+                and not ln[3:].strip('"').startswith(WORKTREE_SKIP)])
         except Exception:
             pass
         out.append(rec)
@@ -2323,7 +2342,8 @@ def agent_view(rec: dict) -> dict:
     """給網頁看的樣子。Path 不能直接進 JSON，而且要看得出它現在在幹嘛。"""
     return {"id": rec["id"], "type": rec["type"], "tools": rec["tools"],
             "isolation": rec["isolation"], "path": str(rec["ws"]),
-            "branch": rec["branch"], "parent": rec["parent"], "depth": rec["depth"],
+            "branch": rec["branch"], "linked": rec.get("linked", []),
+            "parent": rec["parent"], "depth": rec["depth"],
             "chat": rec["chat"], "secs": int(time.time() - rec["started"]),
             "calls": rec["calls"], "last": rec["last"],
             "stopped": rec["stopped"], "why": rec["why"],
@@ -2420,9 +2440,12 @@ def agent_close(aid: str, force: bool = False) -> dict:
     try:
         # 自己的備份目錄與巢狀 worktree 不算「子代理做的事」——
         # 算進去的話每一份 worktree 都會回報有改動，那個訊號就沒有意義了
+        # 連過去的 node_modules 是**符號連結**不是資料夾，所以 .gitignore 裡的
+        # `node_modules/`（尾巴有斜線＝只比對資料夾）比對不到它，git 會回報 ?? node_modules。
+        # 不擋掉的話每一份 worktree 都會回報「有改動」，還會把一條斷掉的連結 commit 進分支。
         lines = [ln for ln in git_at(rec["ws"], "status", "--porcelain").splitlines()
                  if ln.strip()
-                 and not ln[3:].strip('"').startswith((BACKUP_DIR, WORKTREE_DIR))]
+                 and not ln[3:].strip('"').startswith(WORKTREE_SKIP)]
     except Exception:
         lines = []
     if lines:
@@ -2432,7 +2455,7 @@ def agent_close(aid: str, force: bool = False) -> dict:
             # 只收子代理做的事：自己的備份目錄與巢狀 worktree 不算，
             # 掃進去的話合併過來會把我們的內部檔案倒進使用者的專案
             git_at(rec["ws"], "add", "-A", "--", ".",
-                   f":(exclude){BACKUP_DIR}", f":(exclude){WORKTREE_DIR}")
+                   *[f":(exclude){d}" for d in WORKTREE_SKIP])
             git_at(rec["ws"], "commit", "-q", "-m", agent_commit_msg(rec))
             out["committed"] = True
             out["merge"] = f"git merge {rec['branch']}"

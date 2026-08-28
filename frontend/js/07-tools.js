@@ -1408,7 +1408,9 @@ async function runSubagent(args, depth, parent) {
     box.id = box.id || info.id;
     log('· 子代理 ' + info.id + '（第 ' + info.depth + ' 層'
       + (info.parent ? '，上層 ' + info.parent : '')
-      + (info.branch ? '，分支 ' + info.branch : '') + '）');
+      + (info.branch ? '，分支 ' + info.branch : '')
+      + (info.linked && info.linked.length ? '，借用 ' + info.linked.join('、') : '')
+      + '）');
   } catch (e) {
     el.querySelector('.st').textContent = '開不起來';
     return '子代理失敗：登記不了（' + e.message + '）';

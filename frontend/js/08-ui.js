@@ -761,6 +761,8 @@ async function openAgents() {
     const bits = [a.id, a.type, '第 ' + a.depth + ' 層'];
     if (a.parent) bits.push('上層 ' + a.parent);
     if (a.branch) bits.push(a.branch);
+    // 借過去的是同一份資料夾，不是複本 —— 在裡面裝套件會動到主專案
+    if (a.linked && a.linked.length) bits.push('借用 ' + a.linked.join('、'));
     bits.push(a.calls + ' 次工具');
     bits.push(a.secs + ' 秒');
     if (a.last) bits.push('最後 ' + a.last.tool);

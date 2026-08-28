@@ -2060,6 +2060,44 @@ def test_skill_listing_is_capped():
         serve.skills_list, serve.ALLOW_TOOLS = was, was_tools
 
 
+def test_worktree_links_node_modules_without_risking_it():
+    """worktree 借得到 node_modules，而且**收掉子代理不會刪到主專案那一份**。
+
+    這一項的風險全在收尾：`git worktree remove --force` 會刪掉整個資料夾，
+    如果它跟著符號連結走，使用者的 node_modules 就沒了。所以這裡驗的不是
+    「連起來了沒」，是**連結被刪掉之後，另一頭還在不在**。
+    """
+    with Workspace() as ws:
+        (ws / "node_modules" / "left-pad").mkdir(parents=True)
+        (ws / "node_modules" / "left-pad" / "index.js").write_text("x", encoding="utf-8")
+        (ws / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        git_repo(ws)
+        serve.cur().write = True
+        info = serve.agent_open("work")
+        wt = Path(info["path"])
+        try:
+            assert info["linked"] == ["node_modules"], info
+            assert (wt / "node_modules").is_symlink()
+            assert (wt / "node_modules" / "left-pad" / "index.js").read_text() == "x", \
+                "worktree 裡讀不到借過來的套件"
+
+            # 符號連結不是資料夾，所以 .gitignore 的 `node_modules/` 比對不到它 ——
+            # 不擋掉的話每一份 worktree 都回報「有改動」，還會 commit 一條斷掉的連結
+            with serve.as_agent(info["id"]):
+                serve.run_tool("write_file", {"path": "只有這個.txt", "content": "x"})
+            out = serve.agent_close(info["id"])
+            assert out["changes"] == 1, out["stat"]
+            files = git_out(ws, "show", "--name-only", "--format=", info["branch"])
+            assert "node_modules" not in files, files
+        finally:
+            if info["id"] in serve.cur().agents:
+                serve.agent_close(info["id"], force=True)
+            serve.cur().write = False
+
+        assert (ws / "node_modules" / "left-pad" / "index.js").is_file(), \
+            "收掉 worktree 把主專案的 node_modules 一起刪了"
+
+
 def test_close_never_deletes_a_branch_that_has_commits():
     """**乾淨不等於沒東西。** 子代理自己 commit 過的話，工作目錄是乾淨的，
     但分支上有成果 —— 只看乾不乾淨就 branch -D，那是把十分鐘的工作刪掉。

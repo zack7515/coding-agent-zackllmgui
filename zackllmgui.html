@@ -5279,7 +5279,9 @@ async function runSubagent(args, depth, parent) {
     box.id = box.id || info.id;
     log('· 子代理 ' + info.id + '（第 ' + info.depth + ' 層'
       + (info.parent ? '，上層 ' + info.parent : '')
-      + (info.branch ? '，分支 ' + info.branch : '') + '）');
+      + (info.branch ? '，分支 ' + info.branch : '')
+      + (info.linked && info.linked.length ? '，借用 ' + info.linked.join('、') : '')
+      + '）');
   } catch (e) {
     el.querySelector('.st').textContent = '開不起來';
     return '子代理失敗：登記不了（' + e.message + '）';
@@ -6285,6 +6287,8 @@ async function openAgents() {
     const bits = [a.id, a.type, '第 ' + a.depth + ' 層'];
     if (a.parent) bits.push('上層 ' + a.parent);
     if (a.branch) bits.push(a.branch);
+    // 借過去的是同一份資料夾，不是複本 —— 在裡面裝套件會動到主專案
+    if (a.linked && a.linked.length) bits.push('借用 ' + a.linked.join('、'));
     bits.push(a.calls + ' 次工具');
     bits.push(a.secs + ' 秒');
     if (a.last) bits.push('最後 ' + a.last.tool);

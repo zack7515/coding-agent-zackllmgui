@@ -86,6 +86,7 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 | **還原點** | 改檔案**與刪檔案**前自動備份（刪檔走 `delete_file`，不是 `rm`），紀錄分頁只顯示這輪對話的還原點，一鍵倒回去 |
 | **子代理** | 把一段查找丟給另一個 context 去做，只把結論帶回來。型別是 `agents/*.md` 裡的檔案，加一種不必改程式；**工具清單由 `serve.py` 強制**，唯讀的就是唯讀的。會改檔案的跑在自己的 git worktree 裡，所以可以平行跑 |
 | **子代理停得住** | 每張卡片一顆「中斷」；卡片捲走了打 `/agents` —— 列出還在跑的每一個（id、型別、第幾層、上層是誰），按下去連**後代與背景指令**一起停 |
+| **子代理跑得動測試** | worktree 是乾淨 checkout，沒進版控的東西不會跟過去 —— `.venv` 用讀的借、`node_modules` 用連的借，子代理不必先花好幾輪重建環境 |
 | **子代理的成果收得回來** | 改完自動 commit 到它自己的分支，回報時附上 `git diff --stat` 與一句可以直接貼的 `git merge`。`serve.py` 重啟過也不會有「沒人認得的資料夾」—— `/agents` 列得出來也收得掉 |
 | **對話存 IndexedDB** | 不再卡在 `localStorage` 的 5MB；一則對話一筆，只寫改動的那一則。**資料不出這台瀏覽器**，伺服器只出算力 |
 | **skills** | 對話框打 `/` 叫出，也可以讓模型自己判斷要不要載入。正文寫 `` !`git status` `` 就能帶著現場狀態載入；用不到的（工作區唯讀而它要改檔案）不會列給模型看 |
@@ -172,7 +173,7 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 83 項
+python tests/test_serve.py    # 後端 84 項
 node   tests/test_gui.js      # 網頁 64 項
 ```
 

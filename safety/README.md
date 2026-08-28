@@ -113,6 +113,14 @@ if target != root and root not in target.parents:
 可以平行跑而不互相蓋檔案，**不是為了把它關起來**。同一支 `ws_path()` 擋著它的檔案
 工具（root 換成 worktree），`run_shell` 一樣是逃生口，一樣要靠沙盒。
 
+**worktree 裡的 `node_modules` 是連過去的，不是複本。** 開 worktree 時，主 repo 的
+`node_modules` 會用符號連結接過去（重建一次要幾分鐘、還多佔一份磁碟）。
+邊界沒有因此鬆掉：`ws_path()` 是**解析過路徑之後**才比對根目錄，所以
+`write_file("node_modules/x")` 在子代理身上會被擋下來（實測回
+「路徑超出工作區」）—— 檔案工具穿不過那條連結。穿得過的是 `run_shell`，
+但它本來就是那個逃生口，一樣要靠沙盒。真正該知道的是：**在裡面 `npm install`
+會動到主專案那一份**，所以 `agents/work.md` 明講不要自己裝。
+
 **它會在你的 repo 裡建 commit，但只建在自己的分支上。** 收掉一個有改動的 `work`
 子代理時，`agent_close()` 會在**它自己的 worktree 裡** `git add -A` + `commit`，
 落在 `zackllmgui/<id>` 分支。你的分支、你的工作目錄、你的 index 都不會被動到 ——

@@ -327,9 +327,11 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
   到它自己的分支**然後把資料夾收掉，回報時附上 `git diff --stat` 與一句
   `git merge zackllmgui/xxxx`；要收下就貼那句，不要就 `git branch -D`。
   沒改動的連分支一起清掉。有了隔離之後，同一輪交辦好幾件 **兩種都能平行跑**。
-  worktree 是 git 開出來的乾淨 checkout，`.venv` 不在版控裡所以不會跟過去 ——
-  `run_tests` 會**自動借主專案那一份**，子代理不必先花好幾輪重建環境。
-  （JS 的 `node_modules` 還沒有，`npm test` 在 worktree 裡會失敗。）
+  worktree 是 git 開出來的乾淨 checkout，沒進版控的東西不會跟過去，所以兩樣是
+  **借**來的：`run_tests` 用主專案的 `.venv`，`node_modules` 是連過去的同一份
+  （子代理卡片上會寫「借用 node_modules」）。子代理不必先花好幾輪重建環境。
+  **借的是同一份不是複本**，所以子代理被交代不要自己 `npm install`／`pip install`；
+  真的缺套件它會寫進結論讓你決定。
 
   子代理可以再開下一層（深度上限 2 層，且要那個型別的 `tools` 裡有 `task`），
   下一層跑在同一份 worktree 裡。結論最後一行會給一個 id，主代理可以用
@@ -1038,7 +1040,7 @@ ollamaGUI/
 │       └── 09-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 83 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 84 項： python tests/test_serve.py
 │   ├── test_gui.js         網頁 64 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援

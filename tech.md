@@ -592,6 +592,37 @@ Session —— 回應裡的 `todos`／`plan` 仍然要是分頁自己的，切�
 幫它 commit 過，工作目錄都會是乾淨的。只看乾不乾淨就 `branch -D`，那是把成果刪掉。
 問不出來時回傳 1（當它有東西）：不刪比刪錯好。
 
+#### 借得到環境，才跑得動測試
+
+worktree 是 `git worktree add` 開出來的乾淨 checkout —— **沒進版控的東西一樣都不在**。
+子代理於是拿到一份跑不了測試的專案：python 沒有 `.venv`、JS 沒有 `node_modules`。
+不處理的話它會先花好幾輪重建環境，而且每一份 worktree 各佔一份磁碟。
+
+兩邊的解法不一樣，因為風險不一樣：
+
+- **python 用讀的借**：`detect_python()` 在 worktree 裡找不到 `.venv` 就回主 repo 那一份。
+  venv 的 site-packages 是絕對路徑，從哪個目錄跑都算數。**沒有連結**，
+  所以子代理的 `setup_env` 仍然建在自己的 worktree 裡，動不到主專案。
+- **node 只能連**：`npm` 認的是 `./node_modules`，沒有「指到別處」這種借法。
+  所以 `worktree_add()` 用符號連結接過去 —— **那就是同一份**，
+  在裡面 `npm install` 會動到主專案，兩個子代理同時裝也會互相蓋。
+  `agents/work.md` 因此明講不要自己裝套件。
+
+實作上兩件事非驗不可，兩件都跟符號連結的語意有關：
+
+1. **`git worktree remove --force` 會不會跟著連結把主專案的 node_modules 刪掉？**
+   實測不會（它 unlink 連結本身，不遞迴進去）。這是整件事唯一會造成資料遺失的路徑，
+   所以測試驗的是「連結被刪掉之後，另一頭還在不在」，不是「連起來了沒」。
+2. **`.gitignore` 的 `node_modules/` 比對不到它。** 尾巴那個斜線是「只比對資料夾」，
+   而符號連結在 git 眼裡是檔案 —— `git status` 於是回報 `?? node_modules`。
+   不擋掉的話每一份 worktree 都會回報「有改動」，收尾時還會把一條斷掉的連結
+   commit 進分支、合併過來就散在使用者的專案裡。所以 `WORKTREE_SKIP` 同時給
+   狀態比對與 `git add` 用，一份清單兩個地方，不會有一邊忘了改。
+
+邊界沒有鬆掉：`ws_path()` 是解析過路徑之後才比對根目錄，
+所以 `write_file("node_modules/x")` 在子代理身上照樣被擋（實測「路徑超出工作區」）。
+穿得過那條連結的只有 `run_shell` —— 它本來就是那個逃生口。
+
 #### 沒人認得的 worktree：不必另外存狀態
 
 `Session.agents` 活在行程裡，worktree 活在磁碟上。`serve.py` 改過原始碼會自己重啟，
@@ -1375,7 +1406,8 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **`check_job` 要有背景指令才送**（[serve.py](serve.py) `tool_defs`） | 模型看不到它，除非真的丟了背景指令 | 一支工具的定義每輪約 110 token（量過），而多數對話從頭到尾沒有背景指令。用既有的 `needs` 閘門，不是另做一套延後載入 —— 那一套量過之後不值得，見 [plan-agent.md](plan-agent.md) 第 1 節 |
 | **skill 的 `!`指令`` 最多 5 行、15 秒**（`SKILL_CMD_MAX`） | 想帶更多現場狀態就帶不了 | 那是 skill 不是腳本。要跑一串就寫成一支腳本，正文叫 `run_shell` 跑它 —— 那條路有完整的確認卡 |
 | **skill 清單的上限寫死 30 則／120 字**（[serve.py](serve.py) `SKILL_LIST_MAX`） | 第 31 個 skill 模型看不到（`load_skill` 指名還是叫得到） | 有些 agent 為此開了兩個設定，這裡的 context 小一個數量級，可調空間本來就不大 |
-| **worktree 只借 python 環境**（`detect_python`） | JS 專案的子代理跑不了 `npm test` | 借 `.venv` 安全（唯讀的執行環境），連結 `node_modules` 不安全（兩個子代理同時 `npm install`）。見 [plan-agent.md](plan-agent.md) 2.20 |
+| **只連 `node_modules` 一個名字**（[serve.py](serve.py) `WORKTREE_LINK`） | `vendor`／`target` 那些還是不在 | 條件很嚴：純相依、名字全世界一樣、重建很貴。第二個真的出現時這裡是加一個字串，不是開一份設定檔 |
+| **連過去的是同一份，不是複本** | 子代理 `npm install` 會動到主專案 | `npm` 認的是 `./node_modules`，沒有「指到別處」這種借法（`.venv` 有，所以那邊用讀的）。`agents/work.md` 明講不要自己裝 |
 | **MCP 連線不會主動關**（[serve.py](serve.py) `mcps`） | 換過幾個工作區之後，閒置的 stdio 行程留到收攤 | 閒置行程不花什麼，而「什麼時候沒人用了」要另外追一份狀態。真的變多就掛在 `SESSIONS_MAX` 淘汰那裡 |
 | **`.git/info/exclude` 寫不進去就算了**（[serve.py](serve.py) `worktree_add`） | 主目錄會多一筆未追蹤的 `.zackllmgui-worktrees/` | 不影響隔離本身，所以不讓它把整個開 worktree 的動作弄失敗 |
 | **子代理的 context 最多留 20 則**（[07-tools.js](frontend/js/07-tools.js) `SUB_KEEP`） | 更早的 `resume` id 會失效 | 每一則都是一整條對話，不能無限留。失效時模型重新交辦一次就好 |
@@ -1433,7 +1465,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 83 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 84 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
 node tests/test_gui.js       # 64 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree
