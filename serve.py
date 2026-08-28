@@ -1841,12 +1841,17 @@ def repo_map() -> str:
             cut = True
             break
         try:
-            mt = f.stat().st_mtime
+            st = f.stat()
+            key = (st.st_mtime_ns, st.st_size)
         except OSError:
             continue
+        # 大小要一起當快取鍵：檔案系統的 mtime 有顆粒度，同一格裡改兩次
+        # （模型連著兩次 edit_file 就會發生）拿到的是**同一個 mtime**，
+        # 只看 mtime 的話第二次的改動不會進地圖。實測 ext4 上兩次連續寫入
+        # 連 st_mtime_ns 都一模一樣，所以換成 ns 也救不了。
         hit = _MAP_CACHE.get(f)
-        if not hit or hit[0] != mt:
-            hit = (mt, file_symbols(f))
+        if not hit or hit[0] != key:
+            hit = (key, file_symbols(f))
             _MAP_CACHE[f] = hit
         lines.append(ws_rel(f) + ("：" + hit[1] if hit[1] else ""))
     if not lines:
@@ -3070,6 +3075,11 @@ def run_tool(name: str, args: dict) -> str:
         raise PermissionError("這個工具需要先設定工作區資料夾")
     if name in WRITE_TOOLS and not cur().write:
         raise PermissionError("檔案修改沒有開啟（介面：功能與工具 → 修改檔案）")
+    # 計畫模式跟工具白名單同一個道理：`tool_defs()` 那一層只是「不要讓它看到」，
+    # 送到 /tool 的是一個字串，模型幻覺出 write_file 就繞過去了。核准是使用者按的，
+    # 所以要在伺服器這一端認。
+    if name in WRITE_TOOLS and cur().plan["on"] and not cur().plan["approved"]:
+        raise PermissionError("計畫模式：計畫還沒核准，先用 submit_plan 送出計畫")
     # deny 規則在伺服器這一端擋。只在瀏覽器擋的話，那不是邊界是提醒。
     hit = rule_match(name, args)
     if hit and hit["action"] == "deny":

@@ -40,6 +40,60 @@
 
 ---
 
+## 1.5 md 管什麼、程式碼管什麼
+
+skill 與子代理都是「寫一份 md 丟進資料夾就多一個」，所以很容易以為管控也在 md 裡。
+不是：**md 只決定「有哪些東西、模型看得到什麼」，每一道擋得住的關卡都在程式碼裡。**
+而且多數是刻意的兩層 —— 網頁那層負責「不讓模型看到」，`serve.py` 那層負責
+「就算它硬叫也叫不動」。
+
+| 區塊 | md 說了算的部分 | 程式碼說了算的部分 |
+|---|---|---|
+| 工具 | 沒有 md，定義是 Python 資料（`tools/schemas.py`） | 開不開放、參數、路徑、風險、上限 |
+| skill | 有哪幾份、名字、描述、步驟正文 | 能不能列出、能不能跑指令、名稱不能爬出去 |
+| 子代理 | 有哪幾種、宣告拿哪些工具、要不要 worktree | 白名單真的擋、層數、同時數、id 認證、中斷 |
+| 系統提示 | `CLAUDE.md` / `AGENTS.md` 的專案說明 | `agent_rules()` 依開放狀態拼字串 |
+
+### 程式碼在擋的
+
+| 管什麼 | 在哪 |
+|---|---|
+| 路徑不能出工作區 | `ws_path()` —— `resolve()` 連 symlink 一起解，`..`／絕對路徑／`~` 全擋 |
+| 機密檔案與目錄 | `DENY_DIRS`、`DENY_FILES` |
+| 不可還原的指令直接拒絕 | `BLOCKED_CMDS` → `build_command()` |
+| 危險指令一定跳確認卡 | `command_risk()`，原字串與 `canon()` 兩種形式都比對 |
+| 旗標寫法正規化 | `canon()` —— `rm -rf` 的 19 種寫法收斂成一種 |
+| 「工作區內全自動」的範圍 | `ws_scoped()`，解析不出來一律回 `False`（照樣問） |
+| 跑不出工作區 | `sandbox/`（bwrap／seatbelt／container），作業系統層 |
+| 需要工作區、需要「修改檔案」開關 | `run_tool()` 的 `WS_TOOLS`／`WRITE_TOOLS` |
+| 計畫核准之前不能改檔案 | `run_tool()` 檢 `plan["approved"]`，不只是 `tool_defs()` 少送定義 |
+| 子代理的工具白名單 | `agent_guard()`，掛在 `run_tool()` 第一行 |
+| 子代理永遠拿不到的工具 | `AGENT_NEVER` —— md 的 `tools:` 寫進去也沒用 |
+| 子代理層數、同時數 | `SUB_DEPTH_MAX`＝2、`WORKTREE_MAX`＝8 |
+| 子代理 id 只認伺服器發的 | `bind_agent()` |
+| 模型改得到的 skill 不准跑指令 | `skill_trusted()` |
+| skill 的 `` !`指令` `` 走 run_shell 同一套關卡 | `auto_cmd_block()` |
+| skill 名稱不能寫成路徑 | `skill_find()` 比對 `Path(name).name` |
+| deny 規則 | `run_tool()` 的 `rule_match()` |
+| allow 不能蓋過風險指令 | `autoApprove()` 的判斷順序 |
+| 跨站請求 | `same_site()` |
+| 各種上限 | `TOOL_OUTPUT_LIMIT` 8000、`MAX_FILE_BYTES` 400K、`SHELL_TIMEOUT` 30 秒 |
+
+### 只是宣告，不會擋
+
+| 寫在哪 | 實際效力 |
+|---|---|
+| `SKILL.md` 的 `tools:` | **只拿來篩清單**（`skills_usable()`）：用不動的不列進系統提示，但 `load_skill` 指名照樣叫得到。刻意的 —— skill 是流程說明不是沙盒，做到一半被擋住比多給幾支工具糟 |
+| `SKILL.md` 的正文步驟 | 提示 |
+| `agents/*.md` 的正文 | 提示（`tools:` 那一行例外，那是規則） |
+| `agent_rules()` 的操作規則 | 提示 |
+| `CLAUDE.md` / `AGENTS.md` | 提示 |
+
+分辨的方法只有一個：**問「模型幻覺出一個名字、硬送到 `/tool`，會怎樣」。**
+會被拒絕的是規則，會照做的是提示。
+
+---
+
 ## 2. 擋得住什麼（有測試）
 
 `tests/test_serve.py::test_workspace_jail` 逐條驗證：

@@ -378,7 +378,11 @@ def test_todo_write():
 
 
 def test_plan_gate():
-    """計畫模式：核准之前不給修改檔案的工具。"""
+    """計畫模式：核准之前不給修改檔案的工具，而且**硬叫也叫不動**。
+
+    兩層是刻意的，跟 agent_guard 同一個理由：少送定義只是「不要讓它看到」，
+    送到 /tool 的是一個字串，模型幻覺出 write_file 就繞過去了。
+    """
     with Workspace():
         serve.cur().write = True
         serve.cur().plan["on"] = True
@@ -386,8 +390,19 @@ def test_plan_gate():
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "submit_plan" in names, names
         assert "edit_file" not in names and "write_file" not in names, names
+        for bad, args in (("write_file", {"path": "x.txt", "content": "x"}),
+                          ("edit_file", {"path": "pkg/calc.py", "old": "a", "new": "b"})):
+            try:
+                serve.run_tool(bad, args)
+                assert False, f"計畫沒核准，{bad} 應該要被伺服器擋下來"
+            except PermissionError as e:
+                assert "計畫" in str(e), e
+        # 唯讀的照跑：擋的是修改，不是整台服務
+        assert serve.run_tool("list_dir", {"path": "."})
 
         serve.run_tool("submit_plan", {"plan": "1. 改 calc.py\n2. 跑測試"})
+        # 核准之後真的寫得了
+        assert serve.run_tool("write_file", {"path": "核准後.txt", "content": "x"})
         names = [t["function"]["name"] for t in serve.tool_defs()]
         assert "edit_file" in names, names
         serve.cur().plan["on"] = False
@@ -622,7 +637,9 @@ def test_repo_map_tells_the_model_where_things_are():
             "只列頂層符號，方法不列（那會爆掉預算）"
         # 金鑰不能跟著進 context —— 走的是同一支 ws_walk，跟檔案工具同一份封鎖清單
         assert ".env" not in m and "secret.env" not in m, m
-        # 改過的檔案要重算，沒改的不重解析（快取鍵是 mtime）
+        # 改過的檔案要重算，沒改的不重解析。這兩次寫入落在**同一個 mtime 格子裡**
+        # （ext4 上連 st_mtime_ns 都一樣），所以快取鍵只看 mtime 的話這裡會拿到舊的 ——
+        # 模型連著兩次 edit_file 就是這個情況。
         (ws / "pkg" / "calc.py").write_text("def sub(a, b):\n    return a - b\n",
                                             encoding="utf-8")
         assert "pkg/calc.py：sub" in serve.repo_map()

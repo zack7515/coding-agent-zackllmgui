@@ -1185,9 +1185,11 @@ const FEATURES = [{
 | `submit_plan` + 計畫模式 | 先講計畫、人核准，寫入工具才出現在 `tool_defs()` 裡 | `Session.plan`（`on` / `approved` / `text`） |
 | `AGENTS.md` 自動讀入 | 不同 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），講的是同一件事 | `project_md()`，接在 `agent_rules()` 最後 |
 
-計畫模式的閘門做在 `tool_defs()` 而不是 `run_tool()`：沒核准之前，
-寫入工具**根本不會出現在送給模型的清單裡**。跟其他分層一樣的理由——
-看不到才不會一直嘗試。
+計畫模式的閘門做在**兩層**：`tool_defs()` 那一層沒核准之前寫入工具
+根本不會出現在送給模型的清單裡（跟其他分層一樣的理由 —— 看不到才不會一直嘗試），
+`run_tool()` 那一層再檢一次 `plan["approved"]`。原本只有前者，
+那跟 `agent_guard()` 當初要解決的是同一個洞：送到 `/tool` 的只是一個字串，
+模型幻覺出 `write_file` 就繞過去了。核准是使用者按的，所以要在伺服器這一端認。
 
 `ask_user_question` 是第一支「client」類的工具：schema 由後端提供（模型要看得到），
 執行卻只能在前端。`run_tool()` 對它直接丟錯，避免哪天有人從 curl 打進來卡住。
