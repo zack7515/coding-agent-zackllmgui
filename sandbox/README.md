@@ -7,7 +7,8 @@
 
 ```bash
 python -m sandbox                    # 這台能用哪一種、擋不擋得住、多花多少時間
-python -m sandbox --backend=container
+python -m sandbox --backend=container   # 或裸寫：python -m sandbox container
+python -m sandbox --backend=container --image=gcc:14   # 換映像檔再驗一次
 python -m sandbox --json
 ```
 
@@ -40,7 +41,7 @@ bwrap 與 seatbelt 是核心層的限制：程序還是跑在你的機器上，�
 | | bwrap | docker |
 |---|---|---|
 | 冷啟動 | **7 ms** | 176 ms |
-| pytest / node / gcc | 宿主機有就有 | 映像檔沒有就沒有 |
+| pytest / node / gcc | 宿主機有就有 | 映像檔沒有就沒有（預設 `python:3.13-slim` **三個都沒有**）|
 | GPU | **自動接進去**，不用開關（見下） | 要 NVIDIA Container Toolkit + CUDA 映像檔，而且要 `gpu=True` —— **目前 serve.py 不會傳**，所以容器後端沒有 GPU |
 | 記憶體／CPU 上限 | ❌ 沒有（要 cgroup） | ✅ 4g／4 cpu／512 pids |
 

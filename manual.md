@@ -36,6 +36,7 @@ python serve.py --workspace ~/code/app             # 指定工作區（預設是
 python serve.py --allow-write                      # 啟動時就允許改檔案（每次仍要確認）
 python serve.py --sandbox                          # 開機就把 run_shell 關進沙盒（自己挑後端）
 python serve.py --sandbox container                # 指定後端：bwrap / seatbelt / container
+python serve.py --sandbox-image gcc:14             # 換容器映像檔（預設那個沒有編譯器）
 python serve.py --no-tools                         # 關掉本機工具（預設是開著的）
 python serve.py --trust-remote                     # 非本機的瀏覽器也能開工具（見下方警告）
 ```
@@ -291,7 +292,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 | | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
 |---|---|---|---|---|
 | **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
-| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`） | `ctest` / `make test` / `make check` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only` / MSVC `/Zs`（需 `compile_commands.json`） | `ctest` / `make test` / `make check` | ✅ |
 | JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
 | 其他 | 只列檔名 | — | — | — |
 
@@ -307,13 +308,30 @@ C/C++ 專案裡：
   就會生在 `build/` 底下）。沒有就跳過 —— 直接猜編譯旗標會在任何有自訂 include
   路徑的專案上噴「找不到標頭檔」，那種誤報比沒有更糟。
 - 標頭檔（`.h` / `.hpp`）不做語法檢查：它們不在 `compile_commands.json` 裡。
+- 編譯器認得 GCC／Clang（含交叉編譯器與版號，`arm-none-eabi-gcc`、`clang++-18` 都算）
+  與 MSVC（`cl.exe`／`clang-cl` 用 `/Zs`）。**認不出來的一律跳過** ——
+  猜錯旗標換來的是一整排誤報，比沒有檢查糟得多。
 - **`rm -rf build` 會被擋**，用 `rm -r build`（或 `cmake --build build --target clean`）。
+  Windows 上對應的是 `rmdir /s build`，加了 `/q` 一樣會被擋。
 - **沙盒沒有網路**，所以 `FetchContent`、vcpkg、conan 一定失敗。相依套件要先在沙盒外
   準備好（例如 `apt install libgtest-dev`，或先在沙盒外跑一次 `cmake` 讓它下載完）。
 
 > **C# 沒有支援。** `dotnet build` 是整包編譯，每寫一個檔跑一次撐不住，
 > 所以做不出 per-write 的語法檢查。用 `run_shell` 跑 `dotnet test` 一樣可以，
 > 但上表那四格全部是空的。
+
+**C/C++ 在 Windows 上**（Linux／macOS 不用管這一段）：
+
+- 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
+- **開了沙盒**的話 Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
+  裡沒有編譯器也沒有 cmake。換一個有工具鏈的：
+  `python serve.py --sandbox container --sandbox-image gcc:14`。
+  這個旗標只影響容器後端 —— bubblewrap／sandbox-exec 用的本來就是你機器上的工具鏈。
+- `compile_commands.json` 只有 Ninja 與 Makefile 產生器會生，Visual Studio 產生器不會。
+  要那條語法檢查的話 `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`。
+- 語法檢查跑在**宿主機**上，用宿主機的編譯器。所以在容器裡 configure 出來的
+  `compile_commands.json` 對不起來（裡面記的是容器內的 `/work/...`），那一格會是空的。
+  要它就在沙盒外先 configure 一次。
 
 **做得比較像 IDE agent 的幾件事**（參考幾套 IDE agent 的共同做法）：
 
@@ -393,7 +411,8 @@ C/C++ 專案裡：
 
   挑不出來的話按鈕會直接告訴你這個平台該裝什麼。核心層的做法（bubblewrap／sandbox-exec）
   排在容器前面，因為它**不換掉檔案系統** —— pytest、node、gcc、CUDA 都還在原地，
-  而容器裡「映像檔沒裝的就是沒有」。這台實測 bubblewrap 每次多花 7 ms，docker 是 176 ms。
+  而容器裡「映像檔沒裝的就是沒有」。預設映像檔是 `python:3.13-slim`，
+  裡面**沒有編譯器也沒有 cmake**；要跑 C/C++ 就換一個：`--sandbox-image gcc:14`。這台實測 bubblewrap 每次多花 7 ms，docker 是 176 ms。
   三支工具裡只有 `setup_env` 開網路 —— pip 一定要連得出去，開放範圍就縮在那一步。
   細節與「加一個後端要寫什麼」在 [sandbox/README.md](sandbox/README.md)。
 
@@ -460,11 +479,14 @@ C/C++ 專案裡：
 
 | 等級 | 例子 | 行為 |
 |---|---|---|
-| ⛔ 擋下 | `rm -rf`、`mkfs`、`dd of=/dev/…`、`shutdown`、`git push --force`、`curl … \| sh`、fork bomb | **直接拒絕執行**，要跑請自己去終端機 |
-| ⚠ 風險 | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill` | 確認卡標紅講明原因，**自動模式一定會問你**（唯一例外：「工作區內全自動」＋動的檔案全在工作區裡，或沙盒開著）|
+| ⛔ 擋下 | `rm -rf`、`mkfs`、`dd of=/dev/…`、`shutdown`、`git push --force`、`curl … \| sh`、fork bomb、`rmdir /s /q`、`del /s`、`format c:`、`diskpart` | **直接拒絕執行**，要跑請自己去終端機 |
+| ⚠ 風險 | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill`、`del`／`rmdir`／`Remove-Item` | 確認卡標紅講明原因，**自動模式一定會問你**（唯一例外：「工作區內全自動」＋動的檔案全在工作區裡，或沙盒開著）|
 | 一般 | `pytest`、`ls`、`git status`、`grep` | 照一般流程 |
 
 判斷寫在 `serve.py` 的 `command_risk()`，確認卡顯示的是它的結論（不是前端自己猜）。
+後面那幾條是 Windows 的寫法：**沙盒沒開的話 `run_shell` 走的是 `cmd`**，
+POSIX 那幾條一條都打不到，而 `rmdir /s /q` 跟 `rm -rf` 是同一件事。
+尺度也一樣 —— 遞迴不擋（照樣要你點），**遞迴又不問**才擋。
 
 **找檔案不必一層一層點。** `search_files` 只給 `glob` 不給 `pattern` 就是
 「照檔名找檔案」（`test_*.py`、`pkg/*.py`），回的是路徑清單。兩個都給就是

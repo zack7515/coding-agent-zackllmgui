@@ -13,6 +13,11 @@ from .probe import bench, probe
 def main() -> int:
     as_json = "--json" in sys.argv
     want = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--backend=")), "")
+    # 裸的後端名字也接受：`python -m sandbox container` 看起來就該能用，
+    # 以前它會安靜地忽略掉那個字然後去測 bwrap —— 測錯後端還說「全部通過」。
+    want = want or next((a for a in sys.argv[1:] if not a.startswith("-")), "")
+    image = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--image=")), "")
+    opts = {"image": image} if image else {}
     info = detect()
 
     if as_json and not info["ok"]:
@@ -28,11 +33,11 @@ def main() -> int:
         return 1
 
     mod = pick(want)
-    print(f"\n會用        {mod.NAME}")
+    print(f"\n會用        {mod.NAME}" + (f"（映像檔 {image}）" if image else ""))
     for note in mod.describe()["notes"]:
         print(f"  · {note}")
 
-    rows = [] if "--bench" in sys.argv else probe(mod.NAME)
+    rows = [] if "--bench" in sys.argv else probe(mod.NAME, **opts)
     if rows:
         print()
         for name, ok, text, why in rows:
@@ -41,7 +46,7 @@ def main() -> int:
                 print("      " + text.replace("\n", "\n      "))
 
     print("\n開銷（每次呼叫，平均）")
-    b = bench(mod.NAME, 3 if rows else 5)
+    b = bench(mod.NAME, 3 if rows else 5, **opts)
     for k, v in b.items():
         print(f"  {k:22} {v * 1000:8.1f} ms")
     for k, v in b.items():

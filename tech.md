@@ -564,6 +564,90 @@ C# 沒有 `-fsyntax-only` 的對應物，`compile_commands.json` 那套也不適
 用 `run_shell` 跑 `dotnet test` 一樣做得完，但上面那四條回饋線一條都給不了 ——
 與其做半套讓人以為有，不如寫清楚沒有。
 
+### Windows：三個地方都是「在 Linux 上看不見」的那種壞
+
+C/C++ 這四條線在 Linux 上實測過就收工了。回頭照 Windows 走一遍，壞的三個地方
+有一個共同點：**在 Linux 上跑測試永遠不會紅**。
+
+**一、`shlex.split` 把路徑吃掉。** `compile_commands.json` 的 `command` 欄是一整條
+命令列字串，得自己拆。`shlex` 預設是 POSIX 引號規則，反斜線在那套規則裡是跳脫字元：
+
+```
+C:\VS\bin\cl.exe  →  C:VSbincl.exe
+```
+
+拆出來的執行檔不存在，`subprocess` 丟 `FileNotFoundError`，被 `except Exception`
+接住回空字串 —— 於是 Windows 上這條線是**安靜地不存在**的。連 MinGW 的 g++
+都一起陪葬。修法是 `posix=False`，代價是引號會留在 token 裡，再脫一層。
+
+**二、`-fsyntax-only` 不是通用旗標。** 那是 GCC/Clang 的寫法，MSVC 的對應物是 `/Zs`。
+更糟的是這裡會把 `-c` 拿掉（GCC 只檢查語法就不該產出東西），`cl.exe` 收到之後
+會真的去**連結**，在別人的建置目錄裡留下 `.obj` 跟 `.exe`。
+所以現在先認驅動程式是誰：GCC 家族（含 `arm-none-eabi-gcc`、`clang++-18` 這種
+交叉編譯器與版號）給 `-fsyntax-only`，`cl`／`clang-cl` 給 `/Zs` 並清掉 `/Fo`／`/Fd`，
+**認不出來的直接回 None**。這條跟「一定要用 compile_commands.json」是同一個判斷：
+猜錯旗標換來的是一整排誤報，比沒有檢查糟得多。
+
+**三、容器映像檔裡沒有編譯器。** Windows 上唯一的沙盒後端是容器，而預設映像檔是
+`python:3.13-slim` —— 沒有 gcc、沒有 cmake、沒有 make。實測：
+
+```
+$ docker run --rm python:3.13-slim sh -lc 'command -v gcc cmake make'
+（沒有輸出）
+```
+
+`container.wrap()` 本來就收 `image=` 參數，但**從來沒有人傳過**。接上去就好：
+新增 `--sandbox-image`，兩個 `sandbox.wrap()` 呼叫點帶著走。`bwrap.wrap()` 的簽名是
+`**_`，多收一個用不到的參數不會怎樣。實測換成 `gcc:14.2` 之後，容器後端跑得完
+`make test`（那個映像檔有 gcc 跟 make，沒有 cmake —— 這正好說明為什麼旗標要交給使用者）。
+
+順便一提，這三個修完之後，Windows 上「寫檔後語法檢查」還是有一格空的：檢查跑在
+**宿主機**上，容器裡 configure 出來的資料庫記的是容器內路徑（`/work/…`），對不起來。
+不做路徑對映 —— 會用容器後端的機器通常宿主機上本來就沒有編譯器，對映完照樣跑不動。
+
+### 順便發現的：規則裡寫著一支送不出去的工具
+
+`agent_rules()` 的開場白就寫著「沒開放的功能一個字都不要提」，然後底下兩句話違反它：
+
+- `- 一次做完一件事就用 run_tests 驗證` —— 在 `cur().write` 底下無條件送出，
+  但 `run_tests` 有 `needs: "python"` 的閘門，C/C++ 專案根本收不到那支工具。
+- `- C/C++：…沒有 run_tests 可用，那支是 pytest 專用的。` —— 這句更微妙：
+  它是**否定句**，本意是防止模型亂猜。但講出那個名字就是把它種進 context。
+  工具清單本來就是權威，不存在的東西連否定句都不該出現。
+
+第二句是加測試的時候才抓到的 —— 測試寫成「規則裡出現的每一個工具名字，都必須
+真的在 `tool_defs()` 裡」，正規表示式一掃就掃出來了。這種測試比逐條 assert 好，
+因為它管的是**規律**不是條文，以後多加一條規則也一樣受它管。
+
+### 沙盒那句話講反了會怎樣
+
+同一個函式裡還有一句：
+
+```
+- run_shell 與 run_tests 在容器裡跑：只看得到工作區、**沒有網路**。
+```
+
+不管後端是誰都這樣講。但 Linux 上預設的後端是 bwrap，它**沒有換掉檔案系統** ——
+整台機器唯讀掛進去，`/usr/include`、gcc、cmake、CUDA 全都在。跟一個 bwrap 底下的
+模型說「只看得到工作區」，它會以為系統標頭與編譯器不存在，然後開始想辦法自己弄一份。
+
+後端模組上早就有 `SAME_FS` 這個旗標（`sandbox_python()` 就在用），照它分兩句話寫：
+
+| 後端 | 講法 |
+|---|---|
+| bwrap／seatbelt | 工作區以外唯讀、沒有網路，**系統的工具鏈都還在，照常用** |
+| container | 只看得到工作區、沒有網路，**映像檔裡沒裝的東西就是沒有** |
+
+### `rmdir /s /q` 跟 `rm -rf` 是同一件事
+
+`command_risk()` 的十二條規則全是 POSIX 的。而沙盒**預設是關的**，關著的時候
+`run_shell` 走的是本機 shell —— Windows 上那是 `cmd`，於是那十二條一條都打不到。
+
+補的四條照原本的尺度走：`rm -r` 放行（要點確認）、`rm -rf` 擋，
+所以 `rmdir /s` 放行、`rmdir /s /q` 擋。另外三條是 `del /s`、`format c:`、`diskpart`。
+`\bformat\s+[a-z]:` 這種寫法是刻意的 —— `"{}".format(x)` 的 `format` 後面接的是
+括號不是空白，不會誤殺。
+
 ## 提示詞、工具描述、錯誤訊息，哪個有用
 
 量過：`test_agent.py --no-rules` 把 `agent_rules()` 整段拿掉，同一個任務同樣通過

@@ -596,6 +596,26 @@ def test_command_risk():
     assert serve.canon("rm x -r -f") == "rm -fr x --recursive --force"
 
 
+def test_windows_delete_commands_are_gated_too():
+    """沙盒沒開的話 Windows 上的 run_shell 走的是 cmd —— 上面那些 POSIX 規則一條都打不到。
+
+    `rmdir /s /q` 跟 `rm -rf` 是同一件事，以前完全放行。尺度跟 rm 那條對齊：
+    遞迴不擋（救得回來的照樣要問），**遞迴又不問**才擋。
+    """
+    for cmd in ["rmdir /s /q build", "rmdir /Q /S build", "rd /s /q x",
+                "del /s /q *.obj", "format c:", "diskpart"]:
+        assert serve.command_risk(cmd)[0] == "block", cmd
+
+    for cmd in ["rmdir /s build", "rmdir build", "del build\\a.obj", "erase *.obj",
+                "Remove-Item -Recurse x"]:
+        assert serve.command_risk(cmd)[0] == "risky", cmd
+
+    # 不能反過來咬到 Linux 上正常的東西
+    for cmd in ["make test", "cmake --build build", "ctest --test-dir build",
+                "python -c \"print('{}'.format(1))\"", "gcc -o a a.c"]:
+        assert serve.command_risk(cmd)[0] == "ok", cmd
+
+
 def test_same_site_blocks_other_pages():
     """別的網站不能指揮這支服務 —— 確認卡在網頁那端，繞過網頁就繞過確認卡。"""
     host = "127.0.0.1:5678"
@@ -1647,6 +1667,90 @@ def test_c_syntax_check_needs_real_compile_flags():
         assert serve.lint_after_write(ws / "inc" / "util.h") == ""
 
 
+def test_cc_flags_survives_windows_paths_and_msvc():
+    """compile_commands.json 在 Windows 上長得不一樣，兩個地方會壞。
+
+    1. shlex 預設是 POSIX 引號規則，會把 `C:\\VS\\bin\\cl.exe` 的反斜線
+       當成跳脫字元吃掉 —— 變成 `C:VSbincl.exe`，連 MinGW 的 g++ 都找不到。
+    2. `-fsyntax-only` 是 GCC/Clang 的寫法，MSVC 不認得；而且這裡會把 `-c`
+       拿掉，cl.exe 就會真的去連結，在別人的建置目錄裡留下 .obj 與 .exe。
+
+    認不得的驅動程式一律回 None：猜錯旗標換來一整排誤報，比沒有檢查糟得多。
+    """
+    def db(ws, cmdline, name):
+        src = ws / name
+        src.write_text("int main(){ return 0; }\n", encoding="utf-8")
+        (ws / "compile_commands.json").write_text(json.dumps(
+            [{"directory": str(ws), "file": str(src),
+              "command": cmdline + " " + str(src)}]), encoding="utf-8")
+        return src
+
+    with Workspace() as ws:
+        serve.CC_POSIX = False                      # 在 Linux 上假裝自己是 Windows
+        try:
+            src = db(ws, r'"C:\VS\bin\cl.exe" /nologo /TP /Iinc /FoCMakeFiles\a.obj'
+                         r' /Fdx.pdb /c', "a.cpp")
+            argv, _ = serve.cc_flags(src)
+            assert argv[0] == r"C:\VS\bin\cl.exe", "反斜線被 shlex 吃掉了：" + argv[0]
+            assert argv[1] == "/Zs", "MSVC 的語法檢查旗標是 /Zs，不是 -fsyntax-only"
+            assert not [a for a in argv if a.lower().startswith(("/fo", "/fd", "/c"))], \
+                "輸出旗標沒清乾淨，cl 會真的產出檔案：" + str(argv)
+            assert "/Iinc" in argv, "include 路徑要留著，那才是整件事的重點"
+
+            src = db(ws, r'C:\msys64\mingw64\bin\g++.exe -std=c++17 -IC:\proj\inc -c',
+                     "b.cpp")
+            argv, _ = serve.cc_flags(src)
+            assert argv[0].endswith(r"mingw64\bin\g++.exe"), argv[0]
+            assert argv[1] == "-fsyntax-only" and r"-IC:\proj\inc" in argv, argv
+        finally:
+            serve.CC_POSIX = os.name != "nt"
+
+        # 認不得的驅動程式：不要猜旗標，直接不做這件事
+        src = db(ws, "/opt/intel/oneapi/bin/icpx -std=c++17 -c", "c.cpp")
+        assert serve.cc_flags(src) is None, "icpx 不是 GCC 也不是 MSVC，應該跳過"
+        assert serve.lint_after_write(src) == ""
+
+
+def test_agent_rules_never_names_a_tool_it_did_not_send():
+    """規則裡提到的工具必須真的送得出去，講的沙盒必須真的是會用到的那一個。
+
+    tool_defs() 的原則是「沒開放的功能一個字都不要提」，但寫入類的規則裡
+    寫死了一句「用 run_tests 驗證」—— C/C++ 專案收不到那支工具，卻收得到那句話。
+    沙盒那句更糟：不管後端是誰都說「在容器裡跑：只看得到工作區」，
+    而 bwrap 的檔案系統就是宿主機的。跟它說系統編譯器不存在，它會去自己弄一份。
+    """
+    with Workspace() as ws:
+        for f in ws.rglob("*.py"):
+            f.unlink()
+        (ws / "main.cpp").write_text("int main(){ return 0; }\n", encoding="utf-8")
+        (ws / "CMakeLists.txt").write_text("project(x)\n", encoding="utf-8")
+        serve.cur().write = True
+
+        rules = serve.agent_rules()
+        sent = {d["function"]["name"] for d in serve.tool_defs()}
+        for name in re.findall(r"\b(run_tests|setup_env|run_shell|edit_file)\b", rules):
+            assert name in sent, f"規則叫模型用 {name}，但工具清單裡沒有這支"
+
+        # 沙盒那句要跟著實際的後端走
+        import sandbox as sb
+        on, backend = serve.ALLOW_SANDBOX, serve.SANDBOX_BACKEND
+        try:
+            for mod in sb.BACKENDS:
+                if not mod.available():
+                    continue
+                serve.ALLOW_SANDBOX, serve.SANDBOX_BACKEND = True, mod.NAME
+                rules = serve.agent_rules()
+                if mod.SAME_FS:
+                    assert "系統的工具鏈" in rules and "只看得到工作區" not in rules, \
+                        f"{mod.NAME} 沒換掉檔案系統，不能說只看得到工作區"
+                else:
+                    assert "映像檔裡沒裝的東西就是沒有" in rules, \
+                        f"{mod.NAME} 換掉了檔案系統，要講清楚工具鏈可能不在"
+                assert "沒有網路" in rules
+        finally:
+            serve.ALLOW_SANDBOX, serve.SANDBOX_BACKEND = on, backend
+
+
 def test_sandbox_backends_per_os():
     """一個作業系統一種做法，而且每一種都要說得出自己擋了什麼。
 
@@ -1672,6 +1776,15 @@ def test_sandbox_backends_per_os():
 
     # SAME_FS 決定沙盒裡該用哪個 python：換了檔案系統就不能用宿主機的絕對路徑
     assert sb.bwrap.SAME_FS and sb.seatbelt.SAME_FS and not sb.container.SAME_FS
+
+    # 映像檔要傳得下去。container.wrap() 一直收得了 image=，但**沒有人傳過** ——
+    # 於是容器後端永遠是 python:3.13-slim，那個裡面沒有編譯器也沒有 cmake，
+    # 而容器是 Windows 上唯一的後端：C/C++ 專案一進沙盒就沒有工具鏈。
+    assert "gcc:14" in sb.wrap("make", "/tmp", backend="container", image="gcc:14")
+    assert sb.container.IMAGE in sb.wrap("make", "/tmp", backend="container")
+    # 核心層後端用的是宿主機的工具鏈，多收一個用不到的參數不能炸
+    assert sb.bwrap.wrap("make", "/tmp", image="gcc:14")[-2:] == ["-lc", "make"]
+    assert hasattr(serve, "SANDBOX_IMAGE"), "serve.py 要有地方存 --sandbox-image"
 
     detected = sb.detect()
     assert set(detected) >= {"host", "backends", "backend", "ok", "why"}

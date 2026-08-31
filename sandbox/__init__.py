@@ -101,10 +101,11 @@ def wrap(command: str, workspace, net: bool = False, gpu: bool = False,
 
 
 def run(command: str, workspace, net: bool = False, timeout: int = 120,
-        sandboxed: bool = True, backend: str = "", gpu: bool = False):
+        sandboxed: bool = True, backend: str = "", gpu: bool = False, **opts):
     """跑一行指令，回傳 (returncode, 輸出)。sandboxed=False 就是原本的行為。"""
     if sandboxed:
-        argv, shell = wrap(command, workspace, net=net, gpu=gpu, backend=backend), False
+        argv, shell = wrap(command, workspace, net=net, gpu=gpu, backend=backend,
+                           **opts), False
     else:
         argv, shell = command, True
     proc = subprocess.run(argv, shell=shell, cwd=str(workspace),

@@ -97,7 +97,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，宿主機的 pytest�
 | | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
 |---|---|---|---|---|
 | **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
-| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`） | `ctest` / `make test` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only` / MSVC `/Zs`（需 `compile_commands.json`） | `ctest` / `make test` | ✅ |
 | JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
 | 其他 | 只列檔名 | — | — | — |
 
@@ -116,6 +116,19 @@ C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**�
 > **C# 沒有支援。** `dotnet build` 是整包編譯，每次寫檔跑一次撐不住，
 > 所以沒有 per-write 的語法檢查可做。用 `run_shell` 跑 `dotnet test` 一樣可以，
 > 但上面那四格全部是空的。
+
+#### C/C++ 在 Windows 上
+
+編譯與測試沒問題（`run_shell` 就是你本機的 shell）。要注意的是兩件事：
+
+- **沙盒開起來的話**，Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
+  裡**沒有編譯器也沒有 cmake**。換一個有工具鏈的：
+  `python serve.py --sandbox container --sandbox-image gcc:14`。
+  Linux／macOS 走的是 bubblewrap／sandbox-exec，檔案系統就是你的機器，沒有這個問題。
+- **寫檔後的語法檢查**認得 MSVC（`cl.exe` 用 `/Zs`）與 MinGW／Clang，
+  但 `compile_commands.json` 只有 Ninja 與 Makefile 產生器會生 ——
+  Visual Studio 產生器不會，那一格就是空的（安靜跳過，不會亂報）。
+  `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` 就有了。
 
 ### 改完就自動檢查
 

@@ -41,8 +41,8 @@ CHECKS = [
 ]
 
 
-def probe(backend: str = "") -> list:
-    """回傳 [(名稱, 通過, 輸出, 說明)]。"""
+def probe(backend: str = "", **opts) -> list:
+    """回傳 [(名稱, 通過, 輸出, 說明)]。opts 往下傳給 run()（目前只有 image）。"""
     mod = pick(backend)
     out = []
     with tempfile.TemporaryDirectory(prefix="zack-sandbox-") as tmp:
@@ -50,7 +50,8 @@ def probe(backend: str = "") -> list:
         (ws / "marker.txt").write_text("HELLO\n", encoding="utf-8")
         for name, cmd, ok, why in CHECKS:
             try:
-                _, text = run(cmd, ws, net=False, timeout=90, backend=mod.NAME)
+                _, text = run(cmd, ws, net=False, timeout=90, backend=mod.NAME,
+                              **opts)
             except subprocess.TimeoutExpired:
                 text = "（逾時）"
             except Exception as e:
@@ -65,10 +66,28 @@ def probe(backend: str = "") -> list:
                         f"uid={made.stat().st_uid}（你是 {os.getuid()}）",
                         "不是的話你自己刪不掉它建出來的東西"))
 
+        # 工具鏈也只記錄不判定 —— 需不需要編譯器是專案的事。
+        # 但這一項在容器後端上一定要看得到：預設映像檔 python:3.13-slim 裡
+        # 沒有 gcc 也沒有 cmake，而 Windows 上容器是唯一的後端。少了這一行，
+        # 使用者要跑完一次 cmake 失敗才會知道，而模型會先花三輪想辦法自己裝。
+        (ws / "probe.c").write_text("int main(void){ return 0; }\n", encoding="utf-8")
+        try:
+            _, text = run("got=; for t in cc gcc g++ make cmake ninja; do "
+                          "command -v $t >/dev/null 2>&1 && got=\"$got $t\"; done; "
+                          "echo \"有：${got:- 一個都沒有}\"; "
+                          "cc -o probe_bin probe.c 2>probe_err && echo '編譯 OK' "
+                          "|| head -1 probe_err",
+                          ws, timeout=90, backend=mod.NAME, **opts)
+        except Exception as e:
+            text = f"{type(e).__name__}: {e}"
+        out.append(("C/C++ 工具鏈", True, text[:160].strip() or "（一個都沒有）",
+                    "只記錄：核心層沙盒用的是你機器上的；容器只有映像檔裡的"
+                    "（預設那個沒有編譯器，用 --sandbox-image 換）"))
+
         # GPU 只記錄不判定：需不需要 GPU 是專案的事，不是沙盒的事
         try:
             _, text = run("nvidia-smi --query-gpu=name --format=csv,noheader 2>&1 | head -1",
-                          ws, timeout=60, backend=mod.NAME, gpu=True)
+                          ws, timeout=60, backend=mod.NAME, gpu=True, **opts)
             out.append(("GPU（gpu=True 時）", True, text[:120] or "（沒有 GPU）",
                         "只記錄：核心層沙盒直接看得到，容器要 Container Toolkit"))
         except Exception as e:
@@ -76,7 +95,7 @@ def probe(backend: str = "") -> list:
     return out
 
 
-def bench(backend: str = "", rounds: int = 5) -> dict:
+def bench(backend: str = "", rounds: int = 5, **opts) -> dict:
     """量開銷：同一行指令，進沙盒 vs 直接跑。"""
     mod = pick(backend)
     result = {}
@@ -90,7 +109,8 @@ def bench(backend: str = "", rounds: int = 5) -> dict:
                 for _ in range(rounds):
                     t0 = time.perf_counter()
                     try:
-                        run(cmd, ws, sandboxed=mode, timeout=90, backend=mod.NAME)
+                        run(cmd, ws, sandboxed=mode, timeout=90, backend=mod.NAME,
+                            **opts)
                     except Exception:
                         times = []
                         break
