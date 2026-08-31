@@ -4,8 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZackLLMGUI</title>
-<!-- 這個檔案是 frontend/index.html 的產出，不要直接改它。
-     改 frontend/ 底下的檔案，serve.py 啟動或重新整理時會自己重組（或跑 python build.py）。 -->
+<!-- zackllmgui.html ＝ frontend/index.html ＋ frontend/style.css ＋ frontend/js/*.js
+     （依檔名排序串接，填進下面那兩個 {{STYLE}} / {{SCRIPT}} 標記）。
+     **要改就改 frontend/ 底下的，不要改產出的 zackllmgui.html** ——
+     serve.py 每次送出網頁都會重組，直接改產出檔下一次重新整理就被蓋掉。
+     手動重組：python build.py -->
 <style>
 /*{{STYLE}}*/
 </style>
