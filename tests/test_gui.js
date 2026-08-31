@@ -69,6 +69,45 @@ function fakeDom() {
   assert.strictEqual(rw.fileLines(many).kids.length, 41);
   assert.strictEqual(rw.fileLines([]).kids.length, 0);
 }
+
+{
+  // 點一個還原點要指得回那句話。舊的檢查點沒有序號、壓縮過的訊息已經不在
+  // 畫面上 —— 那兩種都要安靜地退回原本的行為，不能整個爆掉。
+  const bubbles = {};
+  [0, 2].forEach(function (i) {
+    bubbles[i] = { className: 'msg user', dataset: { i: String(i) }, flashed: 0 };
+    bubbles[i].classList = {
+      add: function (c) { if (c === 'flash') bubbles[i].flashed++; },
+      remove: function () {}
+    };
+    bubbles[i].scrollIntoView = function () { bubbles[i].scrolled = true; };
+  });
+  const box = [grab('jumpToMessage'), 'return jumpToMessage;'].join('\n');
+  const S = { stick: true };
+  const thread = {
+    querySelector: function (sel) {
+      const m = /data-i="(\d+)"/.exec(sel);
+      return (m && bubbles[m[1]]) || null;
+    }
+  };
+  const jump = new Function('S', '$', 'current', box)(
+    S, function () { return thread; },
+    function () { return { messages: [{ role: 'user', content: '第一句' }, {}, { role: 'user', content: '第三句', text: '第三句' }] }; });
+
+  assert.strictEqual(jump(0).content, '第一句', '指不回第一則');
+  assert.strictEqual(bubbles[0].flashed, 1, '沒有閃 —— 長對話裡人還是要自己找');
+  assert.ok(bubbles[0].scrolled, '沒有捲過去');
+  assert.strictEqual(S.stick, false, 'stick 沒關掉的話 pin() 會馬上把畫面拉回底部');
+
+  jump(0); jump(0);
+  assert.strictEqual(bubbles[0].flashed, 3, '同一列連點兩次要再閃一次');
+
+  assert.strictEqual(jump(undefined), null, '舊的檢查點沒有序號');
+  assert.strictEqual(jump(-1), null, '-1 是「沒記到」的值');
+  assert.strictEqual(jump(1), null, '畫面上沒有那一則就不要硬指');
+  assert.strictEqual(jump(9), null, '序號超出範圍');
+}
+console.log('ok   還原點指得回對應的那句話');
 console.log('ok   還原點列（檢查點、單筆、檔案清單）');
 
 // 2. 把不碰 DOM 的片段挖出來單獨跑

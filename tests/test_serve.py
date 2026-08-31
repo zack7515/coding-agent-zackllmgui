@@ -1188,7 +1188,7 @@ def test_checkpoint_catches_what_the_journal_misses():
         git("commit", "-qm", "init")
         head = git("log", "--oneline", "-1").stdout.strip()
 
-        first = serve.checkpoint("幫我改 calc.py")
+        first = serve.checkpoint("幫我改 calc.py", 4)
         assert first["commit"] and first["tree"], first
         # 沒改到東西就不要一直長新的，不然清單會被一模一樣的列灌滿
         assert "一模一樣" in serve.checkpoint("再問一次")["skipped"]
@@ -1202,6 +1202,12 @@ def test_checkpoint_catches_what_the_journal_misses():
         # 一輪一列，這一輪動過的檔案掛在那一列底下（run_shell 改的也在）
         rows = serve.journal_for(serve.workspace.cur_chat())
         assert len(rows) == 1, rows
+        # 訊息序號要留著：介面靠它把還原點指回使用者說的那句話。
+        # 只存截短到 80 字的提示的話，長對話裡分不出是哪一輪。
+        assert rows[0]["msg"] == 4, rows[0]
+        # 沒給序號時記 -1，介面看到就不指 —— 舊的檢查點走的就是這條
+        serve.checkpoint("沒給序號")
+        assert serve.journal_read()[-1]["msg"] == -1, serve.journal_read()[-1]
         assert sorted((f["st"], f["path"]) for f in rows[0]["files"]) == [
             ("A", "new.py"), ("M", "pkg/calc.py")]
 

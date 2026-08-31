@@ -513,6 +513,22 @@ function clockOf(ts) {
 
 function dayOf(ts) { return String(ts || '').split(' ')[0]; }
 
+// 點一列先跳到那句話：一段被截到 80 字的提示看不出是哪一輪，
+// 而「要退回哪裡」正是這裡唯一要決定的事。找不到就回 null，
+// 流程照舊 —— 壓縮過的對話、或舊的檢查點本來就沒有序號。
+function jumpToMessage(i) {
+  if (i === undefined || i === null || i < 0) return null;
+  const m = (current().messages || [])[i];
+  const el = $('thread').querySelector('.msg.user[data-i="' + i + '"]');
+  if (!el || !m) return null;
+  S.stick = false;                     // 不然 pin() 會馬上把畫面拉回底部
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.remove('flash');
+  void el.offsetWidth;                 // 同一列連點兩次也要再閃一次
+  el.classList.add('flash');
+  return m;
+}
+
 function renderRewind(entries, total) {
   const box = $('rwList');
   box.innerHTML = '';
@@ -550,8 +566,13 @@ function renderRewind(entries, total) {
         ? '\n其中 ' + e.other_chats + ' 筆是「其他對話」的，也會一起退回去。' : '';
       if (e.tree) {
         const n = (e.files || []).length;
+        // 先跳過去讓人看到是哪一輪，再問。跳得到就用對話裡的原文，
+        // 不是 journal 裡那份截短的 —— 那份是給列表顯示用的。
+        const m = jumpToMessage(e.msg);
+        const said = m ? String(m.text !== undefined ? m.text : m.content) : e.path;
         if (!confirm('把整個工作區退回送出這則提示之前？\n\n' +
-                     e.ts + '\n「' + e.path + '」\n\n' +
+                     e.ts + '\n「' + said.slice(0, 400) +
+                     (said.length > 400 ? '…' : '') + '」\n\n' +
                      '這一輪動過的 ' + n + ' 個檔案會退回去，之後新增的會刪掉 ——\n' +
                      '包含 run_shell 改的。共退 ' + e.undo_count + ' 輪。' + others +
                      '\n你的 git 分支、HEAD、暫存區與對話內容都不受影響。')) return;

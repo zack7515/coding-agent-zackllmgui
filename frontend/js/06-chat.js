@@ -233,8 +233,11 @@ function msgEl(role) {
   return el;
 }
 
-function buildUserMsg(m) {
+// i 是它在 c.messages 裡的位置。「紀錄」分頁靠它把還原點指回這句話 ——
+// 檢查點是在送出前照的，記的就是這一則的序號。
+function buildUserMsg(m, i) {
   const el = msgEl('user');
+  if (i !== undefined) el.dataset.i = i;
   if (m.compacted || m.nudge || m.queued) el.classList.add('compacted');
   const b = document.createElement('div');
   b.className = 'bubble';
@@ -442,7 +445,7 @@ function renderThread() {
     return;
   }
   c.messages.forEach(function (m, i) {
-    if (m.role === 'user') t.appendChild(buildUserMsg(m));
+    if (m.role === 'user') t.appendChild(buildUserMsg(m, i));
     else if (m.role === 'tool') t.appendChild(buildToolMsg(m));
     else { const el = buildAssistantMsg(m, i); fillAssistant(el, m); t.appendChild(el); }
   });
@@ -634,7 +637,7 @@ async function send() {
   const wasEmpty = !!$('thread').querySelector('.empty');
   c.messages.push(msg);
   if (wasEmpty) renderThread();
-  else $('thread').appendChild(buildUserMsg(msg));
+  else $('thread').appendChild(buildUserMsg(msg, c.messages.length - 1));
 
   $('input').value = '';
   // chat 記的是**這一輪屬於哪則對話**，不是「現在看著哪則」。放著跑的時候使用者
@@ -660,12 +663,16 @@ async function send() {
 
 // 每則提示先照一張相：一輪一個還原點，退得掉 run_shell 改的東西。
 // 拍不到就算了，不能擋住送出訊息。
+// msg 是這一相對應到第幾則訊息 —— 訊息已經 push 進去了，所以是最後一則。
+// 有了它，「紀錄」分頁點一列就跳得回那句話，而不是只看得到一段被截短的字。
 async function checkpoint(note) {
   if (!S.tools || !S.ws.path) return;
+  const c = current();
   try {
     await fetch(apiUrl('/checkpoint'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat: current().id, note: String(note || '').slice(0, 100) })
+      body: JSON.stringify({ chat: c.id, note: String(note || '').slice(0, 100),
+                             msg: c.messages.length - 1 })
     });
   } catch (e) { /* 照不到相不是送不出訊息的理由 */ }
 }

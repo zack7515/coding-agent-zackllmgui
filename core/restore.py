@@ -167,10 +167,11 @@ def ckpt_files(tree: str, nxt: str = "") -> list:
             for r in rows if "\t" in r]
 
 
-def checkpoint(note: str = "") -> dict:
+def checkpoint(note: str = "", msg: int = -1) -> dict:
     """照一張相。回傳 {"id":…} 或 {"skipped": 原因}。
 
     拍不到不能擋住使用者送出訊息，所以每條出路都是「跳過並說原因」，不丟例外。
+    msg 是這一相對應到對話裡的第幾則訊息 —— 介面靠它把還原點指回那句話。
     """
     if cur().ws is None:
         return {"skipped": "還沒設定工作區"}
@@ -190,7 +191,7 @@ def checkpoint(note: str = "") -> dict:
     except Exception as e:
         return {"skipped": f"{type(e).__name__}: {e}"}
     return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
-                              "", False, tree=tree, commit=sha),
+                              "", False, tree=tree, commit=sha, msg=msg),
             "commit": sha, "tree": tree}
 
 

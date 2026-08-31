@@ -192,6 +192,13 @@ svg{display:block; flex:none;}
   padding:10px 15px; font-size:calc(14px * var(--fs)); line-height:1.6;
   white-space:pre-wrap; overflow-wrap:anywhere;
 }
+/* 從「紀錄」分頁點一個還原點時閃一下對應的那句話。
+   捲過去還不夠 —— 長對話裡使用者還是要自己找哪一則剛剛動了。 */
+.msg.user.flash .bubble{animation:msgflash 1.6s ease-out;}
+@keyframes msgflash{
+  0%,55%{box-shadow:0 0 0 3px var(--accent); }
+  100%{box-shadow:0 0 0 3px transparent;}
+}
 .msg-avatar{
   width:28px; height:28px; flex:0 0 28px; border-radius:999px; background:var(--raised);
   border:1px solid var(--line2); display:flex; align-items:center; justify-content:center;

@@ -2071,7 +2071,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             req = json.loads(self._read_body(8192) or b"{}")
             workspace.set_cur_chat(req.get("chat", ""))
-            self._json(checkpoint(str(req.get("note", ""))))
+            self._json(checkpoint(str(req.get("note", "")),
+                                  int(req.get("msg", -1))))
         except Exception as e:
             self._json({"skipped": f"{type(e).__name__}: {e}"})
 
