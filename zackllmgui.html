@@ -5314,17 +5314,34 @@ function dayOf(ts) { return String(ts || '').split(' ')[0]; }
 // 點一列先跳到那句話：一段被截到 80 字的提示看不出是哪一輪，
 // 而「要退回哪裡」正是這裡唯一要決定的事。找不到就回 null，
 // 流程照舊 —— 壓縮過的對話、或舊的檢查點本來就沒有序號。
-function jumpToMessage(i) {
+function jumpToMessage(i, note) {
   if (i === undefined || i === null || i < 0) return null;
   const m = (current().messages || [])[i];
   const el = $('thread').querySelector('.msg.user[data-i="' + i + '"]');
-  if (!el || !m) return null;
+  if (!el || !m || m.role !== 'user') return null;
+  // 序號會被壓縮弄歪：摘要取代掉前面幾則之後，同一個數字指到的是別人。
+  // journal 裡那份截短的提示正好可以拿來對 —— 對不上就不要硬指，
+  // 指錯一則比不指更糟。
+  const said = String(m.text !== undefined ? m.text : m.content);
+  // trim 是為了對齊 Python 端：那邊是 ' '.join(note.split())，會去掉頭尾空白，
+  // JS 的 split(/\s+/) 遇到開頭空白會多一個空字串。
+  if (note && said.trim().split(/\s+/).join(' ').indexOf(note) !== 0) return null;
   S.stick = false;                     // 不然 pin() 會馬上把畫面拉回底部
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  // 不用 smooth：叫用端接著會開 confirm()，那是同步阻塞的，
+  // 動畫一格都跑不動，對話框會蓋在還沒捲動的畫面上。
+  el.scrollIntoView({ block: 'center' });
   el.classList.remove('flash');
   void el.offsetWidth;                 // 同一列連點兩次也要再閃一次
   el.classList.add('flash');
   return m;
+}
+
+// 等瀏覽器真的畫出來。兩層 requestAnimationFrame 是標準做法：
+// 第一層在下一個 frame 之前跑，第二層在那個 frame 畫完之後才跑。
+function painted() {
+  return new Promise(function (r) {
+    requestAnimationFrame(function () { requestAnimationFrame(r); });
+  });
 }
 
 function renderRewind(entries, total) {
@@ -5357,7 +5374,7 @@ function renderRewind(entries, total) {
       box.appendChild(sep);
     }
     const row = rewindRow(e, i === 0);
-    row.addEventListener('click', function () {
+    row.addEventListener('click', async function () {
       // 還原一定是照時間倒著做的，所以會連帶退掉別則對話在這之後改的東西。
       // 還原是照時間倒著做的，會連帶退掉別則對話後來改的 —— 講出來讓人決定
       const others = e.other_chats
@@ -5366,8 +5383,9 @@ function renderRewind(entries, total) {
         const n = (e.files || []).length;
         // 先跳過去讓人看到是哪一輪，再問。跳得到就用對話裡的原文，
         // 不是 journal 裡那份截短的 —— 那份是給列表顯示用的。
-        const m = jumpToMessage(e.msg);
+        const m = jumpToMessage(e.msg, e.path);
         const said = m ? String(m.text !== undefined ? m.text : m.content) : e.path;
+        if (m) await painted();        // 先讓人看到捲過去了，再擋住畫面問
         if (!confirm('把整個工作區退回送出這則提示之前？\n\n' +
                      e.ts + '\n「' + said.slice(0, 400) +
                      (said.length > 400 ? '…' : '') + '」\n\n' +

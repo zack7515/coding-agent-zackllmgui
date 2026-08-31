@@ -80,7 +80,10 @@ function fakeDom() {
       add: function (c) { if (c === 'flash') bubbles[i].flashed++; },
       remove: function () {}
     };
-    bubbles[i].scrollIntoView = function () { bubbles[i].scrolled = true; };
+    bubbles[i].scrollIntoView = function (o) {
+      bubbles[i].scrolled = true;
+      bubbles[i].smooth = (o || {}).behavior === 'smooth';
+    };
   });
   const box = [grab('jumpToMessage'), 'return jumpToMessage;'].join('\n');
   const S = { stick: true };
@@ -90,14 +93,17 @@ function fakeDom() {
       return (m && bubbles[m[1]]) || null;
     }
   };
+  const msgs = [{ role: 'user', content: '第一句' }, { role: 'assistant', content: '回答' },
+                { role: 'user', content: '第三句', text: '第三句' }];
   const jump = new Function('S', '$', 'current', box)(
-    S, function () { return thread; },
-    function () { return { messages: [{ role: 'user', content: '第一句' }, {}, { role: 'user', content: '第三句', text: '第三句' }] }; });
+    S, function () { return thread; }, function () { return { messages: msgs }; });
 
   assert.strictEqual(jump(0).content, '第一句', '指不回第一則');
   assert.strictEqual(bubbles[0].flashed, 1, '沒有閃 —— 長對話裡人還是要自己找');
   assert.ok(bubbles[0].scrolled, '沒有捲過去');
   assert.strictEqual(S.stick, false, 'stick 沒關掉的話 pin() 會馬上把畫面拉回底部');
+  assert.strictEqual(bubbles[0].smooth, false,
+    'smooth 捲動配同步的 confirm() 等於沒捲 —— 動畫一格都跑不動');
 
   jump(0); jump(0);
   assert.strictEqual(bubbles[0].flashed, 3, '同一列連點兩次要再閃一次');
@@ -106,6 +112,12 @@ function fakeDom() {
   assert.strictEqual(jump(-1), null, '-1 是「沒記到」的值');
   assert.strictEqual(jump(1), null, '畫面上沒有那一則就不要硬指');
   assert.strictEqual(jump(9), null, '序號超出範圍');
+
+  // 對得上 journal 那份截短的提示才指過去
+  assert.ok(jump(0, '第一句'), '對得上卻不指');
+  assert.strictEqual(jump(0, '別的句子'), null, '壓縮之後序號會歪，指錯一則比不指更糟');
+  // 只有前 80 字，所以是「開頭相符」不是「完全相等」
+  assert.ok(jump(0, '第一'), '只存得下開頭，比對要用開頭相符');
 }
 console.log('ok   還原點指得回對應的那句話');
 console.log('ok   還原點列（檢查點、單筆、檔案清單）');
