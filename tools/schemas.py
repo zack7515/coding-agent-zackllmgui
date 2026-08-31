@@ -67,7 +67,7 @@ TOOL_SCHEMAS = [
                              "description": "還沒跑完時最多等幾秒再回話，預設 20。"
                                             "有別的事要做就填 0，馬上拿現在的進度"}},
      "required": []},
-    {"name": "run_tests", "needs": "ws", "description": "用專案偵測到的 python 跑 pytest",
+    {"name": "run_tests", "needs": "python", "description": "用專案偵測到的 python 跑 pytest",
      "properties": {"target": {"type": "string", "description": "要跑的檔案或目錄，留空為全部"},
                     "k": {"type": "string", "description": "只跑名稱符合的測試（pytest -k）"}},
      "required": []},
@@ -82,7 +82,7 @@ TOOL_SCHEMAS = [
          "query": {"type": "string", "description": "action=search 時的關鍵字"},
          "limit": {"type": "integer", "description": "搜尋結果或連結的筆數上限，預設 10"}},
      "required": ["action"]},
-    {"name": "setup_env", "needs": "ws",
+    {"name": "setup_env", "needs": "python",
      "description": ("在工作區裡建立 .venv 並安裝套件，之後 run_tests 會自動用它。"
                      "需要套件（例如 pytest）時用這支，不要自己用 run_shell 下 pip install ——"
                      "那會裝進系統環境"),

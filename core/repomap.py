@@ -8,7 +8,7 @@ aider 的 repo map 是同一個想法，這裡刻意做得更小：只列頂層�
 
 這段只能放在對話最前面而且中途不要變 —— 動它等於放棄 Ollama 的 prefix cache。
 
-ponytail: 只認得 Python（ast）與 JS/TS（一條正規表示式），其他語言只列檔名。
+ponytail: Python 走 ast，JS/TS 與 C/C++ 各一組正規表示式，其他語言只列檔名。
           要加語言就往 file_symbols() 加一個分支。
 """
 
@@ -26,6 +26,18 @@ JS_SYM = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?"
                     r"(?:function\s+(\w+)|class\s+(\w+)"
                     r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?[(<])", re.M)
 
+# C/C++。兩組都靠「頂層的東西寫在第一欄」—— 那是這兩種語言的通用排版，
+# 也自動濾掉了 class 裡的成員（縮排的）、迴圈與 return。
+C_EXT = (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx")
+C_TYPE = re.compile(r"^(?:template\s*<[^>]*>\s*)?"
+                    r"(?:class|struct|union|namespace|enum(?:\s+class)?)\s+(\w+)", re.M)
+# 回傳型別 → 名字 → 參數 → ; 或 {。開頭排除幾個關鍵字，不然第一欄的
+# `return f(x);` 會被讀成一個叫 f 的函式。#define 天生排除掉（開頭是 #）。
+C_FUNC = re.compile(r"^(?!return\b|if\b|for\b|while\b|switch\b|else\b|do\b|case\b)"
+                    r"[A-Za-z_][\w\s\*&:<>,]*?[\s\*&]"
+                    r"([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)"
+                    r"\s*\([^)]*\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]", re.M)
+
 
 def file_symbols(p: Path) -> str:
     """一個檔案裡有哪些頂層符號。回傳空字串＝只列檔名就好。"""
@@ -39,6 +51,18 @@ def file_symbols(p: Path) -> str:
         elif p.suffix in (".js", ".mjs", ".ts", ".jsx", ".tsx"):
             names = [m.group(1) or m.group(2) or m.group(3)
                      for m in JS_SYM.finditer(p.read_text("utf-8", errors="replace"))]
+        elif p.suffix.lower() in C_EXT:
+            body = p.read_text("utf-8", errors="replace")
+            # 兩組分開找，再照出現位置排回檔案順序 —— 讀地圖的人是照著檔案看的
+            hits = [(m.start(), m.group(1)) for m in C_TYPE.finditer(body)]
+            hits += [(m.start(), m.group(1)) for m in C_FUNC.finditer(body)]
+            seen = set()
+            names = []
+            for _, n in sorted(hits):
+                # 標頭宣告一次、原始碼定義一次，同一個名字不要列兩遍
+                if n not in seen:
+                    seen.add(n)
+                    names.append(n)
         else:
             return ""
     except (SyntaxError, ValueError, OSError, RecursionError):

@@ -34,6 +34,14 @@ DENY_FILES = re.compile(r"^(\.env(\..*)?|.*\.env|.*\.pem|.*\.key|.*\.pfx|id_rsa.
                         r"\.zackllmgui-.*\.json)$", re.I)
 MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看的
 
+# 工作區是哪種語言。決定要送哪幾支工具、提示詞怎麼寫 ——
+# 在 C++ 專案裡送 setup_env 與「不要自己 pip install」只會誤導模型。
+# C 與 C++ 併成一個 "c"：工具鏈是同一套（gcc／cmake／ctest），分開沒有用處。
+LANG_EXT = {".py": "python",
+            ".c": "c", ".h": "c", ".cpp": "c", ".cc": "c", ".cxx": "c",
+            ".hpp": "c", ".hh": "c", ".hxx": "c"}
+LANG_SCAN = 400                    # 掃到這麼多檔就夠判斷了，跟專案地圖同一個上限
+
 
 class Session:
     """一個瀏覽器分頁的狀態（工作區、寫入權、自動模式、待辦、計畫）。
@@ -126,6 +134,20 @@ def ws_path(rel: str, must_exist: bool = False) -> Path:
 def ws_rel(p: Path) -> str:
     root = ws_root().resolve()
     return "." if p == root else str(p.relative_to(root))
+
+
+def ws_langs() -> set:
+    """工作區裡有哪些語言。掃不完整不要緊 —— 這只決定提示詞怎麼寫，不決定放不放行。"""
+    if cur().ws is None:
+        return set()
+    got = set()
+    for n, f in enumerate(ws_walk()):
+        if n >= LANG_SCAN:
+            break
+        lang = LANG_EXT.get(f.suffix.lower())
+        if lang:
+            got.add(lang)
+    return got
 
 
 def ws_walk():

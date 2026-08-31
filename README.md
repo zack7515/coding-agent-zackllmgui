@@ -24,6 +24,7 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 |---|---|
 | **思考模式** | 控制項依模型能力自動變形：gpt-oss 給四段、qwen3 給開關、沒有的整組停用並**完全不送 `think` 欄位** |
 | **本機工具** | 讀檔、寫檔、列目錄、搜尋、`run_shell`、`run_tests`、`setup_env`、git、連網瀏覽 |
+| **語言支援** | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
 | **沙盒** | Linux 用 bubblewrap、macOS 用 sandbox-exec、Windows 用容器。**預設關**，按鈕開。**顯示卡會自動接進去** |
 | **權限規則** | 確認卡上的「以後都放行」把這次的判斷寫成一條規則，不用每天重新點。allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
@@ -91,6 +92,31 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 bwrap 是 namespace 層的隔離，不換掉檔案系統，宿主機的 pytest、gcc、node、CUDA 驅動本來就在那裡，
 沒有「映像檔裡沒裝」這回事。細節見 [sandbox/README.md](sandbox/README.md)。
 
+### 支援哪些語言
+
+| | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
+|---|---|---|---|---|
+| **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`） | `ctest` / `make test` | ✅ |
+| JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
+| 其他 | 只列檔名 | — | — | — |
+
+沒列到的語言**照樣做得完**——`run_shell` 不限語言，收尾驗證指令是你自己填的字串。
+少的只是上面那幾條回饋，模型得多花幾輪自己補。
+
+C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**：那兩支是 pytest
+與 `.venv` 專用的，送出去只會讓模型拿去跑一個沒有 pytest 的專案。編譯測試用
+`run_shell` 跑 `cmake` / `ctest`，這件事會寫在送給模型的規則裡。
+
+> **沙盒沒有網路，所以 `FetchContent`、vcpkg、conan 一定失敗。** 相依套件要先在
+> 沙盒外準備好（`apt install libgtest-dev`，或先跑一次 `cmake` 讓它下載完）。
+> Python 那邊有 `setup_env` 當唯一的連網入口，C/C++ 刻意不開第二個 ——
+> 每一個連得出去的入口都是安全邊界上的洞。
+
+> **C# 沒有支援。** `dotnet build` 是整包編譯，每次寫檔跑一次撐不住，
+> 所以沒有 per-write 的語法檢查可做。用 `run_shell` 跑 `dotnet test` 一樣可以，
+> 但上面那四格全部是空的。
+
 ### 改完就自動檢查
 
 模型寫完 `.py` 或 `.js`，馬上跑一次 linter，錯誤**接在工具結果後面**回灌給它 ——
@@ -106,6 +132,20 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 **沒有設定檔，也沒有開關。** 裝了 `ruff` 就用 ruff、`eslint` 就用 eslint，
 兩個都沒有的話 `.py` 還是會用標準函式庫的 `ast` 檢查語法 —— 模型最常寫壞的就是那個。
 什麼都沒裝就安靜跳過，不會變成噪音。
+
+C/C++ 走 `-fsyntax-only`，但**編譯旗標一定要是真的**：
+
+```
+已修改 calc.c（1 處）
+
+[語法檢查] 這個檔案編不過，請修：
+calc.c:2:37: error: expected ';' before '}' token
+```
+
+旗標從 `compile_commands.json` 讀（CMake 開 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`
+就會生，clangd／clang-tidy 也吃它）。沒有那個檔就跳過 —— 直接 `gcc -fsyntax-only`
+在任何有自訂 include 路徑的專案上都會噴「找不到標頭檔」，那是缺 `-I` 不是程式碼有錯，
+**而誤報比沒有更糟**。
 
 > 只跑**唯讀**的檢查，不跑 `black`／`prettier` 這種會改檔案的。
 > 在模型背後改掉檔案，它手上的內容就過期了，下一次 `edit_file` 的比對會對不上。
@@ -211,8 +251,8 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 97 項
-python tests/test_core.py     # core/ 各模組的介面 6 項
+python tests/test_serve.py    # 後端 100 項
+python tests/test_core.py     # core/ 各模組的介面 8 項
 node   tests/test_gui.js      # 網頁 70 項
 ```
 

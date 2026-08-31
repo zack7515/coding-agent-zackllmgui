@@ -281,9 +281,39 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 |---|---|---|
 | 永遠可用 | `fetch_url`、`todo_write`、`ask_user_question`、`load_skill` | 工具開啟 |
 | 要另外開 | `run_browser` | 勾「連網瀏覽」 |
-| 需要工作區 | `list_dir`、`search_files`、`read_file`、`run_shell`、`run_tests`、`setup_env`、`task` | 指定專案資料夾 |
+| 需要工作區 | `list_dir`、`search_files`、`read_file`、`run_shell`、`task` | 指定專案資料夾 |
+| 需要是 Python 專案 | `run_tests`、`setup_env` | 工作區裡有 `.py` 檔（那兩支是 pytest 與 `.venv` 專用的） |
 | 需要再開一道 | `write_file`、`edit_file` | 勾「允許修改檔案」 |
 | 計畫模式時 | `submit_plan` | 勾「計畫模式」，核准後才放行寫入工具 |
+
+### 支援哪些語言
+
+| | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
+|---|---|---|---|---|
+| **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`） | `ctest` / `make test` / `make check` | ✅ |
+| JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
+| 其他 | 只列檔名 | — | — | — |
+
+**沒列到的語言照樣做得完。** `run_shell` 不限語言，收尾驗證指令是你自己填的字串。
+少的只是這四條回饋，模型得多花幾輪自己補。
+
+C/C++ 專案裡：
+
+- `run_tests` 與 `setup_env` 不會出現在工具清單上，編譯測試用 `run_shell` 跑
+  `cmake -S . -B build`、`cmake --build build`、`ctest --test-dir build --output-on-failure`。
+  這幾句會寫進送給模型的規則裡，不用你交代。
+- 語法檢查要有 `compile_commands.json`（CMake 加 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+  就會生在 `build/` 底下）。沒有就跳過 —— 直接猜編譯旗標會在任何有自訂 include
+  路徑的專案上噴「找不到標頭檔」，那種誤報比沒有更糟。
+- 標頭檔（`.h` / `.hpp`）不做語法檢查：它們不在 `compile_commands.json` 裡。
+- **`rm -rf build` 會被擋**，用 `rm -r build`（或 `cmake --build build --target clean`）。
+- **沙盒沒有網路**，所以 `FetchContent`、vcpkg、conan 一定失敗。相依套件要先在沙盒外
+  準備好（例如 `apt install libgtest-dev`，或先在沙盒外跑一次 `cmake` 讓它下載完）。
+
+> **C# 沒有支援。** `dotnet build` 是整包編譯，每寫一個檔跑一次撐不住，
+> 所以做不出 per-write 的語法檢查。用 `run_shell` 跑 `dotnet test` 一樣可以，
+> 但上表那四格全部是空的。
 
 **做得比較像 IDE agent 的幾件事**（參考幾套 IDE agent 的共同做法）：
 

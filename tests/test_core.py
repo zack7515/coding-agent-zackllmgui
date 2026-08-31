@@ -73,6 +73,64 @@ def test_repo_map_cache_key_includes_size():
         assert "two" in again, "mtime 沒變就不重算 —— 大小沒進快取鍵"
 
 
+def test_repo_map_reads_c_and_cpp_symbols():
+    """C/C++ 靠「頂層的東西寫在第一欄」抓符號。
+
+    抓不到幾個沒關係，**抓錯很有關係** —— 地圖上多一個不存在的名字，
+    模型會拿它去 search_files 然後空手而回。所以這裡驗的重點是誤報：
+    #define、迴圈、第一欄的 return、變數宣告都不能被讀成符號。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "geo.cpp").write_text(
+            "#include <vector>\n"
+            "#define SQUARE(x) ((x) * (x))\n"
+            "namespace geo {\n"
+            "struct Point { double x, y; };\n"
+            "enum class Shape { Circle };\n"
+            "class Solver {\n"
+            " public:\n"
+            "  int solve(int n) const;\n"      # 縮排＝class 成員，不是頂層
+            "};\n"
+            "}\n"
+            "static int helper(int a);\n"
+            "int geo::Solver::solve(int n) const {\n"
+            "  for (int i = 0; i < n; i++) {}\n"
+            "return helper(n);\n"              # 第一欄的 return，最容易誤報的一行
+            "}\n"
+            "template <typename T>\n"
+            "T clamp_to(T v) { return v; }\n"
+            "const char* kName = \"geo\";\n",
+            encoding="utf-8")
+        (root / "calc.h").write_text("int add(int a, int b);\nvoid run(void);\n",
+                                     encoding="utf-8")
+
+        out = repomap.repo_map(sorted(root.iterdir()), lambda p: p.name)
+        assert "calc.h：add, run" in out, out
+        got = [ln for ln in out.splitlines() if ln.startswith("geo.cpp：")][0]
+        assert got == ("geo.cpp：geo, Point, Shape, Solver, helper, "
+                       "geo::Solver::solve, clamp_to"), got
+        for bad in ("SQUARE", "kName", " i,", "vector"):
+            assert bad not in got, f"{bad} 不該出現在地圖上：{got}"
+
+
+def test_ws_langs_decides_which_tools_to_send():
+    """工作區是哪種語言。C++ 專案不該看到 run_tests 與 setup_env。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        workspace.SESSIONS[""].ws = root
+        try:
+            assert workspace.ws_langs() == set(), "空資料夾不該猜出語言"
+            (root / "main.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+            assert workspace.ws_langs() == {"c"}
+            (root / "tool.py").write_text("x = 1\n", encoding="utf-8")
+            assert workspace.ws_langs() == {"c", "python"}, "混合專案兩邊都要算"
+            (root / "notes.md").write_text("hi\n", encoding="utf-8")
+            assert "markdown" not in workspace.ws_langs()
+        finally:
+            workspace.SESSIONS[""].ws = None
+
+
 # ── skills：借工具清單、借指令執行 ──────────────────────────────── #
 
 def test_skills_usable_filters_by_the_tool_names_it_is_given():

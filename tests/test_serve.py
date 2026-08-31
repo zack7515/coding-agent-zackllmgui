@@ -1561,6 +1561,92 @@ def test_current_chat_does_not_leak_between_threads():
     assert serve.workspace.cur_chat() == "", "主執行緒不該被子執行緒設到"
 
 
+def test_c_project_gets_c_tools_not_python_ones():
+    """C/C++ 專案裡，run_tests 與 setup_env 不該出現在工具清單上。
+
+    那兩支是 pytest 與 .venv 專用的。送出去的話模型會拿它們去跑一個沒有
+    pytest 的專案，然後花幾輪搞懂為什麼失敗 —— tool_defs() 的原則本來就是
+    「沒開放的功能一個字都不要提」，這只是把它套到語言上。
+    """
+    with Workspace() as ws:
+        for f in ws.rglob("*.py"):        # 先清成純 C 專案
+            f.unlink()
+        (ws / "main.cpp").write_text("int main(){ return 0; }\n", encoding="utf-8")
+        (ws / "CMakeLists.txt").write_text("project(x)\n", encoding="utf-8")
+
+        names = [d["function"]["name"] for d in serve.tool_defs()]
+        assert "run_tests" not in names and "setup_env" not in names, names
+        assert "run_shell" in names, "C 專案要靠 run_shell 跑 cmake，那支不能跟著消失"
+
+        rules = serve.agent_rules()
+        assert "C/C++" in rules and "cmake" in rules, rules
+        assert "pip install" not in rules, "C 專案不該收到 pip 的規則"
+        assert "rm -r build" in rules, "rm -rf 會被擋，要先講替代做法"
+
+        # 加一個 .py 回去就兩邊都算
+        (ws / "tool.py").write_text("x = 1\n", encoding="utf-8")
+        names = [d["function"]["name"] for d in serve.tool_defs()]
+        assert "run_tests" in names, "混合專案不能把 Python 那半藏起來"
+
+
+def test_verify_detect_knows_cmake_and_make():
+    """預填的驗證指令要看得懂 CMake 與 Makefile。
+
+    **只是預填**，真正會跑的是使用者確認過的字串。但預填一條跑不動的指令
+    比留白更糟 —— 所以 CMake 專案要先確認 configure 過了才給 ctest。
+    """
+    with Workspace() as ws:
+        for f in ws.rglob("*.py"):
+            f.unlink()
+        (ws / "tests").rmdir() if (ws / "tests").is_dir() else None
+
+        (ws / "CMakeLists.txt").write_text("project(x)\n", encoding="utf-8")
+        assert serve.verify_detect() == "cmake --build build", "還沒 configure 只能先建"
+
+        (ws / "build").mkdir()
+        (ws / "build" / "CTestTestfile.cmake").write_text("", encoding="utf-8")
+        assert serve.verify_detect() == (
+            "cmake --build build && ctest --test-dir build --output-on-failure")
+
+        (ws / "CMakeLists.txt").unlink()
+        (ws / "Makefile").write_text("all:\n\techo hi\ncheck:\n\techo t\n", encoding="utf-8")
+        assert serve.verify_detect() == "make check"
+        (ws / "Makefile").write_text("all:\n\techo hi\n", encoding="utf-8")
+        assert serve.verify_detect() == "", "沒有 test/check 目標就不要亂猜一條"
+
+
+def test_c_syntax_check_needs_real_compile_flags():
+    """C/C++ 的單檔檢查一定要走 compile_commands.json。
+
+    直接 `gcc -fsyntax-only x.c` 會在任何有自訂 include 路徑的專案上噴
+    「找不到標頭檔」—— 那是缺 -I 不是程式碼有問題，而誤報比沒有更糟。
+    沒有那個檔就安靜跳過，跟 eslint 沒設定檔就跳過同一條規則。
+    """
+    with Workspace() as ws:
+        src = ws / "util.c"
+        src.write_text('#include "util.h"\nint helper(int x){ return x; }\n', encoding="utf-8")
+        (ws / "inc").mkdir()
+        (ws / "inc" / "util.h").write_text("int helper(int);\n", encoding="utf-8")
+
+        # 沒有 compile_commands.json：安靜跳過，不是回一句「找不到 util.h」
+        assert serve.lint_after_write(src) == "", "沒有編譯資料庫時不該自己猜旗標"
+        assert serve.cc_flags(src) is None
+
+        db = [{"directory": str(ws), "file": str(src),
+               "command": f"/usr/bin/cc -I{ws / 'inc'} -o util.o -c {src}"}]
+        (ws / "compile_commands.json").write_text(json.dumps(db), encoding="utf-8")
+        argv, cwd = serve.cc_flags(src)
+        assert argv[1] == "-fsyntax-only", argv
+        assert "-o" not in argv and "util.o" not in argv, "輸出旗標要拿掉，不然會產生檔案"
+        assert "-c" not in argv, argv
+        assert f"-I{ws / 'inc'}" in argv, "include 路徑要留著，那才是整件事的重點"
+        assert cwd == str(ws)
+
+        # 不在資料庫裡的檔案（標頭檔就是這種）一樣安靜跳過
+        assert serve.cc_flags(ws / "inc" / "util.h") is None
+        assert serve.lint_after_write(ws / "inc" / "util.h") == ""
+
+
 def test_sandbox_backends_per_os():
     """一個作業系統一種做法，而且每一種都要說得出自己擋了什麼。
 

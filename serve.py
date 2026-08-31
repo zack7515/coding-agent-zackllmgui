@@ -83,7 +83,8 @@ from core.restore import (backup_file, checkpoint, journal_add, journal_for,
 from core.workspace import (BACKUP_DIR, DENY_DIRS, DENY_FILES, MAX_FILE_BYTES,
                             SESSIONS, SESSIONS_LOCK, SESSIONS_MAX, Session,
                             WORKTREE_DIR, WORKTREE_LINK, WORKTREE_MAX, WORKTREE_SKIP,
-                            _CUR, cur, session_for, ws_path, ws_rel, ws_root, ws_walk)
+                            _CUR, cur, session_for, ws_langs, ws_path, ws_rel, ws_root,
+                            ws_walk)
 from core.cmdrisk import RISKY_CMDS, canon, command_risk
 from core.extract import extract_text
 from tools import browser
@@ -958,6 +959,18 @@ def verify_detect() -> str:
                 return "npm test"
         except (ValueError, OSError):
             pass
+    if (ws / "CMakeLists.txt").is_file():
+        # 已經 configure 過才給 ctest —— 沒有 build/ 的話那條指令只會回錯誤，
+        # 而預填一條跑不動的指令比留白更糟
+        for d in ("build", "cmake-build-debug", "out/build"):
+            if (ws / d / "CTestTestfile.cmake").is_file():
+                return f"cmake --build {d} && ctest --test-dir {d} --output-on-failure"
+        return "cmake --build build"
+    if (ws / "Makefile").is_file():
+        body = (ws / "Makefile").read_text("utf-8", errors="replace")
+        for target in ("test", "check"):
+            if re.search(rf"^\.?{target}\s*:", body, re.M):
+                return f"make {target}"
     if (ws / "tests").is_dir() or list(ws.glob("test_*.py")):
         return " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
     return ""
@@ -1098,11 +1111,25 @@ def agent_rules() -> str:
               "delete_file 會先備份、還原得回來，rm 不會。",
               "- 一次做完一件事就用 run_tests 驗證，不要改一整輪才驗。",
               "- 測試失敗時修的是程式，不是測試。真的認為測試寫錯，先說出來讓使用者決定。"]
-    if cur().ws is not None:
+    langs = ws_langs()
+    if "python" in langs:
         r.append("- 缺套件時用 setup_env 裝進工作區的 .venv，不要用 run_shell 下 pip install。")
+    if "c" in langs:
+        # 有 CMake 就講 CMake，沒有就不要教它建一份 —— 那是專案的決定不是這裡的
+        r.append("- C/C++：編譯與測試用 run_shell 跑專案自己的那一套"
+                 + ("（cmake -S . -B build、cmake --build build、ctest --test-dir build"
+                    " --output-on-failure）。" if (cur().ws / "CMakeLists.txt").is_file()
+                    else "（make、或直接 gcc／g++）。")
+                 + "沒有 run_tests 可用，那支是 pytest 專用的。")
+        r.append("- 要清掉建置目錄用 `rm -r build`，不要加 -f —— 加了會被擋下來。")
     if ALLOW_SANDBOX:
         r.append("- run_shell 與 run_tests 在容器裡跑：只看得到工作區、**沒有網路**。"
-                 "要裝套件用 setup_env（只有它連得出去）。")
+                 + ("要裝套件用 setup_env（只有它連得出去）。" if "python" in langs else ""))
+        if "c" in langs:
+            # 這件事不能用機制解決（開網等於拆掉沙盒），所以它就該寫進提示詞
+            r.append("- 沙盒沒有網路，所以 FetchContent、vcpkg、conan **一定會失敗**。"
+                     "相依套件要由使用者先在沙盒外準備好；撞到下載失敗就直接說，"
+                     "不要改 CMakeLists 想繞過去。")
     if ALLOW_BROWSER:
         r.append("- 需要查網路上的東西：不知道網址就先 run_browser 搜尋，"
                  "拿到網址再 open；open 會一併給你那一頁上的連結，順著走下去。")
@@ -1143,6 +1170,11 @@ def tool_defs() -> list:
     plan_ok = cur().plan["approved"] or not cur().plan["on"]
     for t in TOOL_SCHEMAS:
         if t["needs"] == "ws" and cur().ws is None:
+            continue
+        # run_tests 與 setup_env 是 pytest 與 .venv 專用的。C/C++ 專案裡送出去，
+        # 模型會拿它們去跑一個沒有 pytest 的專案，然後花幾輪搞懂為什麼失敗。
+        # 那兩件事用 run_shell 跑 cmake／ctest 本來就做得到。
+        if t["needs"] == "python" and "python" not in ws_langs():
             continue
         # 還沒有背景指令的時候，check_job 是一支叫了也沒東西可收的工具。
         # 量過：一支工具的定義每一輪約 110 token，而多數對話從頭到尾沒有背景指令。
@@ -1306,8 +1338,45 @@ def git_action(action: str, message: str = "") -> dict:
 # 1. 只跑唯讀的檢查，不跑格式化 —— 在模型背後改檔案會讓它手上的內容過期。
 # 2. 沒裝就安靜跳過：加分項不該變成噪音，更不該害寫檔失敗。
 # 3. 不進沙盒：檔案寫在宿主機的工作區，容器裡根本沒有這個檔案。
-# ponytail: 只認 ruff 與 eslint，寫死。typecheck 要先解決「跑整包很慢」。
+# ponytail: 只認 ruff、eslint 與 C/C++ 的 -fsyntax-only，寫死。
+#           typecheck 要先解決「跑整包很慢」。
 LINT_TIMEOUT = 20
+# C/C++ 的單檔語法檢查一定要有真的編譯旗標。直接 `gcc -fsyntax-only x.cpp`
+# 十次有九次會噴「找不到 include」—— 那是缺 -I，不是程式碼有問題，
+# 而誤報比沒有更糟（模型會照著亂改）。compile_commands.json 是 CMake
+# 開 CMAKE_EXPORT_COMPILE_COMMANDS 就會生的標準檔，clangd／clang-tidy 也吃它。
+# 沒有這個檔就安靜跳過 —— 跟「eslint 沒設定檔就跳過」同一條規則。
+CC_DB = ("compile_commands.json", "build/compile_commands.json",
+         "cmake-build-debug/compile_commands.json", "out/build/compile_commands.json")
+
+
+def cc_flags(path: Path):
+    """從 compile_commands.json 找出這個檔案的編譯指令。回傳 (argv, cwd) 或 None。"""
+    for name in CC_DB:
+        db = ws_root() / name
+        if not db.is_file():
+            continue
+        try:
+            rows = json.loads(db.read_text("utf-8", errors="replace"))
+        except (ValueError, OSError):
+            continue
+        for r in rows:
+            if Path(r.get("file", "")).resolve() != path.resolve():
+                continue
+            argv = r.get("arguments") or shlex.split(r.get("command", ""))
+            # 丟掉輸出相關的旗標：-fsyntax-only 不產出東西，留著 -o 反而會出錯
+            out = []
+            skip = False
+            for a in argv[1:]:
+                if skip:
+                    skip = False
+                    continue
+                if a in ("-o", "-c"):
+                    skip = a == "-o"
+                    continue
+                out.append(a)
+            return ([argv[0], "-fsyntax-only"] + out, r.get("directory") or str(ws_root()))
+    return None
 
 
 def lint_after_write(path: Path) -> str:
@@ -1326,6 +1395,23 @@ def lint_after_write(path: Path) -> str:
                 pass
             return ""
         cmd = ["ruff", "check", "--no-cache", "--quiet", ws_rel(path)]
+    elif ext in repomap.C_EXT:
+        # 標頭檔不在 compile_commands.json 裡（那只記翻譯單元），所以只檢查 .c/.cpp。
+        # 改了標頭要等編譯才知道 —— 那是這個做法的界線，不要為了補它去猜旗標。
+        hit = cc_flags(path) if ext not in (".h", ".hpp", ".hh", ".hxx") else None
+        if not hit:
+            return ""
+        cmd, cwd = hit
+        try:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=LINT_TIMEOUT)
+        except Exception:
+            return ""
+        if r.returncode == 0:
+            return ""
+        body = tail_of((r.stderr + r.stdout).strip(), 20).strip()
+        body = body.replace(str(ws_root()) + os.sep, "")
+        return "[語法檢查] 這個檔案編不過，請修：\n" + body if body else ""
     elif ext in (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"):
         # eslint 幾乎都裝在專案裡而不是全域，所以先找 node_modules/.bin
         local = ws_root() / "node_modules" / ".bin" / "eslint"

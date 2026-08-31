@@ -290,8 +290,8 @@ function currentTodo(todos) {
 //
 // 這兩條不折行也不能以 \/ 收尾：tests/test_gui.js 的 grab() 只吃一行寫完的 const，
 // 而且會把 // 之後當成行尾註解砍掉。
-const TEST_FILE_RE = /(^|\/)tests?\/|(^|\/)(test_[^/]+\.py|[^/]+_test\.(py|go|rb)|[^/]+\.(test|spec)\.[jt]sx?)$/i;
-const TEST_CMD_RE = /\b(pytest|unittest|jest|vitest|mocha|ava|go test|cargo test|npm (run )?test|yarn test|pnpm test)\b/i;
+const TEST_FILE_RE = /(^|\/)tests?\/|(^|\/)(test_[^/]+\.(py|c|cc|cpp|cxx)|[^/]+_(test|unittest)\.(py|go|rb|c|cc|cpp|cxx)|[^/]+\.(test|spec)\.[jt]sx?)$/i;
+const TEST_CMD_RE = /\b(pytest|unittest|jest|vitest|mocha|ava|go test|cargo test|ctest|ninja test|make (test|check)|npm (run )?test|yarn test|pnpm test)\b/i;
 
 function looksLikeTestFile(path) { return TEST_FILE_RE.test(String(path || '')); }
 function looksLikeTestRun(name, args) {

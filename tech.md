@@ -488,6 +488,82 @@ ruff／eslint 只看得出語法層的東西，看不出行為壞了。
 驗收本身壞掉（`/verify` 回錯）時**放行**，不是攔著：一個壞掉的檢查不該變成
 「永遠不讓它收工」。
 
+## 多語言：加的不是「支援」，是四條回饋線
+
+**C/C++ 從一開始就跑得動** —— `run_shell` 不限語言，收尾驗證指令是使用者自己填的
+字串，`command_risk()` 也放行 `cmake` / `ctest` / `g++` / `make`。實測在 bwrap
+沙盒裡跑完整的 configure → build → ctest，測試失敗時 exit=8 加上讀得懂的輸出。
+
+所以「支援 C/C++」要補的不是執行能力，是**四條 Python 專屬的回饋線**：
+
+| 回饋線 | 沒有它會怎樣 |
+|---|---|
+| 專案地圖的符號 | 地圖只有檔名，模型每個任務又要花三五輪摸清專案 —— 正好是專案地圖存在的理由 |
+| 寫檔後的語法檢查 | 寫壞的檔案要等到編譯那一步才知道 |
+| 驗證指令預填 | 使用者得自己打（**功能還在**，只是沒人幫他填） |
+| 測試檔／測試指令辨識 | 收工前那道「寫了測試沒跑」靜靜失效 |
+
+### 一定要用 compile_commands.json，不能裸跑 gcc
+
+直覺會寫 `gcc -fsyntax-only <檔案>`。實測，一個有自訂 include 路徑的檔案：
+
+```
+$ gcc -fsyntax-only util.c
+util.c:1:10: fatal error: util.h: No such file or directory
+```
+
+那是缺 `-I`，不是程式碼有問題。而 `lint_after_write` 的既有註解自己寫著
+「拿那個去吵模型只會害它亂改」—— **誤報比沒有更糟**。
+
+`compile_commands.json` 記著每個翻譯單元的真實編譯指令（CMake 開
+`CMAKE_EXPORT_COMPILE_COMMANDS=ON` 就會生，clangd 與 clang-tidy 也吃它）。
+拿那一行、拔掉 `-o` 與 `-c`、換成 `-fsyntax-only`，同一個檔案回空字串。
+沒有這個檔就安靜跳過 —— 跟「eslint 沒設定檔就跳過」同一條規則。
+
+標頭檔不在資料庫裡（那只記翻譯單元），所以 `.h` / `.hpp` 一律跳過。
+改了標頭要等編譯才知道，那是這個做法的界線；為了補它去猜旗標就回到誤報那條路。
+
+### 符號抽取靠「頂層的東西寫在第一欄」
+
+C/C++ 沒有 `ast` 可用，而 tree-sitter 是一個相依套件（這個專案只用標準函式庫）。
+用的是兩條正規表示式，都錨在 `^`：
+
+- 型別：`class` / `struct` / `union` / `namespace` / `enum class` 後面那個名字
+- 函式：回傳型別 → 名字 → 參數 → `;` 或 `{`
+
+第一欄這個約束不是省事，是**準確度的來源**：它自動濾掉 class 裡的成員（縮排的）、
+迴圈、以及第一欄的 `return f(x);`（那一個還是要靠開頭關鍵字的負向斷言擋）。
+`#define` 天生排除掉，因為開頭是 `#`。測試驗的重點是誤報不是漏抓 ——
+地圖上多一個不存在的名字，模型會拿它去 `search_files` 然後空手而回。
+
+### 沙盒沒有網路這件事，只能寫進提示詞
+
+tech.md 有一條原則是「能用機制解決的事不要寫進提示詞」。這一項是它的反面：
+沙盒裡 `FetchContent` / vcpkg / conan **一定失敗**（實測 DNS 不通、curl 不通），
+而唯一的機制解法是開一個連網入口 —— 那等於在安全邊界上再開一個洞，
+為了一個非常態的需求（C/C++ 的相依多半是系統套件或 vendored）不划算。
+
+所以 `agent_rules()` 直接告訴模型：撞到下載失敗就說，不要改 CMakeLists 想繞過去。
+**不能用機制解決的事，才輪到提示詞。**
+
+### `needs: "python"`：語言也是一種「沒開放」
+
+`tool_defs()` 本來就有 `needs` 閘門（`ws` / `job` / `plan` / `write` / `browser`），
+原則是「沒開放的功能一個字都不要提，否則小模型會去呼叫不存在的工具」。
+`run_tests` 與 `setup_env` 是 pytest 與 `.venv` 專用的，在 C++ 專案裡就是
+「沒開放的功能」—— 加一個 `needs: "python"` 順著既有機制走完，沒有新概念。
+
+判斷用 `ws_langs()`：掃前 400 個檔案的副檔名（跟專案地圖同一個上限）。
+掃不完整不要緊 —— 這只決定提示詞怎麼寫，不決定放不放行。混合專案（這個 repo
+就是 Python + JS）兩邊都算，所以不會把誰藏起來。
+
+### C# 沒做，原因是沒有便宜的單檔檢查
+
+`dotnet build` 是整包編譯，而 `lint_after_write` 每寫一個檔就要跑一次。
+C# 沒有 `-fsyntax-only` 的對應物，`compile_commands.json` 那套也不適用。
+用 `run_shell` 跑 `dotnet test` 一樣做得完，但上面那四條回饋線一條都給不了 ——
+與其做半套讓人以為有，不如寫清楚沒有。
+
 ## 提示詞、工具描述、錯誤訊息，哪個有用
 
 量過：`test_agent.py --no-rules` 把 `agent_rules()` 整段拿掉，同一個任務同樣通過
@@ -1684,9 +1760,9 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 97 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 100 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
-python tests/test_core.py    # 6 項：core/ 拆出去時新長出來的那些參數（repo_map(files, rel)、
+python tests/test_core.py    # 8 項：core/ 拆出去時新長出來的那些參數（repo_map(files, rel)、
                              #       skills_usable(have)、skill_live 的兩個 callback）
 node tests/test_gui.js       # 70 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree

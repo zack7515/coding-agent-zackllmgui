@@ -1172,12 +1172,13 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 
   // 認得出來的測試檔
   ['test_wafer.py', 'src/test_a.py', 'wafer_test.py', 'main_test.go',
-   'ui.test.js', 'ui.spec.tsx', 'tests/anything.py', 'test/foo.rb'].forEach(function (p) {
+   'ui.test.js', 'ui.spec.tsx', 'tests/anything.py', 'test/foo.rb',
+   'test_calc.c', 'calc_test.cc', 'solver_unittest.cpp', 'tests/geo.cpp'].forEach(function (p) {
     assert.ok(box.file(p), p + ' 應該算測試檔');
   });
   // 不能誤判成測試檔 —— 誤判會讓每次寫檔都被嘮叨一次
   ['wafer_counter.py', 'src/latest.py', 'contest.py', 'protest.js',
-   'README.md', 'attestation.py'].forEach(function (p) {
+   'README.md', 'attestation.py', 'src/latest.cpp', 'main.cpp'].forEach(function (p) {
     assert.ok(!box.file(p), p + ' 不該算測試檔');
   });
 
@@ -1185,7 +1186,12 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(box.run('run_shell', { command: 'python -m pytest -q' }));
   assert.ok(box.run('run_shell', { command: 'npm test' }));
   assert.ok(box.run('run_shell', { command: 'cargo test --all' }));
+  assert.ok(box.run('run_shell', { command: 'ctest --test-dir build --output-on-failure' }));
+  assert.ok(box.run('run_shell', { command: 'make check' }));
   assert.ok(!box.run('run_shell', { command: 'python wafer_counter.py' }));
+  // 建置不等於測試 —— 算成測試的話「寫了測試沒跑」那道檢查就被騙過去了
+  assert.ok(!box.run('run_shell', { command: 'cmake --build build' }));
+  assert.ok(!box.run('run_shell', { command: 'make all' }));
   assert.ok(!box.run('write_file', { path: 'test_a.py' }), '寫測試檔不等於跑測試');
 
   // 只有「寫了測試又沒跑」才攔
