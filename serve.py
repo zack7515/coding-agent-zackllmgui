@@ -42,6 +42,7 @@ import os
 import re
 import shlex
 import shutil
+import select
 import socket
 import subprocess
 import tempfile
@@ -1643,6 +1644,33 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._pipe(req)
 
+    def _watch_client(self, upstream, done: threading.Event) -> None:
+        """瀏覽器斷線就把上游那條連線切掉。
+
+        只有**寫入**客戶端才發得出 BrokenPipe，而模型在載入或跑 prompt eval
+        的時候一個 token 都還沒出來 —— 那段時間 _pipe 卡在 read1 上，沒有東西
+        可寫，按了停止也傳不到 Ollama。這條執行緒專門盯著客戶端那一頭。
+        """
+        sock = self.connection
+        while not done.is_set():
+            try:
+                if not select.select([sock], [], [], 0.5)[0]:
+                    continue
+                # MSG_PEEK 不吃掉資料：收得到東西就不是斷線（瀏覽器不會在
+                # 串流中途塞下一個請求，但別為了省一行就把那種情況當斷線）
+                if sock.recv(1, socket.MSG_PEEK):
+                    continue
+            except OSError:
+                pass                   # RST 也算斷線
+            # shutdown 才叫得醒卡住的 read1，close 不一定會。
+            # 私有屬性，所以包起來 —— 拿不到就退回 close()，那是現在的行為。
+            try:
+                upstream.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            upstream.close()
+            return
+
     def _pipe(self, req: urllib.request.Request) -> None:
         """送出請求，把回應原封不動串流回瀏覽器。"""
         target = req.full_url
@@ -1670,6 +1698,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
+        done = threading.Event()
+        watch = threading.Thread(target=self._watch_client, args=(upstream, done),
+                                 daemon=True)
+        watch.start()
         try:
             while True:
                 # 一定要用 read1：read(n) 會等到收滿 n bytes 才回來，
@@ -1686,7 +1718,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass          # 使用者按了停止，正常現象
+        except (OSError, ValueError):
+            pass          # _watch_client 把上游切掉了，也是停止
         finally:
+            done.set()
             upstream.close()
 
     # -- 外部 API（OpenAI 相容） -------------------------------------- #
@@ -2035,7 +2070,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(8192) or b"{}")
-            workspace.CURRENT_CHAT = str(req.get("chat", ""))[:64]
+            workspace.set_cur_chat(req.get("chat", ""))
             self._json(checkpoint(str(req.get("note", ""))))
         except Exception as e:
             self._json({"skipped": f"{type(e).__name__}: {e}"})
@@ -2298,7 +2333,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(1024 * 1024) or b"{}")
-            workspace.CURRENT_CHAT = str(req.get("chat", ""))[:64]
+            workspace.set_cur_chat(req.get("chat", ""))
             with as_agent(str(req.get("agent", ""))):
                 out = run_tool(req.get("name", ""), req.get("args") or {})
         except subprocess.TimeoutExpired:

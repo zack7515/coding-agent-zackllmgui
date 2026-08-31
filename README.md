@@ -18,50 +18,6 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 想直接按兩下 `zackllmgui.html` 也可以，只是 Ollama 那台要設 `OLLAMA_ORIGINS`，
 而且解析 PDF / Word 與本機工具用不了。兩種方式的差別見[使用手冊](manual.md#兩種開啟方式)。
 
-## 一個實際跑過的例子
-
-工作區裡只有一批標注資料：12 個 labelme 標注檔。沒有程式、沒有 README、沒有任何說明。
-**跑指令自動 + 沙盒開啟**，丟一句話進去：
-
-> 讀 `N_wafer_json/` 底下的 labelme 標注檔（每個 shapes 元素是一片 wafer），算出這批資料
-> 總共標了幾片。寫成 `wafer_counter.py`，附上 pytest 測試，最後跑一次測試確認會過。
-
-然後就沒有再按過任何確認：
-
-![agent 跑起來的樣子](docs/shots/agent-run.png)
-
-**11 輪、12 次工具呼叫。** 它做的事情按順序是：
-
-| 工具 | 做了什麼 |
-|---|---|
-| `load_skill` | **自己決定**要載入 `run-pytest` 這份技能，沒有人叫它載 |
-| `list_dir` | 先看資料夾裡有什麼 |
-| `run_shell` ×2 | **開一個 JSON 出來看格式**，再掃過全部確認，沒有用猜的 |
-| `write_file` | 寫 `wafer_counter.py` |
-| `write_file`／`edit_file` ×2 | 寫 `test_wafer_counter.py`，再自己改兩版 |
-| `setup_env` | 在沙盒裡建 `.venv`、`pip install pytest` |
-| `run_tests` | `5 passed in 0.01s` |
-| `run_shell` | 真的跑一次程式，答案是 **380 片** |
-
-從第一個檔案落地（10:11:52）到測試變綠（10:14:24），**2 分 32 秒**。
-
-值得看的是**它沒有猜資料格式**：先用 `run_shell` 開一個檔案出來確認 `shapes` 長什麼樣，
-才動手寫程式。測試也是它自己想的五個案例，其中一個是拿真實的那 12 個檔案做整合檢查 ——
-不是只測會過的路徑。
-
-> 這個任務先前用另一個模型跑過一次，答案一樣是 380。
-> 那一輪的完整痕跡比對（怎麼從硬碟上反推它確實在沙盒裡跑完）在[使用手冊](manual.md#一個實際跑過的例子)。
-
-產出的檔案就在右邊的**檔案**分頁裡，點一下直接看：
-
-![檔案分頁](docs/shots/files.png)
-
-> 這個例子錄的是**單一代理**跑完一件事。後來加的子代理、worktree、自動壓縮不在裡面 ——
-> 那些看功能一覽。裡面每一支工具現在跑起來都還是一樣。
-
-> **venv 還是沙盒？兩個都是。** 沙盒是箱子，venv 是箱子裡的環境：
-> `setup_env` 在沙盒裡建 `.venv`，`run_tests` 再用那個 `.venv` 的 python 跑，全程沒有離開箱子。
-
 ## 功能一覽
 
 | | |
@@ -156,6 +112,50 @@ wafer_counter.py:3:8: F401 [*] `os` imported but unused
 > 這是 aider 的 `--auto-lint`（預設開）那一套 ——
 > 不是那些要你自己寫一份 hooks 設定檔的做法。
 
+## 一個實際跑過的例子
+
+上面那些湊起來實際長什麼樣。工作區裡只有一批標注資料：12 個 labelme 標注檔。沒有程式、沒有 README、沒有任何說明。
+**跑指令自動 + 沙盒開啟**，丟一句話進去：
+
+> 讀 `N_wafer_json/` 底下的 labelme 標注檔（每個 shapes 元素是一片 wafer），算出這批資料
+> 總共標了幾片。寫成 `wafer_counter.py`，附上 pytest 測試，最後跑一次測試確認會過。
+
+然後就沒有再按過任何確認：
+
+![agent 跑起來的樣子](docs/shots/agent-run.png)
+
+**11 輪、12 次工具呼叫。** 它做的事情按順序是：
+
+| 工具 | 做了什麼 |
+|---|---|
+| `load_skill` | **自己決定**要載入 `run-pytest` 這份技能，沒有人叫它載 |
+| `list_dir` | 先看資料夾裡有什麼 |
+| `run_shell` ×2 | **開一個 JSON 出來看格式**，再掃過全部確認，沒有用猜的 |
+| `write_file` | 寫 `wafer_counter.py` |
+| `write_file`／`edit_file` ×2 | 寫 `test_wafer_counter.py`，再自己改兩版 |
+| `setup_env` | 在沙盒裡建 `.venv`、`pip install pytest` |
+| `run_tests` | `5 passed in 0.01s` |
+| `run_shell` | 真的跑一次程式，答案是 **380 片** |
+
+從第一個檔案落地（10:11:52）到測試變綠（10:14:24），**2 分 32 秒**。
+
+值得看的是**它沒有猜資料格式**：先用 `run_shell` 開一個檔案出來確認 `shapes` 長什麼樣，
+才動手寫程式。測試也是它自己想的五個案例，其中一個是拿真實的那 12 個檔案做整合檢查 ——
+不是只測會過的路徑。
+
+> 這個任務先前用另一個模型跑過一次，答案一樣是 380。
+> 那一輪的完整痕跡比對（怎麼從硬碟上反推它確實在沙盒裡跑完）在[使用手冊](manual.md#一個實際跑過的例子)。
+
+產出的檔案就在右邊的**檔案**分頁裡，點一下直接看：
+
+![檔案分頁](docs/shots/files.png)
+
+> 這個例子錄的是**單一代理**跑完一件事。後來加的子代理、worktree、自動壓縮不在裡面 ——
+> 那些在上面的功能一覽。裡面每一支工具現在跑起來都還是一樣。
+
+> **venv 還是沙盒？兩個都是。** 沙盒是箱子，venv 是箱子裡的環境：
+> `setup_env` 在沙盒裡建 `.venv`，`run_tests` 再用那個 `.venv` 的 python 跑，全程沒有離開箱子。
+
 ## 文件
 
 | 文件 | 回答什麼問題 |
@@ -211,8 +211,9 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 85 項
-node   tests/test_gui.js      # 網頁 67 項
+python tests/test_serve.py    # 後端 97 項
+python tests/test_core.py     # core/ 各模組的介面 6 項
+node   tests/test_gui.js      # 網頁 69 項
 ```
 
 兩份都不需要安裝任何東西，也不需要 Ollama 在跑。

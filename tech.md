@@ -1478,14 +1478,14 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **worktree 的改動要人自己 merge** | 主代理拿到的是 diffstat 加一句 `git merge zackllmgui/xxxx`，最後那一下要人下 | 自動合撞到衝突會把工作區弄成一半合完的狀態，比「你自己 merge」更難收拾。見 [plan-agent.md](plan-agent.md) 2.13 |
 | **子代理的 commit 訊息是機器寫的**（`agent_commit_msg`） | 分支上那一筆長成「子代理 a123（work）：<交辦的話>」 | 那是給人辨認用的，不是給 changelog 用的。要漂亮的訊息就 merge 之後自己 `--amend` |
 | **自動壓縮的門檻寫死 85%**（[06-chat.js](frontend/js/06-chat.js) `AUTO_COMPACT_AT`） | 沒得調 | 太早壓會丟掉還用得到的細節，太晚壓會來不及。85% 留得下一次壓縮呼叫本身的空間，而 `preCompact` 在 75% 就先算好了 |
-| **子代理滿了是「收工具」不是壓縮**（[07-tools.js](frontend/js/07-tools.js) `SUB_CTX_AT`） | 一份長調查只會拿到「查到一半」的結論 | 幫子代理也做一套壓縮＝多一條會壞的路。收工具是三行，而且結論一定拿得到。真的常撞到再說 |
+| **子代理滿了是「收工具」不是壓縮**（[09-agents.js](frontend/js/09-agents.js) `SUB_CTX_AT`） | 一份長調查只會拿到「查到一半」的結論 | 幫子代理也做一套壓縮＝多一條會壞的路。收工具是三行，而且結論一定拿得到。真的常撞到再說 |
 | **`check_job` 要有背景指令才送**（[serve.py](serve.py) `tool_defs`） | 模型看不到它，除非真的丟了背景指令 | 一支工具的定義每輪約 110 token（量過），而多數對話從頭到尾沒有背景指令。用既有的 `needs` 閘門，不是另做一套延後載入 —— 那一套量過之後不值得，見 [plan-agent.md](plan-agent.md) 第 1 節 |
 | **skill 的 `!`指令`` 最多 5 行、15 秒**（`SKILL_CMD_MAX`） | 想帶更多現場狀態就帶不了 | 那是 skill 不是腳本。要跑一串就寫成一支腳本，正文叫 `run_shell` 跑它 —— 那條路有完整的確認卡 |
 | **skill 清單的上限寫死 30 則／120 字**（[serve.py](serve.py) `SKILL_LIST_MAX`） | 第 31 個 skill 模型看不到（`load_skill` 指名還是叫得到） | 有些 agent 為此開了兩個設定，這裡的 context 小一個數量級，可調空間本來就不大 |
 | **worktree 只連 `node_modules` 一個名字，而且是同一份不是複本**（[serve.py](serve.py) `WORKTREE_LINK`） | `vendor`／`target` 那些還是不在；子代理 `npm install` 會動到主專案 | 條件很嚴（純相依、名字全世界一樣、重建很貴），第二個出現時是加一個字串不是開設定檔。「借」只能用連的，因為 `npm` 認的是 `./node_modules`（`.venv` 可以用讀的，所以那邊沒連）。`agents/work.md` 明講不要自己裝 |
 | **MCP 連線不會主動關**（[serve.py](serve.py) `mcps`） | 換過幾個工作區之後，閒置的 stdio 行程留到收攤 | 閒置行程不花什麼，而「什麼時候沒人用了」要另外追一份狀態。真的變多就掛在 `SESSIONS_MAX` 淘汰那裡 |
 | **`.git/info/exclude` 寫不進去就算了**（[serve.py](serve.py) `worktree_add`） | 主目錄會多一筆未追蹤的 `.zackllmgui-worktrees/` | 不影響隔離本身，所以不讓它把整個開 worktree 的動作弄失敗 |
-| **子代理的 context 最多留 20 則**（[07-tools.js](frontend/js/07-tools.js) `SUB_KEEP`） | 更早的 `resume` id 會失效 | 每一則都是一整條對話，不能無限留。失效時模型重新交辦一次就好 |
+| **子代理的 context 最多留 20 則**（[09-agents.js](frontend/js/09-agents.js) `SUB_KEEP`） | 更早的 `resume` id 會失效 | 每一則都是一整條對話，不能無限留。失效時模型重新交辦一次就好 |
 | **`SESSIONS` 上限 32，滿了丟最久沒動的**（[serve.py](serve.py) `SESSIONS_MAX`） | 開超過 32 個分頁時，最舊的那個要重新設定工作區 | 分頁關掉不會通知伺服器，沒有上限就是慢性洩漏。要準就讓網頁在 `unload` 時說一聲，但那個訊號本來就不可靠 |
 | **背景指令沒有 `GET /job/{id}` 串流** | 看不到即時輸出，只能整段收 | 收結果走既有的 `/tool`，因為 `check_job` 是工具不是路由。要即時看再補一條 SSE |
 | **`check_job` 用輪詢 `time.sleep(0.2)` 等**（[serve.py](serve.py) `BG_WAIT`） | 一條指令佔住一條 HTTP 執行緒 | `ThreadingHTTPServer` 一條指令一條執行緒，上限 `BG_MAX = 8`。要更省就換 `threading.Event` |
@@ -1553,9 +1553,11 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 85 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 97 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
-node tests/test_gui.js       # 67 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+python tests/test_core.py    # 6 項：core/ 拆出去時新長出來的那些參數（repo_map(files, rel)、
+                             #       skills_usable(have)、skill_live 的兩個 callback）
+node tests/test_gui.js       # 69 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
                              #   --no-rules 拿掉系統提示、--tools=a,b 只送幾支工具，都是量用的

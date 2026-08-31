@@ -817,8 +817,28 @@ async function runStream(c, depth) {
   // 第一個字還沒到、或思考的字都吐在 think 裡（「顯示思考」關著時一個字都看不見）
   // 的那段時間，畫面上要看得到「還在跑，跑了多久」。
   // 之前是一個游標閃在空白畫面上 —— 分不出「在想」跟「當掉」。
+  // /api/ps 列的是**已經在記憶體裡**的模型。問了沒有這一支，就是還在從硬碟搬。
+  // 搭在既有的 flush 計時器上，不另外開一條 —— 那條的收尾每個分支都處理過了。
+  let loadSize = '';
+  let probeAt = LOAD_PROBE_AFTER;
+  let probing = false;
+  const probeLoad = function () {
+    // 開始吐字就代表載完了，別再問下去
+    if (content || thinking || toolCalls.length) { loadSize = ''; probeAt = Infinity; return; }
+    const ms = performance.now() - t0;
+    if (S.provider === 'openai' || probing || ms < probeAt) return;
+    probing = true;
+    probeAt = ms + LOAD_PROBE_EVERY;
+    apiJson('/api/ps', null, 5000).then(function (ps) {
+      const up = (ps.models || []).some(function (m) { return m.name === payload.model; });
+      const rec = S.models.filter(function (m) { return m.name === payload.model; })[0];
+      loadSize = (up || !rec || !rec.size) ? '' : humanSize(rec.size);
+      probing = false;
+    }, function () { probeAt = Infinity; probing = false; });   // 問不到就別再問，這是加分不是必要
+  };
+
   const waitLine = function () {
-    const st = waitText(performance.now() - t0, thinking, S.showThink);
+    const st = waitText(performance.now() - t0, thinking, S.showThink, loadSize);
     if (!st) { bodyEl.innerHTML = '<span class="caret"></span>'; return; }
     bodyEl.innerHTML = '<span class="wait"></span>';
     bodyEl.firstChild.textContent = st;
@@ -827,7 +847,7 @@ async function runStream(c, depth) {
 
   let lastRender = 0;
   const flush = function () {
-    if (!content && !retrying) waitLine();   // 秒數要自己走，不能只在收到字時更新
+    if (!content && !retrying) { probeLoad(); waitLine(); }  // 秒數要自己走，不能只在收到字時更新
     if (!dirty) return;
     dirty = false;
     if (thinking && S.showThink) {

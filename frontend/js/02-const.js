@@ -263,7 +263,13 @@ function sysLevel(at) { return at >= 0.92 ? 'full' : (at >= 0.75 ? 'hot' : ''); 
 
 // 等第一個字時，訊息裡要畫的那一行。回空字串＝不用畫
 // （思考內容自己在動，看得到就不必再講一次）。
-function waitText(ms, thinking, showThink) {
+// 冷載入跟當掉在畫面上長得一模一樣 —— 都是「等模型回應…」配一個往上跳的秒數。
+// 實測 9.6 GB 的模型冷載入近三分鐘，那三分鐘裡人只能猜，然後按停止重送、再載一次。
+const LOAD_PROBE_AFTER = 6000;        // 撐過這麼久還沒有字才去問，短回答不會多打一次
+const LOAD_PROBE_EVERY = 5000;
+function waitText(ms, thinking, showThink, loadSize) {
+  if (loadSize) return '正在把模型讀進記憶體（' + loadSize + '）… ' + fmtElapsed(ms) +
+    '　第一次載入要從硬碟搬進 VRAM，不是當掉';
   if (!thinking) return '等模型回應… ' + fmtElapsed(ms);
   if (showThink) return '';
   return '思考中… ' + fmtElapsed(ms) + '（已寫 ' + thinking.length +

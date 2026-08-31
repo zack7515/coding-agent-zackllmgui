@@ -662,7 +662,7 @@ check_job  {"id": "job1", "wait": 60}
 
 ```
 serve.py：Session, cur, session_for, ws_path, command_risk, canon…（共 136 個）
-frontend/js/07-tools.js：openFeatureMenu, runSubagent, confirmTool…
+frontend/js/07-tools.js：openFeatureMenu, confirmTool, execTool…
 notes.md
 ```
 
@@ -1087,9 +1087,13 @@ ollamaGUI/
 │       ├── 04-api.js         Ollama 與 OpenAI 相容 API、連線狀態
 │       ├── 05-params.js      思考模式、取樣與進階參數
 │       ├── 06-chat.js        對話資料、送出與串流、壓縮
-│       ├── 07-tools.js       工具呼叫、待辦、檔案檢視、工作區
-│       ├── 08-ui.js          模型管理、比較、附件、選單、連線設定
-│       └── 09-init.js        接線與啟動
+│       ├── 07-tools.js       工具的確認與執行、待辦、允許規則
+│       ├── 08-files.js       檔案檢視、工作區、檔案樹、還原點
+│       ├── 09-agents.js      子代理：開起來、跑迴圈、定位與中斷
+│       ├── 10-models.js      模型下載、刪除、卸載、多模型比較
+│       ├── 11-compose.js     附件、context 用量、系統提示預設、斜線功能表
+│       ├── 12-ui.js          分支、選單、側欄拖寬、主題、系統用量
+│       └── 13-init.js        接線與啟動
 │
 ├── tests/                全部的自我檢查，都不需要安裝東西
 │   ├── test_serve.py       後端 85 項： python tests/test_serve.py

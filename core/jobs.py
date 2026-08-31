@@ -112,7 +112,7 @@ def _start_job(command: str, cmd, cwd, use_shell: bool, head: str) -> str:
                "started": time.time(), "ended": 0.0, "proc": None,
                # 誰丟的。中斷一個子代理時要連它的背景指令一起殺，
                # 不然「已中斷」只中斷了一半 —— 指令還在這台機器上跑。
-               "agent": (rec or {}).get("id", ""), "chat": workspace.CURRENT_CHAT}
+               "agent": (rec or {}).get("id", ""), "chat": workspace.cur_chat()}
         JOBS[jid] = job
     proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, bufsize=1, text=True,

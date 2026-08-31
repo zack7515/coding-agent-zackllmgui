@@ -5,10 +5,16 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# 這支程式自己會產生的東西
-.zackllmgui-backup/          # 改檔案前的備份（journal.jsonl 也在裡面），內容是使用者的專案檔
-.zackllmgui-*.json           # MCP 設定與允許規則 —— 都是這台機器自己的事
-.zackllmgui-todos.md         # 待辦清單的鏡像（focus chain），是這一次任務的暫存
+# 這支程式自己會產生的東西。
+# 註解一定要自己一行：.gitignore 沒有行尾註解，寫在後面整條規則就對不到任何東西。
+# 改檔案前的備份（journal.jsonl 也在裡面），內容是使用者的專案檔
+.zackllmgui-backup/
+# MCP 設定與允許規則 —— 都是這台機器自己的事，而且規則檔決定什麼可以自動放行
+.zackllmgui-*.json
+# 待辦清單的鏡像（focus chain），是這一次任務的暫存
+.zackllmgui-todos.md
+# 隔離型子代理的 git worktree
+.zackllmgui-worktrees/
 
 # skills/ 不在這裡 —— 那是隨程式附的內建技能，要跟著版控走。
 # 使用者自己的技能放在「他的工作區」底下的 skills/，那是他自己的 repo 的事。

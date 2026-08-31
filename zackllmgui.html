@@ -1520,7 +1520,13 @@ function sysLevel(at) { return at >= 0.92 ? 'full' : (at >= 0.75 ? 'hot' : ''); 
 
 // 等第一個字時，訊息裡要畫的那一行。回空字串＝不用畫
 // （思考內容自己在動，看得到就不必再講一次）。
-function waitText(ms, thinking, showThink) {
+// 冷載入跟當掉在畫面上長得一模一樣 —— 都是「等模型回應…」配一個往上跳的秒數。
+// 實測 9.6 GB 的模型冷載入近三分鐘，那三分鐘裡人只能猜，然後按停止重送、再載一次。
+const LOAD_PROBE_AFTER = 6000;        // 撐過這麼久還沒有字才去問，短回答不會多打一次
+const LOAD_PROBE_EVERY = 5000;
+function waitText(ms, thinking, showThink, loadSize) {
+  if (loadSize) return '正在把模型讀進記憶體（' + loadSize + '）… ' + fmtElapsed(ms) +
+    '　第一次載入要從硬碟搬進 VRAM，不是當掉';
   if (!thinking) return '等模型回應… ' + fmtElapsed(ms);
   if (showThink) return '';
   return '思考中… ' + fmtElapsed(ms) + '（已寫 ' + thinking.length +
@@ -3509,8 +3515,28 @@ async function runStream(c, depth) {
   // 第一個字還沒到、或思考的字都吐在 think 裡（「顯示思考」關著時一個字都看不見）
   // 的那段時間，畫面上要看得到「還在跑，跑了多久」。
   // 之前是一個游標閃在空白畫面上 —— 分不出「在想」跟「當掉」。
+  // /api/ps 列的是**已經在記憶體裡**的模型。問了沒有這一支，就是還在從硬碟搬。
+  // 搭在既有的 flush 計時器上，不另外開一條 —— 那條的收尾每個分支都處理過了。
+  let loadSize = '';
+  let probeAt = LOAD_PROBE_AFTER;
+  let probing = false;
+  const probeLoad = function () {
+    // 開始吐字就代表載完了，別再問下去
+    if (content || thinking || toolCalls.length) { loadSize = ''; probeAt = Infinity; return; }
+    const ms = performance.now() - t0;
+    if (S.provider === 'openai' || probing || ms < probeAt) return;
+    probing = true;
+    probeAt = ms + LOAD_PROBE_EVERY;
+    apiJson('/api/ps', null, 5000).then(function (ps) {
+      const up = (ps.models || []).some(function (m) { return m.name === payload.model; });
+      const rec = S.models.filter(function (m) { return m.name === payload.model; })[0];
+      loadSize = (up || !rec || !rec.size) ? '' : humanSize(rec.size);
+      probing = false;
+    }, function () { probeAt = Infinity; probing = false; });   // 問不到就別再問，這是加分不是必要
+  };
+
   const waitLine = function () {
-    const st = waitText(performance.now() - t0, thinking, S.showThink);
+    const st = waitText(performance.now() - t0, thinking, S.showThink, loadSize);
     if (!st) { bodyEl.innerHTML = '<span class="caret"></span>'; return; }
     bodyEl.innerHTML = '<span class="wait"></span>';
     bodyEl.firstChild.textContent = st;
@@ -3519,7 +3545,7 @@ async function runStream(c, depth) {
 
   let lastRender = 0;
   const flush = function () {
-    if (!content && !retrying) waitLine();   // 秒數要自己走，不能只在收到字時更新
+    if (!content && !retrying) { probeLoad(); waitLine(); }  // 秒數要自己走，不能只在收到字時更新
     if (!dirty) return;
     dirty = false;
     if (thinking && S.showThink) {
@@ -3923,6 +3949,9 @@ function renderCompactBtns() {
 }
 
 
+
+// 工具：定義、確認、執行、待辦、允許規則。
+// 留在這裡的是「模型要動手之前經過的那條路」，檔案面板與子代理已經搬走。
 
 /* ══════════════════════ 工具呼叫 ══════════════════════ */
 function toolsReady() {
@@ -4371,6 +4400,390 @@ function askUser(args) {
     });
   });
 }
+
+/* ══════════════════════ 修改檔案的開關 ══════════════════════ */
+// 從選單裡搬出來變成輸入框旁邊的按鈕：它是每天要按好幾次的東西，
+// 不該藏在兩層選單底下。
+function writeReason() {
+  if (!S.srv.tools) return toolsReason() || '本機工具沒有開啟';
+  if (!S.ws.path) return '要先選一個工作區資料夾';
+  return '';
+}
+
+function renderWriteBtn() {
+  const btn = $('writeBtn');
+  if (!btn) return;
+  const why = writeReason();
+  btn.classList.toggle('on', !!S.ws.write);
+  btn.disabled = !!why;
+  btn.title = why || (S.ws.write
+    ? '模型可以修改檔案（每一次仍然要你按確認）— 點一下關閉'
+    : '模型目前只讀得到檔案 — 點一下允許修改');
+}
+
+async function toggleWrite() {
+  const why = writeReason();
+  if (why) { toast(why); return; }
+  try {
+    await setServerTools({ write: !S.ws.write });
+    toast(S.ws.write ? '模型可以修改檔案了，每一次仍然要你按確認' : '已改回唯讀');
+  } catch (e) {
+    toast('切換失敗：' + e.message);
+  }
+  renderWriteBtn();
+  renderFeatBtn();
+}
+
+// 重開之後把 serve.py 那一端的狀態接回來。工作區與四個開關是行程全域、
+// 重啟就回預設，自動模式卻存在 localStorage —— 兩邊不對齊的症狀是
+// 「自動模式放到最開但模型改不動檔案」，看起來像壞掉。
+// **工作區一定要先設**：沒有工作區的時候 write:true 會被靜靜吃掉。
+async function restoreServerState(conf) {
+  const done = [];
+  const want = (current() || {}).ws || conf.wsPath || '';
+  if (want && want !== S.ws.path) {
+    try { await applyWorkspace(want); done.push('工作區'); }
+    catch (e) { toast('上次的工作區接不回來（' + want + '）：' + e.message); }
+  }
+  const saved = conf.srv || {};
+  const patch = {};
+  if (saved.tools !== undefined && !!saved.tools !== !!S.srv.tools) patch.enabled = !!saved.tools;
+  if (saved.write !== undefined && !!saved.write !== !!S.ws.write) patch.write = !!saved.write;
+  if (saved.browser !== undefined && !!saved.browser !== !!S.srv.browser) patch.browser = !!saved.browser;
+  if (saved.sandbox !== undefined && !!saved.sandbox !== !!S.srv.sandbox) patch.sandbox = !!saved.sandbox;
+  // **檔位比另外存的那個 write 旗標可靠。** 上面那行接的是「上次伺服器的狀態」，
+  // 而它會漂掉（換一台 serve.py、setServerTools 失敗過一次、或存檔時剛好是 false）。
+  // 檔位是使用者自己選的意圖，而且「改檔案自動」以上本來就以動得了檔案為前提 ——
+  // 所以放在後面蓋過去：不然畫面顯示全自動，那支筆卻是灰的，要人再點一次。
+  if (autoWrites(S.auto) && !S.ws.write) patch.write = true;
+  // 自動模式存在瀏覽器、serve.py 重啟就回到 off。不推回去的話系統提示會停在
+  // 「每一次都會問你」，而實際上沒有人在按 —— 模型會一輪讀一個檔。
+  if (S.auto && S.auto !== 'off') patch.auto = S.auto;
+  if (Object.keys(patch).length) {
+    const label = { enabled: '本機工具', write: '修改檔案', browser: '連網瀏覽', sandbox: '沙盒' };
+    try {
+      await setServerTools(patch);
+      Object.keys(patch).filter(function (k) { return label[k]; })
+        .forEach(function (k) { done.push(label[k] + (patch[k] ? '' : '（關）')); });
+    } catch (e) {
+      // 非本機的瀏覽器會被 serve.py 擋掉（403），那是對的，不要吵
+      if (S.srv.toolsLocal !== false) toast('開關接不回來：' + e.message);
+    }
+  }
+  // **一定要說出來**：靜靜地把「修改檔案」打開，跟使用者沒有按過那個鈕是兩回事
+  if (done.length) toast('接回上次的設定：' + done.join('、'));
+  renderWriteBtn();
+  renderFeatBtn();
+  renderWorkspace();
+}
+
+
+async function applyWorkspace(path) {
+  const res = await fetch(apiUrl('/workspace'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: path })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  S.ws = Object.assign({ path: '', write: false }, data);
+  S.atFiles = null;                    // 換了工作區，@ 的檔案清單就過期了
+  S.toolDefs = data.tool_defs || [];
+  S.agentRules = data.agent_rules || '';
+  if (data.repo_map !== undefined) S.repoMap = data.repo_map || '';
+  if (data.verify_hint !== undefined) S.verifyHint = data.verify_hint || '';
+  if (data.agents) S.agentTypes = data.agents;
+  renderWorkspace();
+  ensureFileList();                    // 先拉起來：模型寫的「檔案:行號」要靠它才連得起來
+  const c = current();                 // 工作區跟著對話走：下次點回這則就切回來
+  if (c) { c.ws = S.ws.path || ''; saveChats(); }
+  saveConfig();
+  const names = toolDefs().map(function (d) { return d.function.name; });
+  toast(S.ws.path
+    ? '工作區：' + S.ws.path + '（' + (S.ws.files || 0) + ' 個檔案，'
+      + names.length + ' 支工具可用）'
+    : '已清除工作區，檔案類工具已停用');
+  return data;
+}
+
+// 執行前一定要人點頭。工具會在跑 serve.py 的那台機器上動手，不能自動放行。
+// unified diff 上色。+ 綠、- 紅、@@ 灰，其餘原樣。
+function renderDiff(text) {
+  return text.split('\n').map(function (line) {
+    const c = line.charAt(0);
+    const cls = line.indexOf('@@') === 0 ? 'h'
+      : (c === '+' && line.indexOf('+++') !== 0) ? 'a'
+      : (c === '-' && line.indexOf('---') !== 0) ? 'd' : '';
+    return cls ? '<span class="' + cls + '">' + esc(line) + '</span>' : esc(line);
+  }).join('\n');
+}
+
+// 先跟後端要「這一次的預覽」：改檔案是 diff，跑指令是風險評估。
+// 自動模式要不要放行也看它的結論，所以一定要等它回來。
+async function toolPreview(name, args, agent) {
+  // 以前只有改檔案與跑指令要問後端。現在每一支都要問 —— 允許規則可能命中任何工具，
+  // 而規則要在伺服器那一端算（那裡才是真的擋得住的地方）。
+  try {
+    const res = await fetch(apiUrl('/preview'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, args: args, agent: agent || '' })
+    });
+    const data = await res.json();
+    return { diff: data.diff || data.error || '', risk: data.risk || 'ok',
+             rule: data.rule || null, scope: data.scope || '' };
+  } catch (e) {
+    return { diff: '', risk: 'ok', rule: null, scope: '' };
+  }
+}
+
+/* ══════════════════════ 允許規則 ══════════════════════ */
+// 自動模式是全有全無的三段，但人想要的從來不是那三個，而是
+// 「pytest 一律放行、git commit 要問我、secrets/ 永遠不准碰」。
+// 規則就是把這種判斷寫下來一次。真正的擋在 serve.py 那一端。
+
+// 從這一次的呼叫猜一條合理的規則。猜的是「同一類」，不是「一模一樣」——
+// 每跑一次 pytest 就多一條規則的話，那張清單三天就沒人看得懂了。
+function ruleSuggestion(name, args) {
+  if (name === 'run_shell' || name === 'run_tests') {
+    const cmd = String((args && args.command) || '').trim();
+    if (!cmd) return { tool: name, pattern: '*' };
+    // 取前兩個詞：git commit -m … → git commit*
+    const bits = cmd.split(/\s+/).slice(0, cmd.split(/\s+/)[0] === 'git' ? 2 : 1);
+    return { tool: name, pattern: bits.join(' ') + '*' };
+  }
+  const path = String((args && args.path) || '');
+  if (path) {
+    const cut = path.lastIndexOf('/');
+    return { tool: name, pattern: cut > 0 ? path.slice(0, cut) + '/**' : '*' };
+  }
+  return { tool: name, pattern: '*' };
+}
+
+async function rulesCall(body) {
+  const res = await fetch(apiUrl('/rules'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  S.rules = data.rules || [];
+  S.ruleFiles = data.files || [];
+  return data;
+}
+
+function addRule(tool, pattern, action, note) {
+  return rulesCall({ action: 'add', tool: tool, pattern: pattern,
+                     rule: action, note: note || '' });
+}
+
+async function openRules() {
+  try { await rulesCall({ action: 'list' }); }
+  catch (e) { toast('讀不到規則：' + e.message); return; }
+  renderRules();
+  $('rlOverlay').classList.remove('hidden');
+}
+
+function renderRules() {
+  const box = $('rlList');
+  box.innerHTML = '';
+  $('rlPath').textContent = (S.ruleFiles || []).map(function (f) {
+    return f.scope + '：' + f.path + (f.exists ? '' : '（還沒有）');
+  }).join('\n');
+  if (!(S.rules || []).length) {
+    box.innerHTML = '<div class="fv-empty">還沒有規則。'
+      + '確認卡上的「以後都放行」會在這裡留下一條。</div>';
+    return;
+  }
+  S.rules.forEach(function (r, i) {
+    const row = document.createElement('div');
+    row.className = 'mm-row';
+    row.innerHTML = '<span class="st"></span><span class="n"></span>'
+      + '<span class="m"></span><button class="mini danger" data-del>刪除</button>';
+    const st = row.querySelector('.st');
+    st.textContent = { allow: '放行', ask: '要問', deny: '禁止' }[r.action] || r.action;
+    st.style.color = r.action === 'deny' ? 'var(--err)'
+      : (r.action === 'allow' ? 'var(--accent)' : 'var(--ink3)');
+    row.querySelector('.n').textContent = r.tool + '　' + r.pattern;
+    // 專案的規則只在這個工作區有效，全域的到哪都算 —— 看得出來才不會刪錯
+    row.querySelector('.m').textContent = (r.scope || '') + (r.note ? '　' + r.note : '');
+    row.querySelector('[data-del]').addEventListener('click', async function () {
+      try { await rulesCall({ action: 'remove', index: i }); renderRules(); }
+      catch (e) { toast('刪不掉：' + e.message); }
+    });
+    box.appendChild(row);
+  });
+}
+
+function confirmTool(name, args, pre) {
+  return new Promise(function (resolve) {
+    const write = WRITE_TOOLS.indexOf(name) >= 0;
+    const plan = name === 'submit_plan';
+    const risky = (pre && pre.risk && pre.risk !== 'ok') ? pre.diff : '';
+    const el = msgEl('assistant');
+    el.innerHTML =
+      '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
+      '<div class="msg-col"><div class="tool-card">' +
+        '<div class="th">模型要求執行 <span class="nm"></span><span class="st fp"></span></div>' +
+        '<pre class="args"></pre>' +
+        '<div class="ta"><button class="mini" data-go>執行</button>' +
+        '<button class="mini danger" data-no>略過</button>' +
+        '<button class="mini" data-always hidden>以後都放行</button>' +
+        '<span class="st">會在 serve.py 那台機器上執行</span></div>' +
+      '</div></div>';
+    el.querySelector('.nm').textContent = plan ? '（計畫）' : name;
+    el.querySelector('.args').textContent = plan
+      ? String(args.plan || '') : JSON.stringify(args, null, 2);
+    if (plan) {
+      el.querySelector('.th').firstChild.textContent = '模型提出的計畫，核准後才開放修改檔案 ';
+      el.querySelector('[data-go]').textContent = '核准';
+      el.querySelector('[data-no]').textContent = '退回';
+      el.querySelector('.ta .st').textContent = '核准之後 write_file / edit_file 才會出現';
+    }
+    if (write) el.querySelector('.fp').textContent = '· ' + (args.path || '');
+    // 多行的（load_skill 會先跑的那幾行、沙盒說明）只把第一行放進這個小標，
+    // 完整的接在參數下面 —— 一個 span 塞五行等於沒顯示
+    const head = risky.split('\n')[0];
+    if (risky) {
+      const warn = el.querySelector('.fp');
+      warn.textContent = head;
+      warn.style.color = 'var(--err)';
+    }
+    $('thread').appendChild(el);
+    S.stick = true;
+    pin();
+    waitBadge(true);
+    notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
+      + (write && args.path ? ' · ' + args.path : '')
+      + (head ? ' · ' + head : ''));
+
+    // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
+    if (write && pre && pre.diff) {
+      const box = el.querySelector('.args');
+      box.className = 'args diff';
+      box.innerHTML = renderDiff(pre.diff);
+    } else if (risky.indexOf('\n') >= 0) {
+      // 不是 diff、但有好幾行要看的：load_skill 會先執行的那份清單
+      el.querySelector('.args').textContent += '\n\n' + risky;
+    }
+
+    // 「以後都放行」：把這一次的判斷寫成規則，不用每天重新點一遍。
+    // 風險指令不給這顆 —— 那條保證不能被一顆順手的按鈕拿掉。
+    const always = el.querySelector('[data-always]');
+    const sug = ruleSuggestion(name, args);
+    if (sug && !risky && !plan) {
+      always.hidden = false;
+      always.title = '之後 ' + sug.tool + ' 遇到 ' + sug.pattern + ' 就直接執行';
+      always.addEventListener('click', async function () {
+        try {
+          await addRule(sug.tool, sug.pattern, 'allow');
+          toast('已加規則：' + sug.tool + ' / ' + sug.pattern + ' 直接放行');
+        } catch (e) { toast('規則存不起來：' + e.message); }
+        done(true);
+      });
+    }
+
+    const done = function (ok) { waitBadge(false); el.remove(); resolve(ok); };
+    el.querySelector('[data-go]').addEventListener('click', function () { done(true); });
+    el.querySelector('[data-no]').addEventListener('click', function () { done(false); });
+  });
+}
+
+// 同一個呼叫（工具名＋參數完全一樣）連續失敗幾次就不再送。
+// 模型會用一模一樣的參數重試失敗的呼叫 —— 系統提示裡寫了「不要這樣」，
+// 但那是規則不是機制。自動模式下沒有人在按確認，25 輪就這樣燒完了，
+// 而且畫面上看起來它「還在做事」。
+const REPEAT_LIMIT = 2;
+// ponytail: 比的是「工具名＋參數完全一樣」。差一個空白就繞過去了，
+//           但模型重試時通常是原封不動送同一份。真的漏掉再做正規化。
+
+// 這一輪屬於哪則對話。跑起來之後使用者可能切去看別的對話，而還原點要記在
+// **發動它的那一則**底下，不是被看著的那一則。
+function runChat() { return (S.run && S.run.chat) || S.currentId; }
+
+function callKey(name, args) {
+  try { return name + '\u0000' + JSON.stringify(args || {}); }
+  catch (e) { return name; }               // 參數塞不進 JSON 就只比工具名
+}
+
+// 一次工具呼叫：預覽 → 確認（或自動放行）→ 執行，結果寫回 msg。
+// 主迴圈與子代理共用這一支 —— 兩份實作的話，「危險指令一定要問人」
+// 遲早會有一份忘了跟上。
+// agent：這一次要跑在哪個子代理的 worktree 裡（空字串＝主代理自己的工作區）
+async function execTool(name, args, msg, agent) {
+  const key = callKey(name, args);
+  S.run.fails = S.run.fails || {};
+  if (S.run.fails[key] >= REPEAT_LIMIT) {
+    msg.content = '（這個呼叫用一模一樣的參數已經失敗 ' + REPEAT_LIMIT +
+      ' 次，所以沒有再跑一次。換個做法：先用 read_file 或 list_dir 確認實際情況、' +
+      '改參數、或改用別的工具。重複同一個呼叫不會有不同的結果。）';
+    msg.failed = true;
+    msg.blocked = true;
+    return msg;
+  }
+  const pre = await toolPreview(name, args, agent);
+  if (pre.rule && pre.rule.action === 'deny') {
+    // 規則說不行就不要問了。真正的擋在伺服器那一端，這裡只是不要白問一次。
+    msg.content = '（允許規則擋下來了：' + pre.rule.tool + ' / ' + pre.rule.pattern
+      + (pre.rule.note ? '　' + pre.rule.note : '') + '）';
+    msg.failed = true;
+    msg.blocked = true;
+    return msg;
+  }
+  const auto = autoApprove(name, pre.risk, pre.rule, pre.scope);
+  if (!auto && !await confirmTool(name, args, pre)) {
+    msg.content = '（使用者拒絕執行這個工具）';
+    msg.denied = true;
+    return msg;
+  }
+  msg.auto = auto;
+  S.run.calls += 1;
+  // 不串流的工具，結果卡是**跑完之後**才貼上來的 —— setup_env 裝套件裝兩分鐘，
+  // 這中間畫面上一個字都不會多。把正在跑的那一支寫進進度條，秒數本來就在走。
+  S.run.now = name;
+  renderRunBar();
+  try {
+    // 會跑很久的那兩支邊跑邊顯示；其他工具一次回來就好
+    if (S.streamTools.indexOf(name) >= 0 && !args.background) {
+      msg.content = await runStreamed(name, args, agent);
+      msg.failed = msg.content.indexOf('錯誤：') === 0;
+      msg.streamed = true;
+      S.run.now = '';
+      touchTree();                         // run_shell／run_tests 最常動到檔案
+      if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
+      else delete S.run.fails[key];
+      return msg;
+    }
+    const res = await fetch(apiUrl('/tool'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, args: args, chat: runChat(),
+                             agent: agent || '' })
+    });
+    const data = await res.json();
+    if (data.jobs) { S.jobs = data.jobs; renderRunBar(); }
+    msg.content = res.ok ? data.result : ('錯誤：' + (data.error || ('HTTP ' + res.status)));
+    msg.failed = !res.ok;
+    // serve.py 用 [backup]路徑 回報備份位置；那是給介面用的，別佔模型的 context
+    const at = msg.content.indexOf('[backup]');
+    if (at >= 0) {
+      msg.backup = msg.content.slice(at + 8).trim();
+      msg.content = msg.content.slice(0, at).trim();
+    }
+    if (data.todos) { S.todos = data.todos; renderTodos(); }
+    if (data.tool_defs) S.toolDefs = data.tool_defs;   // 核准計畫後會多出寫入工具
+  } catch (e) {
+    msg.content = '錯誤：' + e.message;
+    msg.failed = true;
+  }
+  S.run.now = '';
+  renderRunBar();
+  if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
+  else delete S.run.fails[key];            // 成功過就重新計算
+  // 失敗的也要重讀：run_shell 跑到一半掛掉，前半段的檔案已經寫下去了
+  if (READ_ONLY_TOOLS.indexOf(name) < 0) touchTree();
+  if (!msg.failed) noteFinishSignals(name, args);
+  return msg;
+}
+// 右側面板：檔案檢視、工作區、檔案樹、選資料夾、還原點。
+// 這幾段幾乎不跟工具那半邊講話（量過：只借四個名字），所以搬得乾淨。
 
 /* ══════════════════════ 檔案檢視器 ══════════════════════ */
 // 一行一個 div：行號 sticky 在左邊，橫向捲動時不會跑掉。
@@ -4836,7 +5249,7 @@ function rewindRow(e, newest) {
     st.className = 'st c';
     row.querySelector('.nm').textContent = path || '（沒有內容）';
     row.querySelector('.dir').textContent = n ? n + ' 個檔案' : '沒改到檔案';
-    row.title = e.ts + IS + '送出這則提示之前的快照\n「' + path + '」'
+    row.title = e.ts + '　' + '送出這則提示之前的快照\n「' + path + '」'
       + (newest ? '\n最新的一輪' : '')
       + '\n點一下把整個工作區退回這裡 —— 包含 run_shell 改的東西';
     return row;
@@ -4846,7 +5259,7 @@ function rewindRow(e, newest) {
   st.className = 'st ' + (created ? 'a' : 'm');
   row.querySelector('.nm').textContent = cut >= 0 ? path.slice(cut + 1) : path;
   row.querySelector('.dir').textContent = cut > 0 ? path.slice(0, cut) : '';
-  row.title = e.ts + IS + e.tool + IS + path
+  row.title = e.ts + '　' + e.tool + '　' + path
     + (created ? '（這一次新建的）' : '（改過，有備份）')
     + (newest ? '\n最新的一筆' : '') + '\n點一下退回這一筆之前的狀態';
   return row;
@@ -4958,388 +5371,8 @@ async function doRewind(id) {
     toast('還原失敗：' + e.message);
   }
 }
-
-/* ══════════════════════ 修改檔案的開關 ══════════════════════ */
-// 從選單裡搬出來變成輸入框旁邊的按鈕：它是每天要按好幾次的東西，
-// 不該藏在兩層選單底下。
-function writeReason() {
-  if (!S.srv.tools) return toolsReason() || '本機工具沒有開啟';
-  if (!S.ws.path) return '要先選一個工作區資料夾';
-  return '';
-}
-
-function renderWriteBtn() {
-  const btn = $('writeBtn');
-  if (!btn) return;
-  const why = writeReason();
-  btn.classList.toggle('on', !!S.ws.write);
-  btn.disabled = !!why;
-  btn.title = why || (S.ws.write
-    ? '模型可以修改檔案（每一次仍然要你按確認）— 點一下關閉'
-    : '模型目前只讀得到檔案 — 點一下允許修改');
-}
-
-async function toggleWrite() {
-  const why = writeReason();
-  if (why) { toast(why); return; }
-  try {
-    await setServerTools({ write: !S.ws.write });
-    toast(S.ws.write ? '模型可以修改檔案了，每一次仍然要你按確認' : '已改回唯讀');
-  } catch (e) {
-    toast('切換失敗：' + e.message);
-  }
-  renderWriteBtn();
-  renderFeatBtn();
-}
-
-// 重開之後把 serve.py 那一端的狀態接回來。工作區與四個開關是行程全域、
-// 重啟就回預設，自動模式卻存在 localStorage —— 兩邊不對齊的症狀是
-// 「自動模式放到最開但模型改不動檔案」，看起來像壞掉。
-// **工作區一定要先設**：沒有工作區的時候 write:true 會被靜靜吃掉。
-async function restoreServerState(conf) {
-  const done = [];
-  const want = (current() || {}).ws || conf.wsPath || '';
-  if (want && want !== S.ws.path) {
-    try { await applyWorkspace(want); done.push('工作區'); }
-    catch (e) { toast('上次的工作區接不回來（' + want + '）：' + e.message); }
-  }
-  const saved = conf.srv || {};
-  const patch = {};
-  if (saved.tools !== undefined && !!saved.tools !== !!S.srv.tools) patch.enabled = !!saved.tools;
-  if (saved.write !== undefined && !!saved.write !== !!S.ws.write) patch.write = !!saved.write;
-  if (saved.browser !== undefined && !!saved.browser !== !!S.srv.browser) patch.browser = !!saved.browser;
-  if (saved.sandbox !== undefined && !!saved.sandbox !== !!S.srv.sandbox) patch.sandbox = !!saved.sandbox;
-  // **檔位比另外存的那個 write 旗標可靠。** 上面那行接的是「上次伺服器的狀態」，
-  // 而它會漂掉（換一台 serve.py、setServerTools 失敗過一次、或存檔時剛好是 false）。
-  // 檔位是使用者自己選的意圖，而且「改檔案自動」以上本來就以動得了檔案為前提 ——
-  // 所以放在後面蓋過去：不然畫面顯示全自動，那支筆卻是灰的，要人再點一次。
-  if (autoWrites(S.auto) && !S.ws.write) patch.write = true;
-  // 自動模式存在瀏覽器、serve.py 重啟就回到 off。不推回去的話系統提示會停在
-  // 「每一次都會問你」，而實際上沒有人在按 —— 模型會一輪讀一個檔。
-  if (S.auto && S.auto !== 'off') patch.auto = S.auto;
-  if (Object.keys(patch).length) {
-    const label = { enabled: '本機工具', write: '修改檔案', browser: '連網瀏覽', sandbox: '沙盒' };
-    try {
-      await setServerTools(patch);
-      Object.keys(patch).filter(function (k) { return label[k]; })
-        .forEach(function (k) { done.push(label[k] + (patch[k] ? '' : '（關）')); });
-    } catch (e) {
-      // 非本機的瀏覽器會被 serve.py 擋掉（403），那是對的，不要吵
-      if (S.srv.toolsLocal !== false) toast('開關接不回來：' + e.message);
-    }
-  }
-  // **一定要說出來**：靜靜地把「修改檔案」打開，跟使用者沒有按過那個鈕是兩回事
-  if (done.length) toast('接回上次的設定：' + done.join('、'));
-  renderWriteBtn();
-  renderFeatBtn();
-  renderWorkspace();
-}
-
-
-async function applyWorkspace(path) {
-  const res = await fetch(apiUrl('/workspace'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: path })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  S.ws = Object.assign({ path: '', write: false }, data);
-  S.atFiles = null;                    // 換了工作區，@ 的檔案清單就過期了
-  S.toolDefs = data.tool_defs || [];
-  S.agentRules = data.agent_rules || '';
-  if (data.repo_map !== undefined) S.repoMap = data.repo_map || '';
-  if (data.verify_hint !== undefined) S.verifyHint = data.verify_hint || '';
-  if (data.agents) S.agentTypes = data.agents;
-  renderWorkspace();
-  ensureFileList();                    // 先拉起來：模型寫的「檔案:行號」要靠它才連得起來
-  const c = current();                 // 工作區跟著對話走：下次點回這則就切回來
-  if (c) { c.ws = S.ws.path || ''; saveChats(); }
-  saveConfig();
-  const names = toolDefs().map(function (d) { return d.function.name; });
-  toast(S.ws.path
-    ? '工作區：' + S.ws.path + '（' + (S.ws.files || 0) + ' 個檔案，'
-      + names.length + ' 支工具可用）'
-    : '已清除工作區，檔案類工具已停用');
-  return data;
-}
-
-// 執行前一定要人點頭。工具會在跑 serve.py 的那台機器上動手，不能自動放行。
-// unified diff 上色。+ 綠、- 紅、@@ 灰，其餘原樣。
-function renderDiff(text) {
-  return text.split('\n').map(function (line) {
-    const c = line.charAt(0);
-    const cls = line.indexOf('@@') === 0 ? 'h'
-      : (c === '+' && line.indexOf('+++') !== 0) ? 'a'
-      : (c === '-' && line.indexOf('---') !== 0) ? 'd' : '';
-    return cls ? '<span class="' + cls + '">' + esc(line) + '</span>' : esc(line);
-  }).join('\n');
-}
-
-// 先跟後端要「這一次的預覽」：改檔案是 diff，跑指令是風險評估。
-// 自動模式要不要放行也看它的結論，所以一定要等它回來。
-async function toolPreview(name, args, agent) {
-  // 以前只有改檔案與跑指令要問後端。現在每一支都要問 —— 允許規則可能命中任何工具，
-  // 而規則要在伺服器那一端算（那裡才是真的擋得住的地方）。
-  try {
-    const res = await fetch(apiUrl('/preview'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args, agent: agent || '' })
-    });
-    const data = await res.json();
-    return { diff: data.diff || data.error || '', risk: data.risk || 'ok',
-             rule: data.rule || null, scope: data.scope || '' };
-  } catch (e) {
-    return { diff: '', risk: 'ok', rule: null, scope: '' };
-  }
-}
-
-/* ══════════════════════ 允許規則 ══════════════════════ */
-// 自動模式是全有全無的三段，但人想要的從來不是那三個，而是
-// 「pytest 一律放行、git commit 要問我、secrets/ 永遠不准碰」。
-// 規則就是把這種判斷寫下來一次。真正的擋在 serve.py 那一端。
-
-// 從這一次的呼叫猜一條合理的規則。猜的是「同一類」，不是「一模一樣」——
-// 每跑一次 pytest 就多一條規則的話，那張清單三天就沒人看得懂了。
-function ruleSuggestion(name, args) {
-  if (name === 'run_shell' || name === 'run_tests') {
-    const cmd = String((args && args.command) || '').trim();
-    if (!cmd) return { tool: name, pattern: '*' };
-    // 取前兩個詞：git commit -m … → git commit*
-    const bits = cmd.split(/\s+/).slice(0, cmd.split(/\s+/)[0] === 'git' ? 2 : 1);
-    return { tool: name, pattern: bits.join(' ') + '*' };
-  }
-  const path = String((args && args.path) || '');
-  if (path) {
-    const cut = path.lastIndexOf('/');
-    return { tool: name, pattern: cut > 0 ? path.slice(0, cut) + '/**' : '*' };
-  }
-  return { tool: name, pattern: '*' };
-}
-
-async function rulesCall(body) {
-  const res = await fetch(apiUrl('/rules'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  S.rules = data.rules || [];
-  S.ruleFiles = data.files || [];
-  return data;
-}
-
-function addRule(tool, pattern, action, note) {
-  return rulesCall({ action: 'add', tool: tool, pattern: pattern,
-                     rule: action, note: note || '' });
-}
-
-async function openRules() {
-  try { await rulesCall({ action: 'list' }); }
-  catch (e) { toast('讀不到規則：' + e.message); return; }
-  renderRules();
-  $('rlOverlay').classList.remove('hidden');
-}
-
-function renderRules() {
-  const box = $('rlList');
-  box.innerHTML = '';
-  $('rlPath').textContent = (S.ruleFiles || []).map(function (f) {
-    return f.scope + '：' + f.path + (f.exists ? '' : '（還沒有）');
-  }).join('\n');
-  if (!(S.rules || []).length) {
-    box.innerHTML = '<div class="fv-empty">還沒有規則。'
-      + '確認卡上的「以後都放行」會在這裡留下一條。</div>';
-    return;
-  }
-  S.rules.forEach(function (r, i) {
-    const row = document.createElement('div');
-    row.className = 'mm-row';
-    row.innerHTML = '<span class="st"></span><span class="n"></span>'
-      + '<span class="m"></span><button class="mini danger" data-del>刪除</button>';
-    const st = row.querySelector('.st');
-    st.textContent = { allow: '放行', ask: '要問', deny: '禁止' }[r.action] || r.action;
-    st.style.color = r.action === 'deny' ? 'var(--err)'
-      : (r.action === 'allow' ? 'var(--accent)' : 'var(--ink3)');
-    row.querySelector('.n').textContent = r.tool + '　' + r.pattern;
-    // 專案的規則只在這個工作區有效，全域的到哪都算 —— 看得出來才不會刪錯
-    row.querySelector('.m').textContent = (r.scope || '') + (r.note ? '　' + r.note : '');
-    row.querySelector('[data-del]').addEventListener('click', async function () {
-      try { await rulesCall({ action: 'remove', index: i }); renderRules(); }
-      catch (e) { toast('刪不掉：' + e.message); }
-    });
-    box.appendChild(row);
-  });
-}
-
-function confirmTool(name, args, pre) {
-  return new Promise(function (resolve) {
-    const write = WRITE_TOOLS.indexOf(name) >= 0;
-    const plan = name === 'submit_plan';
-    const risky = (pre && pre.risk && pre.risk !== 'ok') ? pre.diff : '';
-    const el = msgEl('assistant');
-    el.innerHTML =
-      '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
-      '<div class="msg-col"><div class="tool-card">' +
-        '<div class="th">模型要求執行 <span class="nm"></span><span class="st fp"></span></div>' +
-        '<pre class="args"></pre>' +
-        '<div class="ta"><button class="mini" data-go>執行</button>' +
-        '<button class="mini danger" data-no>略過</button>' +
-        '<button class="mini" data-always hidden>以後都放行</button>' +
-        '<span class="st">會在 serve.py 那台機器上執行</span></div>' +
-      '</div></div>';
-    el.querySelector('.nm').textContent = plan ? '（計畫）' : name;
-    el.querySelector('.args').textContent = plan
-      ? String(args.plan || '') : JSON.stringify(args, null, 2);
-    if (plan) {
-      el.querySelector('.th').firstChild.textContent = '模型提出的計畫，核准後才開放修改檔案 ';
-      el.querySelector('[data-go]').textContent = '核准';
-      el.querySelector('[data-no]').textContent = '退回';
-      el.querySelector('.ta .st').textContent = '核准之後 write_file / edit_file 才會出現';
-    }
-    if (write) el.querySelector('.fp').textContent = '· ' + (args.path || '');
-    // 多行的（load_skill 會先跑的那幾行、沙盒說明）只把第一行放進這個小標，
-    // 完整的接在參數下面 —— 一個 span 塞五行等於沒顯示
-    const head = risky.split('\n')[0];
-    if (risky) {
-      const warn = el.querySelector('.fp');
-      warn.textContent = head;
-      warn.style.color = 'var(--err)';
-    }
-    $('thread').appendChild(el);
-    S.stick = true;
-    pin();
-    waitBadge(true);
-    notifyBg('等你確認：' + (plan ? '模型提出的計畫' : name)
-      + (write && args.path ? ' · ' + args.path : '')
-      + (head ? ' · ' + head : ''));
-
-    // 改檔案的話，把參數換成看得懂的 diff —— 沒人有辦法從一坨 JSON 判斷該不該按下去
-    if (write && pre && pre.diff) {
-      const box = el.querySelector('.args');
-      box.className = 'args diff';
-      box.innerHTML = renderDiff(pre.diff);
-    } else if (risky.indexOf('\n') >= 0) {
-      // 不是 diff、但有好幾行要看的：load_skill 會先執行的那份清單
-      el.querySelector('.args').textContent += '\n\n' + risky;
-    }
-
-    // 「以後都放行」：把這一次的判斷寫成規則，不用每天重新點一遍。
-    // 風險指令不給這顆 —— 那條保證不能被一顆順手的按鈕拿掉。
-    const always = el.querySelector('[data-always]');
-    const sug = ruleSuggestion(name, args);
-    if (sug && !risky && !plan) {
-      always.hidden = false;
-      always.title = '之後 ' + sug.tool + ' 遇到 ' + sug.pattern + ' 就直接執行';
-      always.addEventListener('click', async function () {
-        try {
-          await addRule(sug.tool, sug.pattern, 'allow');
-          toast('已加規則：' + sug.tool + ' / ' + sug.pattern + ' 直接放行');
-        } catch (e) { toast('規則存不起來：' + e.message); }
-        done(true);
-      });
-    }
-
-    const done = function (ok) { waitBadge(false); el.remove(); resolve(ok); };
-    el.querySelector('[data-go]').addEventListener('click', function () { done(true); });
-    el.querySelector('[data-no]').addEventListener('click', function () { done(false); });
-  });
-}
-
-// 同一個呼叫（工具名＋參數完全一樣）連續失敗幾次就不再送。
-// 模型會用一模一樣的參數重試失敗的呼叫 —— 系統提示裡寫了「不要這樣」，
-// 但那是規則不是機制。自動模式下沒有人在按確認，25 輪就這樣燒完了，
-// 而且畫面上看起來它「還在做事」。
-const REPEAT_LIMIT = 2;
-// ponytail: 比的是「工具名＋參數完全一樣」。差一個空白就繞過去了，
-//           但模型重試時通常是原封不動送同一份。真的漏掉再做正規化。
-
-// 這一輪屬於哪則對話。跑起來之後使用者可能切去看別的對話，而還原點要記在
-// **發動它的那一則**底下，不是被看著的那一則。
-function runChat() { return (S.run && S.run.chat) || S.currentId; }
-
-function callKey(name, args) {
-  try { return name + '\u0000' + JSON.stringify(args || {}); }
-  catch (e) { return name; }               // 參數塞不進 JSON 就只比工具名
-}
-
-// 一次工具呼叫：預覽 → 確認（或自動放行）→ 執行，結果寫回 msg。
-// 主迴圈與子代理共用這一支 —— 兩份實作的話，「危險指令一定要問人」
-// 遲早會有一份忘了跟上。
-// agent：這一次要跑在哪個子代理的 worktree 裡（空字串＝主代理自己的工作區）
-async function execTool(name, args, msg, agent) {
-  const key = callKey(name, args);
-  S.run.fails = S.run.fails || {};
-  if (S.run.fails[key] >= REPEAT_LIMIT) {
-    msg.content = '（這個呼叫用一模一樣的參數已經失敗 ' + REPEAT_LIMIT +
-      ' 次，所以沒有再跑一次。換個做法：先用 read_file 或 list_dir 確認實際情況、' +
-      '改參數、或改用別的工具。重複同一個呼叫不會有不同的結果。）';
-    msg.failed = true;
-    msg.blocked = true;
-    return msg;
-  }
-  const pre = await toolPreview(name, args, agent);
-  if (pre.rule && pre.rule.action === 'deny') {
-    // 規則說不行就不要問了。真正的擋在伺服器那一端，這裡只是不要白問一次。
-    msg.content = '（允許規則擋下來了：' + pre.rule.tool + ' / ' + pre.rule.pattern
-      + (pre.rule.note ? '　' + pre.rule.note : '') + '）';
-    msg.failed = true;
-    msg.blocked = true;
-    return msg;
-  }
-  const auto = autoApprove(name, pre.risk, pre.rule, pre.scope);
-  if (!auto && !await confirmTool(name, args, pre)) {
-    msg.content = '（使用者拒絕執行這個工具）';
-    msg.denied = true;
-    return msg;
-  }
-  msg.auto = auto;
-  S.run.calls += 1;
-  // 不串流的工具，結果卡是**跑完之後**才貼上來的 —— setup_env 裝套件裝兩分鐘，
-  // 這中間畫面上一個字都不會多。把正在跑的那一支寫進進度條，秒數本來就在走。
-  S.run.now = name;
-  renderRunBar();
-  try {
-    // 會跑很久的那兩支邊跑邊顯示；其他工具一次回來就好
-    if (S.streamTools.indexOf(name) >= 0 && !args.background) {
-      msg.content = await runStreamed(name, args, agent);
-      msg.failed = msg.content.indexOf('錯誤：') === 0;
-      msg.streamed = true;
-      S.run.now = '';
-      touchTree();                         // run_shell／run_tests 最常動到檔案
-      if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
-      else delete S.run.fails[key];
-      return msg;
-    }
-    const res = await fetch(apiUrl('/tool'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, args: args, chat: runChat(),
-                             agent: agent || '' })
-    });
-    const data = await res.json();
-    if (data.jobs) { S.jobs = data.jobs; renderRunBar(); }
-    msg.content = res.ok ? data.result : ('錯誤：' + (data.error || ('HTTP ' + res.status)));
-    msg.failed = !res.ok;
-    // serve.py 用 [backup]路徑 回報備份位置；那是給介面用的，別佔模型的 context
-    const at = msg.content.indexOf('[backup]');
-    if (at >= 0) {
-      msg.backup = msg.content.slice(at + 8).trim();
-      msg.content = msg.content.slice(0, at).trim();
-    }
-    if (data.todos) { S.todos = data.todos; renderTodos(); }
-    if (data.tool_defs) S.toolDefs = data.tool_defs;   // 核准計畫後會多出寫入工具
-  } catch (e) {
-    msg.content = '錯誤：' + e.message;
-    msg.failed = true;
-  }
-  S.run.now = '';
-  renderRunBar();
-  if (msg.failed) S.run.fails[key] = (S.run.fails[key] || 0) + 1;
-  else delete S.run.fails[key];            // 成功過就重新計算
-  // 失敗的也要重讀：run_shell 跑到一半掛掉，前半段的檔案已經寫下去了
-  if (READ_ONLY_TOOLS.indexOf(name) < 0) touchTree();
-  if (!msg.failed) noteFinishSignals(name, args);
-  return msg;
-}
+// 子代理：開起來、跑迴圈、收工，加上介面上的定位／追溯／中斷。
+// 原本一半在 07-tools 一半在 08-ui，而後者只是為了呼叫前者。
 
 /* ══════════════════════ 子代理 ══════════════════════ */
 // 「掃過整個專案找出所有用到 X 的地方」這種事，自己做會把幾十個檔案的內容
@@ -5684,35 +5717,104 @@ async function runTools(c, calls, depth) {
   await runStream(c, depth);
 }
 
-/* ══════════════════════ 分支 ══════════════════════ */
-function forkChat(idx) {
-  const c = current();
-  if (!c || !c.messages.length) { toast('這個對話還沒有內容'); return; }
-  const upto = idx < 0 ? c.messages.length : idx + 1;
-  const copy = {
-    id: uid(), title: c.title.replace(/（分支.*）$/, '') + '（分支）', model: c.model,
-    renamed: true, created: Date.now(),
-    messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
-  };
-  S.chats.unshift(copy);
-  S.currentId = copy.id;
-  renderChatList();
-  renderThread();
-  saveChats();
-  toast('已分支出新對話（' + upto + ' 則訊息）');
-}
+/* ══════════════════════ 子代理：定位、追溯、中斷 ══════════════════════ */
+// 卡片捲走了、或是從紀錄／背景指令那邊只拿到一個 id 時，這是唯一找得回去的路。
+// 中斷是**伺服器**那一端的事：標記之後連後代與它們的背景指令一起停，
+// 而且任何綁在那些 id 上的工具呼叫都會被拒絕 —— 網頁不理也叫不動。
+async function openAgents() {
+  let data;
+  try { data = await agentCall({ action: 'list' }); }
+  catch (e) { toast('問不到子代理：' + e.message); return; }
 
-function renameChat(id) {
-  const c = S.chats.filter(function (x) { return x.id === id; })[0];
-  if (!c) return;
-  const name = (prompt('對話名稱', c.title) || '').trim();
-  if (!name) return;
-  c.title = name;
-  c.renamed = true;          // 別再被第一則訊息蓋掉
-  renderChatList();
-  saveChats(c);              // 改的不一定是當下開著的那則，要指名
+  const el = msgEl('assistant');
+  el.innerHTML =
+    '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
+    '<div class="msg-col"><div class="tool-card"><div class="th">子代理</div>' +
+    '<div class="agents"></div></div></div>';
+  const boxEl = el.querySelector('.agents');
+  const list = (data.agents || []).slice().sort(function (a, b) {
+    return a.depth - b.depth || a.started - b.started;
+  });
 
+  if (!list.length) {
+    const p = document.createElement('div');
+    p.className = 'muted';
+    p.textContent = '現在沒有子代理在跑。可用的型別：'
+      + (data.types || []).map(function (t) { return t.name; }).join('、')
+      + '（最多 ' + data.depth_max + ' 層）';
+    boxEl.appendChild(p);
+  }
+
+  // 沒人認得的 worktree：serve.py 重啟過，登記沒了但資料夾還在磁碟上。
+  // 這裡是唯一收得掉它們的地方 —— 列不出來就等於收不掉。
+  (data.orphans || []).forEach(function (o) {
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    const info = document.createElement('div');
+    const bits = [o.id, '沒人認得的 worktree', o.branch];
+    if (o.changes) bits.push(o.changes + ' 個未提交的改動');
+    if (o.gone) bits.push('資料夾不在了');
+    if (o.msg) bits.push(o.msg);
+    info.textContent = bits.join(' · ');
+    row.appendChild(info);
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = '收掉';
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      try {
+        const r = await agentCall({ action: 'close', id: o.id });
+        info.textContent += r.commits
+          ? ' · 資料夾收掉了，成果留在 ' + r.branch + '（' + r.merge + '）'
+          : ' · 收掉了（分支上是空的，一起刪了）';
+      } catch (e) { info.textContent += ' · 收不掉：' + e.message; }
+    });
+    row.appendChild(btn);
+    boxEl.appendChild(row);
+  });
+
+  list.forEach(function (a) {
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    const info = document.createElement('div');
+    // 全部用 textContent：型別名字來自 agents/*.md，那是檔案內容不是我們寫的字串
+    const bits = [a.id, a.type, '第 ' + a.depth + ' 層'];
+    if (a.parent) bits.push('上層 ' + a.parent);
+    if (a.branch) bits.push(a.branch);
+    // 借過去的是同一份資料夾，不是複本 —— 在裡面裝套件會動到主專案
+    if (a.linked && a.linked.length) bits.push('借用 ' + a.linked.join('、'));
+    bits.push(a.calls + ' 次工具');
+    bits.push(a.secs + ' 秒');
+    if (a.last) bits.push('最後 ' + a.last.tool);
+    if (a.jobs && a.jobs.length) bits.push('背景 ' + a.jobs.join('、'));
+    if (a.stopped) bits.push('已中斷：' + a.why);
+    info.textContent = bits.join(' · ');
+    row.appendChild(info);
+    if (!a.stopped) {
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = '中斷';
+      btn.addEventListener('click', async function () {
+        btn.disabled = true;
+        try {
+          const r = await agentCall({ action: 'stop', id: a.id, why: '從子代理清單中斷' });
+          if (S.subs) r.stopped.forEach(function (k) {
+            Object.keys(S.subs).forEach(function (key) {
+              if (S.subs[key].sid === k || key === k) S.subs[key].stopped = true;
+            });
+          });
+          info.textContent += ' · 已中斷 ' + r.stopped.join('、')
+            + (r.jobs.length ? '（連背景指令 ' + r.jobs.join('、') + '）' : '');
+        } catch (e) { info.textContent += ' · 中斷失敗：' + e.message; }
+      });
+      row.appendChild(btn);
+    }
+    boxEl.appendChild(row);
+  });
+  $('thread').appendChild(el);
+  pin();
 }
+// 模型：下載、刪除、卸載，以及多模型比較。
 
 /* ══════════════════════ 模型管理 ══════════════════════ */
 function mmRow(name, meta, btnLabel, danger, action) {
@@ -5898,6 +6000,8 @@ function errorHint(msg) {
   if (m.indexOf('memory') >= 0) return '記憶體不足，試著調小 num_ctx 或改用較小的模型。';
   return '';
 }
+// 輸入區：附件、context 用量、系統提示預設、斜線與 @ 功能表。
+// 共同點是「送出之前」——都在改那一則要送出去的訊息。
 
 /* ══════════════════════ 附件 ══════════════════════ */
 function extOf(name) {
@@ -6382,103 +6486,36 @@ async function attachSkill(name) {
     toast('讀不到這個 skill：' + e.message);
   }
 }
+// 版面外框：對話分支、彈出選單、側欄拖寬、主題、連線設定、系統用量。
 
-/* ══════════════════════ 子代理：定位、追溯、中斷 ══════════════════════ */
-// 卡片捲走了、或是從紀錄／背景指令那邊只拿到一個 id 時，這是唯一找得回去的路。
-// 中斷是**伺服器**那一端的事：標記之後連後代與它們的背景指令一起停，
-// 而且任何綁在那些 id 上的工具呼叫都會被拒絕 —— 網頁不理也叫不動。
-async function openAgents() {
-  let data;
-  try { data = await agentCall({ action: 'list' }); }
-  catch (e) { toast('問不到子代理：' + e.message); return; }
+/* ══════════════════════ 分支 ══════════════════════ */
+function forkChat(idx) {
+  const c = current();
+  if (!c || !c.messages.length) { toast('這個對話還沒有內容'); return; }
+  const upto = idx < 0 ? c.messages.length : idx + 1;
+  const copy = {
+    id: uid(), title: c.title.replace(/（分支.*）$/, '') + '（分支）', model: c.model,
+    renamed: true, created: Date.now(),
+    messages: JSON.parse(JSON.stringify(c.messages.slice(0, upto)))
+  };
+  S.chats.unshift(copy);
+  S.currentId = copy.id;
+  renderChatList();
+  renderThread();
+  saveChats();
+  toast('已分支出新對話（' + upto + ' 則訊息）');
+}
 
-  const el = msgEl('assistant');
-  el.innerHTML =
-    '<div class="msg-avatar">' + ico('wrench', 14, 2) + '</div>' +
-    '<div class="msg-col"><div class="tool-card"><div class="th">子代理</div>' +
-    '<div class="agents"></div></div></div>';
-  const boxEl = el.querySelector('.agents');
-  const list = (data.agents || []).slice().sort(function (a, b) {
-    return a.depth - b.depth || a.started - b.started;
-  });
+function renameChat(id) {
+  const c = S.chats.filter(function (x) { return x.id === id; })[0];
+  if (!c) return;
+  const name = (prompt('對話名稱', c.title) || '').trim();
+  if (!name) return;
+  c.title = name;
+  c.renamed = true;          // 別再被第一則訊息蓋掉
+  renderChatList();
+  saveChats(c);              // 改的不一定是當下開著的那則，要指名
 
-  if (!list.length) {
-    const p = document.createElement('div');
-    p.className = 'muted';
-    p.textContent = '現在沒有子代理在跑。可用的型別：'
-      + (data.types || []).map(function (t) { return t.name; }).join('、')
-      + '（最多 ' + data.depth_max + ' 層）';
-    boxEl.appendChild(p);
-  }
-
-  // 沒人認得的 worktree：serve.py 重啟過，登記沒了但資料夾還在磁碟上。
-  // 這裡是唯一收得掉它們的地方 —— 列不出來就等於收不掉。
-  (data.orphans || []).forEach(function (o) {
-    const row = document.createElement('div');
-    row.className = 'agent-row';
-    const info = document.createElement('div');
-    const bits = [o.id, '沒人認得的 worktree', o.branch];
-    if (o.changes) bits.push(o.changes + ' 個未提交的改動');
-    if (o.gone) bits.push('資料夾不在了');
-    if (o.msg) bits.push(o.msg);
-    info.textContent = bits.join(' · ');
-    row.appendChild(info);
-    const btn = document.createElement('button');
-    btn.className = 'mini';
-    btn.textContent = '收掉';
-    btn.addEventListener('click', async function () {
-      btn.disabled = true;
-      try {
-        const r = await agentCall({ action: 'close', id: o.id });
-        info.textContent += r.commits
-          ? ' · 資料夾收掉了，成果留在 ' + r.branch + '（' + r.merge + '）'
-          : ' · 收掉了（分支上是空的，一起刪了）';
-      } catch (e) { info.textContent += ' · 收不掉：' + e.message; }
-    });
-    row.appendChild(btn);
-    boxEl.appendChild(row);
-  });
-
-  list.forEach(function (a) {
-    const row = document.createElement('div');
-    row.className = 'agent-row';
-    const info = document.createElement('div');
-    // 全部用 textContent：型別名字來自 agents/*.md，那是檔案內容不是我們寫的字串
-    const bits = [a.id, a.type, '第 ' + a.depth + ' 層'];
-    if (a.parent) bits.push('上層 ' + a.parent);
-    if (a.branch) bits.push(a.branch);
-    // 借過去的是同一份資料夾，不是複本 —— 在裡面裝套件會動到主專案
-    if (a.linked && a.linked.length) bits.push('借用 ' + a.linked.join('、'));
-    bits.push(a.calls + ' 次工具');
-    bits.push(a.secs + ' 秒');
-    if (a.last) bits.push('最後 ' + a.last.tool);
-    if (a.jobs && a.jobs.length) bits.push('背景 ' + a.jobs.join('、'));
-    if (a.stopped) bits.push('已中斷：' + a.why);
-    info.textContent = bits.join(' · ');
-    row.appendChild(info);
-    if (!a.stopped) {
-      const btn = document.createElement('button');
-      btn.className = 'mini';
-      btn.textContent = '中斷';
-      btn.addEventListener('click', async function () {
-        btn.disabled = true;
-        try {
-          const r = await agentCall({ action: 'stop', id: a.id, why: '從子代理清單中斷' });
-          if (S.subs) r.stopped.forEach(function (k) {
-            Object.keys(S.subs).forEach(function (key) {
-              if (S.subs[key].sid === k || key === k) S.subs[key].stopped = true;
-            });
-          });
-          info.textContent += ' · 已中斷 ' + r.stopped.join('、')
-            + (r.jobs.length ? '（連背景指令 ' + r.jobs.join('、') + '）' : '');
-        } catch (e) { info.textContent += ' · 中斷失敗：' + e.message; }
-      });
-      row.appendChild(btn);
-    }
-    boxEl.appendChild(row);
-  });
-  $('thread').appendChild(el);
-  pin();
 }
 
 /* ══════════════════════ 選單 ══════════════════════ */

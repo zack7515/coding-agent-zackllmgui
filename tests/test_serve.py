@@ -8,6 +8,8 @@ import json
 import glob
 import os
 import re
+import select
+import socket
 import stat
 import shutil
 import subprocess
@@ -148,6 +150,56 @@ def test_tools_toggle_over_http():
         serve.cur().ws = None
         server.shutdown()
         server.server_close()
+
+
+def test_stop_reaches_upstream_before_the_first_token():
+    """瀏覽器按停止，上游那條連線要立刻斷 —— 不能等到第一個 token 才發現。
+
+    _pipe 只有在**寫入**瀏覽器的時候才收得到 BrokenPipe。模型在載入或跑
+    prompt eval 的那幾十秒一個 token 都沒有，寫入永遠走不到，於是停止鍵
+    按下去畫面停了、Ollama 還在燒。這裡讓上游只送 header 不送 body，
+    正好卡在那個狀態。
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    noticed = threading.Event()
+
+    class SlowUpstream(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            # 一個 byte 都不送，就這樣掛著。連線被切掉時這裡會變成可讀（EOF）
+            if select.select([self.connection], [], [], 10)[0]:
+                noticed.set()
+            self.close_connection = True
+
+    up = ThreadingHTTPServer(("127.0.0.1", 8803), SlowUpstream)
+    up.daemon_threads = True
+    threading.Thread(target=up.serve_forever, daemon=True).start()
+
+    server = serve.build_server("http://127.0.0.1:8803", "127.0.0.1", 8802)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    try:
+        c = socket.create_connection(("127.0.0.1", 8802), timeout=10)
+        c.sendall(b"POST /api/generate HTTP/1.1\r\nHost: x\r\n"
+                  b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+        assert c.recv(4096), "應該先收到 header —— 收不到代表卡在別的地方"
+        c.close()                              # 使用者按停止
+        assert noticed.wait(5), "客戶端斷線之後上游還連著，Ollama 會繼續跑"
+    finally:
+        server.shutdown()
+        server.server_close()
+        up.shutdown()
+        up.server_close()
 
 
 def test_ext_forwarding():
@@ -1148,7 +1200,7 @@ def test_checkpoint_catches_what_the_journal_misses():
         assert [e["tool"] for e in serve.journal_read()] == ["checkpoint", "write_file"]
 
         # 一輪一列，這一輪動過的檔案掛在那一列底下（run_shell 改的也在）
-        rows = serve.journal_for(serve.workspace.CURRENT_CHAT)
+        rows = serve.journal_for(serve.workspace.cur_chat())
         assert len(rows) == 1, rows
         assert sorted((f["st"], f["path"]) for f in rows[0]["files"]) == [
             ("A", "new.py"), ("M", "pkg/calc.py")]
@@ -1446,11 +1498,11 @@ def test_journal_per_chat():
         target = ws / "pkg" / "calc.py"
 
         # 三次改動故意在同一秒內完成：備份的時間戳只到秒，這是會撞的
-        serve.workspace.CURRENT_CHAT = "chat-A"
+        serve.workspace.set_cur_chat("chat-A")
         serve._tool_edit_file("pkg/calc.py", "a + b", "FIRST")
-        serve.workspace.CURRENT_CHAT = "chat-B"
+        serve.workspace.set_cur_chat("chat-B")
         serve._tool_write_file("pkg/new_b.py", "x = 1\n")
-        serve.workspace.CURRENT_CHAT = "chat-A"
+        serve.workspace.set_cur_chat("chat-A")
         serve._tool_edit_file("pkg/calc.py", "FIRST", "SECOND")
 
         a = serve.journal_for("chat-A")
@@ -1476,7 +1528,31 @@ def test_journal_per_chat():
         assert "a + b" in body and "FIRST" not in body and "SECOND" not in body, body
         assert not (ws / "pkg" / "new_b.py").exists(), "別則對話新建的檔案沒有跟著刪掉"
         assert serve.journal_for("chat-A") == [] and serve.journal_for("chat-B") == []
-        serve.workspace.CURRENT_CHAT = ""
+        serve.workspace.set_cur_chat("")
+
+
+def test_current_chat_does_not_leak_between_threads():
+    """兩個分頁同時跑的時候，A 的紀錄不能記成 B 的對話。
+
+    ThreadingHTTPServer 一個請求一條執行緒，所以「現在是哪則對話」跟
+    「現在是哪個分頁」一樣要掛在 thread-local 上。原本是模組全域，
+    B 的請求插進來就會把 A 正在記的那一筆改掉。
+    """
+    seen = {}
+    started = threading.Barrier(2)
+
+    def worker(name):
+        serve.workspace.set_cur_chat(name)
+        started.wait(timeout=5)        # 兩邊都設定完才讀，確保有交錯
+        seen[name] = serve.workspace.cur_chat()
+
+    ts = [threading.Thread(target=worker, args=(n,)) for n in ("chat-A", "chat-B")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(timeout=5)
+    assert seen == {"chat-A": "chat-A", "chat-B": "chat-B"}, seen
+    assert serve.workspace.cur_chat() == "", "主執行緒不該被子執行緒設到"
 
 
 def test_sandbox_backends_per_os():

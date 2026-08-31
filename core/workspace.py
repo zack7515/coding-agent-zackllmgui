@@ -61,15 +61,21 @@ SESSIONS_LOCK = threading.Lock()
 _CUR = threading.local()
 
 
-# 現在是哪則對話在呼叫工具。網頁每次呼叫都帶上來，記進 journal ——
-# 「紀錄」分頁才能只顯示這一則對話改過的東西。
-# ponytail: 一個全域變數，靠請求順序決定。一次只跑一個工具所以夠用。
-CURRENT_CHAT = ""
-
-
 def cur() -> "Session":
     """這個請求屬於哪個分頁。沒帶 X-Tab（測試、curl）就是預設那一份。"""
     return getattr(_CUR, "s", None) or SESSIONS[""]
+
+
+# 現在是哪則對話在呼叫工具。網頁每次呼叫都帶上來，記進 journal ——
+# 「紀錄」分頁才能只顯示這一則對話改過的東西。
+# 跟 cur() 一樣掛在 _CUR 上：兩個分頁同時跑的時候，全域版會讓 A 的紀錄
+# 記成 B 的對話。分頁狀態都是每個請求一份了，這個沒有理由是例外。
+def cur_chat() -> str:
+    return getattr(_CUR, "chat", "")
+
+
+def set_cur_chat(chat: str) -> None:
+    _CUR.chat = str(chat or "")[:64]
 
 
 def session_for(tab: str) -> "Session":

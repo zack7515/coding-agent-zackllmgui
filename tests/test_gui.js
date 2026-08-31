@@ -13,6 +13,64 @@ const script = /<script>\n([\s\S]*?)<\/script>/.exec(html)[1];
 new Function(script);
 console.log('ok   腳本可解析');
 
+// 2b. 還原點那兩支要真的跑一次。
+// new Function(script) 只解析不執行，所以函式體裡用了不存在的名字它看不到 ——
+// '　' 被 patch 改壞成 IS 那次就是這樣出去的，一打開「紀錄」分頁就 ReferenceError。
+// 假 DOM 只做這幾支會用到的：className / innerHTML / querySelector / classList。
+function fakeDom() {
+  const mk = function () {
+    const el = { className: '', textContent: '', title: '', kids: [], _html: '' };
+    el.classList = { add: function (c) { el.className += ' ' + c; } };
+    Object.defineProperty(el, 'innerHTML', {
+      get: function () { return el._html; },
+      set: function (h) {
+        el._html = h;
+        el.kids = (h.match(/class="([^"]*)"/g) || []).map(function (m) {
+          const k = mk();
+          k.className = m.slice(7, -1);
+          return k;
+        });
+      }
+    });
+    el.querySelector = function (sel) {
+      const want = sel.replace('.', '');
+      return el.kids.filter(function (k) {
+        return k.className.split(' ').indexOf(want) >= 0;
+      })[0] || null;
+    };
+    el.appendChild = function (k) { el.kids.push(k); return k; };
+    return el;
+  };
+  return { createElement: mk };
+}
+
+{
+  const box = [grab('rewindRow'), grab('fileLines'), grab('clockOf'),
+    'return { rewindRow: rewindRow, fileLines: fileLines };'].join('\n');
+  const rw = new Function('document', box)(fakeDom());
+
+  const ck = rw.rewindRow({ ts: '2026-08-31 09:12:00', tree: 'abc', path: '修一下還原點',
+    files: [{ st: 'M', path: 'a.py' }, { st: 'A', path: 'b.py' }] }, true);
+  assert.ok(ck.className.indexOf('ckpt') >= 0, '檢查點那一列要標成 ckpt');
+  assert.strictEqual(ck.querySelector('.st').textContent, 'C');
+  assert.strictEqual(ck.querySelector('.dir').textContent, '2 個檔案');
+  assert.ok(ck.title.indexOf('2026-08-31 09:12:00') >= 0, ck.title);
+
+  const one = rw.rewindRow({ ts: '2026-08-31 09:13:00', tool: 'write_file',
+    path: 'src/main.py', created: true }, false);
+  assert.strictEqual(one.querySelector('.st').textContent, 'A');
+  assert.strictEqual(one.querySelector('.nm').textContent, 'main.py');
+  assert.strictEqual(one.querySelector('.dir').textContent, 'src');
+  assert.ok(one.title.indexOf('write_file') >= 0, one.title);
+
+  // 41 個檔案時要收在 40 加一列「還有 1 個」，不是整串倒出來
+  const many = [];
+  for (let i = 0; i < 41; i++) many.push({ st: 'M', path: 'f' + i + '.py' });
+  assert.strictEqual(rw.fileLines(many).kids.length, 41);
+  assert.strictEqual(rw.fileLines([]).kids.length, 0);
+}
+console.log('ok   還原點列（檢查點、單筆、檔案清單）');
+
 // 2. 把不碰 DOM 的片段挖出來單獨跑
 function grab(name, kind) {
   // 靠「頂層區塊都在第一欄收尾」來切，不用括號配對——程式碼裡的正規表示式
@@ -148,8 +206,16 @@ assert.ok(wt(65000, '', true).indexOf('1 分 5 秒') > 0, '秒數要自己走');
 assert.strictEqual(wt(3000, 'abc', true), '', '思考看得見的時候不必再畫一行');
 assert.ok(wt(3000, 'abc', false).indexOf('思考中') === 0,
   '「顯示思考」關著時，思考那幾分鐘畫面上要有東西');
-assert.ok(/if \(!content && !retrying\) waitLine\(\);/.test(script),
+assert.ok(/if \(!content && !retrying\) \{ probeLoad\(\); waitLine\(\); \}/.test(script),
   'flush 不再更新等待狀態的話，秒數就不走了');
+
+// 冷載入要講清楚是在搬模型，不是當掉 —— 兩者原本在畫面上長得一模一樣
+assert.ok(wt(90000, '', true, '9.6GB').indexOf('讀進記憶體') > 0, wt(90000, '', true, '9.6GB'));
+assert.ok(wt(90000, '', true, '9.6GB').indexOf('9.6GB') > 0, '要講多大，人才知道值不值得等');
+assert.ok(wt(90000, '', true, '9.6GB').indexOf('不是當掉') > 0, '這句才是重點');
+assert.ok(wt(90000, 'abc', false, '9.6GB').indexOf('讀進記憶體') > 0,
+  '還在載入就先講載入，思考中是後面的事');
+assert.ok(wt(3000, '', true, '').indexOf('等模型回應') === 0, '沒在載入時維持原本那句');
 console.log('ok   等回應時看得出還在跑');
 
 // 系統用量：拿不到的那一格要整格不畫。畫成 0 的話，「沒有這張卡」跟
@@ -1085,8 +1151,9 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 // 同一個呼叫連續失敗就不要再送。自動模式下沒有人在按確認，
 // 模型用一樣的參數重試會把 25 輪燒完，而畫面看起來它「還在做事」。
 (function () {
-  const src = script.slice(script.indexOf('const REPEAT_LIMIT'),
-                           script.indexOf('/* ══════════════════════ 子代理'));
+  // 切到「下一個區段標題」而不是寫死某一段的名字 —— 那些區段會搬家
+  const from = script.indexOf('const REPEAT_LIMIT');
+  const src = script.slice(from, script.indexOf('/* ══════════════════════', from));
   const box = new Function(`
     const S = { run: { calls: 0, fails: {}, chat: 'run-A' }, currentId: 'viewing-B',
                 streamTools: [], todos: [] };
@@ -1402,7 +1469,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 (async function () {
   const src = script.slice(script.indexOf('const FEATURES'), script.indexOf('function autoMenuItem'))
     + script.slice(script.indexOf('function autoMenuItem'), script.indexOf('function renderFeatBtn'))
-    + script.slice(script.indexOf('const SW_KEY'), script.indexOf('/* ══════════════════════ 串流執行'))
+    + (function (i) { return script.slice(i, script.indexOf('/* ══════════════════════', i)); }(script.indexOf('const SW_KEY')))
     + grab('writeReason') + grab('openFeatureMenu') + grab('autoWrites');
 
   // srvKeys＝這個版本的 serve.py 認得哪些開關（舊版沒有 browser）

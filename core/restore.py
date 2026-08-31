@@ -54,7 +54,7 @@ def journal_add(tool: str, rel: str, backup: str, created: bool, **extra) -> str
         "id": f"{time.time():.6f}",
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tool": tool, "path": rel, "backup": backup, "created": created,
-        "chat": workspace.CURRENT_CHAT, **extra,
+        "chat": workspace.cur_chat(), **extra,
     }
     try:
         f = journal_path()
@@ -152,7 +152,7 @@ def ckpt_msg(note: str, files: list) -> str:
         if len(files) > 40:
             body.append(f"  …還有 {len(files) - 40} 個")
         body.append("")
-    body += [f"對話：{workspace.CURRENT_CHAT or '（未指定）'}", f"工作區：{ws_root()}"]
+    body += [f"對話：{workspace.cur_chat() or '（未指定）'}", f"工作區：{ws_root()}"]
     return "\n".join(body)
 
 
