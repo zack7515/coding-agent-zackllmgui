@@ -18,15 +18,32 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 想直接按兩下 `zackllmgui.html` 也可以，只是 Ollama 那台要設 `OLLAMA_ORIGINS`，
 而且解析 PDF / Word 與本機工具用不了。兩種方式的差別見[使用手冊](manual.md#兩種開啟方式)。
 
+## 目前只確定 Linux 可以
+
+開發與實測都在 Linux 上（Ubuntu 24.04 / Python 3.13 / bubblewrap）。
+**其他作業系統一次都沒有在實機上跑過**，下面這張表就是全部的實話：
+
+| | 狀態 |
+|---|---|
+| **Linux** | ✅ 實測。工具、沙盒（bubblewrap）、C/C++ 那四條回饋線、`python -m sandbox` 全部跑過 |
+| macOS | ⚠️ **沒驗過。** 程式碼裡有 `seatbelt` 後端（系統內建的 `sandbox-exec`），照文件寫的，沒有機器可以跑 |
+| Windows | ⚠️ **沒驗過。** 沙盒只能走容器（Docker Desktop），MSVC 那條語法檢查也是照文件寫的 |
+
+會踩到平台差異的是**本機工具**那一塊：沙盒挑哪個後端、`run_shell` 走哪個 shell、
+編譯器怎麼呼叫、危險指令怎麼寫。純聊天（不開工作區、不開工具）跑得動 Python 就行。
+
+先在你那台跑一次 `python -m sandbox` —— 它會實際執行一遍逐項驗證，
+不是讀設定檔猜的。全部通過再開沙盒。
+
 ## 功能一覽
 
 | | |
 |---|---|
 | **思考模式** | 控制項依模型能力自動變形：gpt-oss 給四段、qwen3 給開關、沒有的整組停用並**完全不送 `think` 欄位** |
 | **本機工具** | 讀檔、寫檔、列目錄、搜尋、`run_shell`、`run_tests`、`setup_env`、git、連網瀏覽 |
-| **語言支援** | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
+| **語言支援**（Linux 實測） | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
-| **沙盒** | Linux 用 bubblewrap、macOS 用 sandbox-exec、Windows 用容器。**預設關**，按鈕開。**顯示卡會自動接進去** |
+| **沙盒** | Linux 用 bubblewrap（**只有這個實測過**）、macOS 用 sandbox-exec、Windows 用容器。**預設關**，按鈕開。**顯示卡會自動接進去** |
 | **權限規則** | 確認卡上的「以後都放行」把這次的判斷寫成一條規則，不用每天重新點。allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
 | **專案地圖** | 開工作區時就算好「有哪些檔案、每個檔案裡有什麼」放進系統提示。模型不必再花三五輪 `list_dir`／`search_files` 猜檔名 —— 而**每一輪的成本是重吃一次整份 context** |
 | **改完自動檢查** | 模型寫完 `.py`／`.js` 自動跑 linter，錯誤直接回灌給它。不用設定、沒有開關 |
@@ -97,7 +114,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，宿主機的 pytest�
 | | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
 |---|---|---|---|---|
 | **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
-| **C / C++** | 正規表示式 | `-fsyntax-only` / MSVC `/Zs`（需 `compile_commands.json`） | `ctest` / `make test` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`；MSVC 走 `/Zs`，沒驗過） | `ctest` / `make test` | ✅ |
 | JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
 | 其他 | 只列檔名 | — | — | — |
 
@@ -117,18 +134,16 @@ C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**�
 > 所以沒有 per-write 的語法檢查可做。用 `run_shell` 跑 `dotnet test` 一樣可以，
 > 但上面那四格全部是空的。
 
-#### C/C++ 在 Windows 上
+上面這一整套**是在 Linux 上驗的**：bubblewrap 沙盒裡 `cmake` configure → build →
+`ctest` 全過，`edit_file` 拿掉一個分號馬上回語法錯誤，`gcc`／`g++`／`nvcc` 與
+顯示卡在沙盒裡都看得到。
 
-編譯與測試沒問題（`run_shell` 就是你本機的 shell）。要注意的是兩件事：
-
-- **沙盒開起來的話**，Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
-  裡**沒有編譯器也沒有 cmake**。換一個有工具鏈的：
-  `python serve.py --sandbox container --sandbox-image gcc:14`。
-  Linux／macOS 走的是 bubblewrap／sandbox-exec，檔案系統就是你的機器，沒有這個問題。
-- **寫檔後的語法檢查**認得 MSVC（`cl.exe` 用 `/Zs`）與 MinGW／Clang，
-  但 `compile_commands.json` 只有 Ninja 與 Makefile 產生器會生 ——
-  Visual Studio 產生器不會，那一格就是空的（安靜跳過，不會亂報）。
-  `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` 就有了。
+> **其他作業系統沒有實機驗過。** 程式碼裡是這樣寫的，但沒跑過就是沒跑過：
+> Windows 的 `cl.exe` 走 `/Zs`、`compile_commands.json` 只有 Ninja 與 Makefile
+> 產生器會生（Visual Studio 產生器不會，那一格就會是空的）；
+> 沙盒在 Windows 上只能走容器，而預設映像檔 `python:3.13-slim` 裡沒有編譯器，
+> 要用 `--sandbox-image gcc:14` 換掉。認不出來的編譯器一律跳過不做檢查 ——
+> 所以最壞的情況是「少一條回饋」，不會變成一排誤報。
 
 ### 改完就自動檢查
 

@@ -17,6 +17,11 @@ Ollama 與 OpenAI 相容 API 的網頁前端。單一 HTML 檔，不需要建置
 兩種方式的介面一樣。差別除了 CORS，還有兩件只有啟動器做得到的事：
 **解析 PDF / Word**（瀏覽器讀不動二進位檔）與 **本機工具**（要有人在本機執行指令）。
 
+> **目前只確定 Linux 可以。** 開發與實測都在 Ubuntu 24.04 / Python 3.13 上，
+> **macOS 與 Windows 一次都沒有在實機上跑過**。會踩到平台差異的全在本機工具那一塊：
+> 沙盒挑哪個後端、`run_shell` 走哪個 shell、編譯器怎麼呼叫、危險指令怎麼寫。
+> 純聊天（不開工作區、不開工具）跑得動 Python 就行。
+
 ### A. 用 serve.py 啟動（不會有 CORS 問題）
 
 ```powershell
@@ -292,7 +297,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 | | 專案地圖的符號 | 寫檔後語法檢查 | 驗證指令預填 | 測試辨識 |
 |---|---|---|---|---|
 | **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
-| **C / C++** | 正規表示式 | `-fsyntax-only` / MSVC `/Zs`（需 `compile_commands.json`） | `ctest` / `make test` / `make check` | ✅ |
+| **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`；MSVC 走 `/Zs`，沒驗過） | `ctest` / `make test` / `make check` | ✅ |
 | JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
 | 其他 | 只列檔名 | — | — | — |
 
@@ -320,18 +325,29 @@ C/C++ 專案裡：
 > 所以做不出 per-write 的語法檢查。用 `run_shell` 跑 `dotnet test` 一樣可以，
 > 但上表那四格全部是空的。
 
-**C/C++ 在 Windows 上**（Linux／macOS 不用管這一段）：
+**這一整套是在 Linux 上驗的**（Ubuntu 24.04 / gcc 13 / cmake 3.28 / bubblewrap）。
+實際跑過的：bubblewrap 沙盒裡 `cmake` configure → build → `ctest` 全過、
+測試失敗時 `exit=8` 帶著讀得懂的輸出；`edit_file` 拿掉一個分號馬上回語法錯誤；
+專案地圖抓得到 `namespace`／`class`／`template`／函式；沙盒裡看得到 32 顆 CPU、
+`nvcc` 與顯示卡。五種專案形狀都走過：CMake+ctest、Makefile-only、
+`compile_commands.json` 在根目錄（`bear`／`compiledb`）、什麼建置系統都沒有、
+Python 與 C 混合。
 
-- 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
-- **開了沙盒**的話 Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
-  裡沒有編譯器也沒有 cmake。換一個有工具鏈的：
-  `python serve.py --sandbox container --sandbox-image gcc:14`。
-  這個旗標只影響容器後端 —— bubblewrap／sandbox-exec 用的本來就是你機器上的工具鏈。
-- `compile_commands.json` 只有 Ninja 與 Makefile 產生器會生，Visual Studio 產生器不會。
-  要那條語法檢查的話 `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`。
-- 語法檢查跑在**宿主機**上，用宿主機的編譯器。所以在容器裡 configure 出來的
-  `compile_commands.json` 對不起來（裡面記的是容器內的 `/work/...`），那一格會是空的。
-  要它就在沙盒外先 configure 一次。
+> **其他作業系統沒有實機驗過。** 下面這幾條是程式碼裡確實這樣寫的，
+> 但沒有 Windows／macOS 機器跑過，就當成「應該會這樣」而不是「實測如此」：
+>
+> - 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
+> - **開了沙盒**的話 Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
+>   裡沒有編譯器也沒有 cmake。換一個有工具鏈的：
+>   `python serve.py --sandbox container --sandbox-image gcc:14`。
+>   （這個旗標本身有在 Linux 上驗過：換成 `gcc:14.2` 之後容器後端跑得完 `make test`。）
+> - `compile_commands.json` 只有 Ninja 與 Makefile 產生器會生，Visual Studio 產生器不會。
+>   要那條語法檢查的話 `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`。
+> - 認不出來的編譯器一律跳過不做檢查，所以最壞的情況是**少一條回饋**，
+>   不會變成一排誤報。
+> - 語法檢查跑在**宿主機**上，用宿主機的編譯器。所以在容器裡 configure 出來的
+>   `compile_commands.json` 對不起來（裡面記的是容器內的 `/work/...`），那一格會是空的。
+>   要它就在沙盒外先 configure 一次。
 
 **做得比較像 IDE agent 的幾件事**（參考幾套 IDE agent 的共同做法）：
 
@@ -403,11 +419,14 @@ C/C++ 專案裡：
   **跑不出工作區、沒有網路**。這補的是唯一跑得出工作區的洞：檔案工具有路徑限制擋著，
   `run_shell` 沒有。**一個作業系統一種做法**，開啟時會先偵測跑 `serve.py` 那一台：
 
-  | 平台 | 用什麼 | 要裝什麼 |
-  |---|---|---|
-  | Linux | bubblewrap | `sudo apt install bubblewrap` |
-  | macOS | 內建的 `sandbox-exec` | 不用裝 |
-  | Windows | Docker Desktop | Docker Desktop |
+  | 平台 | 用什麼 | 要裝什麼 | 驗過沒 |
+  |---|---|---|---|
+  | Linux | bubblewrap | `sudo apt install bubblewrap` | ✅ 實測 |
+  | macOS | 內建的 `sandbox-exec` | 不用裝 | ⚠️ 沒驗過 |
+  | Windows | Docker Desktop | Docker Desktop | ⚠️ 沒驗過 |
+
+  **只有 Linux 實測過**（容器後端也是在 Linux 上驗的）。開之前先在你那台跑一次
+  `python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。
 
   挑不出來的話按鈕會直接告訴你這個平台該裝什麼。核心層的做法（bubblewrap／sandbox-exec）
   排在容器前面，因為它**不換掉檔案系統** —— pytest、node、gcc、CUDA 都還在原地，
@@ -487,6 +506,8 @@ C/C++ 專案裡：
 後面那幾條是 Windows 的寫法：**沙盒沒開的話 `run_shell` 走的是 `cmd`**，
 POSIX 那幾條一條都打不到，而 `rmdir /s /q` 跟 `rm -rf` 是同一件事。
 尺度也一樣 —— 遞迴不擋（照樣要你點），**遞迴又不問**才擋。
+（規則本身在 Linux 上測過不會誤殺 `make test`、`cmake --build`、
+`"{}".format(x)` 這些；但沒有 Windows 機器可以驗真的在 `cmd` 底下跑起來的樣子。）
 
 **找檔案不必一層一層點。** `search_files` 只給 `glob` 不給 `pattern` 就是
 「照檔名找檔案」（`test_*.py`、`pkg/*.py`），回的是路徑清單。兩個都給就是

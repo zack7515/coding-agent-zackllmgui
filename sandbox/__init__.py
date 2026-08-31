@@ -13,6 +13,10 @@
 | Windows | `container`（Docker Desktop） | Docker Desktop |
 | 都可以 | `container`（docker / podman） | docker 或 podman |
 
+**只有 Linux 實測過**（bwrap 與 container 兩個後端都是在 Linux 上驗的）。
+macOS 的 seatbelt 與 Windows 上的 Docker Desktop 沒有機器可以跑 ——
+在那兩個平台上先跑 `python -m sandbox` 逐項驗過再開。
+
 挑選順序是「核心層優先、容器墊底」：核心層的沙盒不換掉檔案系統，
 所以 pytest、node、gcc、CUDA 都還在原地，而且快一個數量級
 （這台實測 bwrap 7 ms、docker 176 ms）。容器要嘛映像檔裡有、要嘛就是沒有。

@@ -49,6 +49,40 @@ def test_repo_map_takes_files_and_rel_from_outside():
         assert repomap.repo_map([], lambda p: "") == "", "沒有檔案就不要生一份空標題出來"
 
 
+def test_repo_map_leaves_out_build_artifacts():
+    """編譯產物不該佔專案地圖的位置。
+
+    地圖是**每一輪都要重送**的固定成本，多一個 .o 就是每次呼叫都多一行。
+    而 DENY_DIRS 只擋得掉 build/ —— Makefile 專案的產出就落在原地。
+    沒有副檔名的執行檔（`make` 最常見的產出）只能靠 mode 認，
+    那個 stat 在 repo_map 裡本來就要做，所以這條等於不用錢。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rel = lambda p: str(p.relative_to(root))       # noqa: E731
+        (root / "calc.c").write_text("int add(int a, int b){ return a + b; }\n",
+                                     encoding="utf-8")
+        (root / "calc.o").write_bytes(b"\x7fELF fake")
+        binary = root / "calc_test"
+        binary.write_bytes(b"\x7fELF fake")
+        binary.chmod(0o755)
+        (root / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        (root / "run.sh").chmod(0o755)
+
+        # ws_walk 那一層先擋掉有副檔名的產物
+        assert ".o" in workspace.DENY_EXT and ".so" in workspace.DENY_EXT
+        workspace.SESSIONS[""].ws = root
+        walked = {rel(f) for f in workspace.ws_walk()}
+        assert "calc.o" not in walked, walked
+        assert "calc.c" in walked and "run.sh" in walked
+
+        # 沒有副檔名的執行檔由 repo_map 這一層擋
+        out = repomap.repo_map(sorted(root.iterdir()), rel)
+        assert "calc_test" not in out, "make 產出的執行檔進了地圖：" + out
+        assert "calc.c：add" in out, out
+        assert "run.sh" in out, "有副檔名的腳本是原始碼，不能一起掃掉"
+
+
 def test_repo_map_cache_key_includes_size():
     """同一格 mtime 內改兩次也要重算。
 

@@ -86,6 +86,12 @@ def repo_map(files, rel) -> str:
             key = (st.st_mtime_ns, st.st_size)
         except OSError:
             continue
+        # make 產在專案根目錄的執行檔沒有副檔名，只能靠 mode 認。能執行又沒有
+        # 副檔名的幾乎只有編譯出來的東西 —— 腳本通常有 .sh，沒有的話少列一行也不痛。
+        # 放在這裡而不是 ws_walk：那個 stat 本來就要做，這條等於不用錢。
+        if not f.suffix and st.st_mode & 0o111:
+            n -= 1                 # 沒列出來就不該佔 MAP_FILES 的額度
+            continue
         # 大小要一起當鍵：mtime 有顆粒度，同一格裡改兩次（模型連著兩次
         # edit_file）拿到同一個值，ext4 上連 st_mtime_ns 都一樣
         hit = _MAP_CACHE.get(f)

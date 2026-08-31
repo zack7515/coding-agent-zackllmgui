@@ -32,6 +32,11 @@ DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
 DENY_FILES = re.compile(r"^(\.env(\..*)?|.*\.env|.*\.pem|.*\.key|.*\.pfx|id_rsa.*|"
                         r".*\.p12|.*credentials.*\.json|\.npmrc|\.netrc|"
                         r"\.zackllmgui-.*\.json)$", re.I)
+# 編譯產物。DENY_DIRS 擋得掉 build/，但 Makefile 專案的產出就落在原地 ——
+# 而專案地圖是**每一輪都要重送**的固定成本，多一個 .o 就是每次呼叫都多一行。
+# 這裡不擋 read_file：真的想看那個檔還是看得到，只是不主動列出來。
+DENY_EXT = {".o", ".obj", ".a", ".so", ".dylib", ".dll", ".lib", ".exe",
+            ".d", ".gch", ".pch", ".pdb", ".ilk", ".pyd", ".pyc", ".class"}
 MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看的
 
 # 工作區是哪種語言。決定要送哪幾支工具、提示詞怎麼寫 ——
@@ -157,5 +162,7 @@ def ws_walk():
         dirs[:] = sorted(d for d in dirs if d not in DENY_DIRS and not d.startswith("."))
         for name in sorted(files):
             if DENY_FILES.match(name):
+                continue
+            if Path(name).suffix.lower() in DENY_EXT:
                 continue
             yield Path(base) / name
