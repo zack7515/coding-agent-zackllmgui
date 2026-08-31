@@ -30,6 +30,9 @@ BLOCKED_CMDS = [
     (r"\b(rmdir|rd)\s+(/[a-z]+\s+)*/(s\s+(/[a-z]+\s+)*/q|q\s+(/[a-z]+\s+)*/s)\b",
      "rmdir /s /q（工作區裡的東西請改用 rmdir /s <路徑>，不要加 /q）"),
     (r"\bdel\s+(/[a-z]+\s+)*/s\b", "del /s（遞迴刪除，沒有備份救得回來）"),
+    (r"\bRemove-Item\b(?=[^;&|]*\s-(?:Recurse|r)\b)"
+     r"(?=[^;&|]*\s-(?:Force|fo)\b)",
+     "Remove-Item -Recurse -Force（工作區裡請拿掉 -Force）"),
     (r"\bformat\s+[a-z]:", "格式化磁碟"),
     (r"\bdiskpart\b", "磁碟分割工具"),
 ]

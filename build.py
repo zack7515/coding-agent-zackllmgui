@@ -43,13 +43,12 @@ def render() -> str:
 
 
 def stale() -> bool:
-    """來源比產出新就要重組。找不到 frontend/ 一律當成不用組。"""
+    """產出內容與來源不同就要重組；不依賴下載／解壓後不可靠的 mtime。"""
     if not SRC.is_dir():
         return False
     if not OUT.exists():
         return True
-    newest = max(f.stat().st_mtime for f in sources())
-    return newest > OUT.stat().st_mtime
+    return OUT.read_text(encoding="utf-8") != render()
 
 
 def build(force: bool = False) -> bool:
@@ -67,6 +66,8 @@ def build(force: bool = False) -> bool:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if "--check" in sys.argv:
         if stale():
             print("zackllmgui.html 比 frontend/ 舊，請跑 python build.py")

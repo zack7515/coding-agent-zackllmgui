@@ -1489,7 +1489,7 @@ const FEATURES = [{
 | `todo_write` | 十幾輪之後模型會忘記目標。清單攤在輸入框上方，人跟模型都看得到 | `_tool_todo_write()` / `renderTodos()` |
 | `ask_user_question` | 讓它問，不要猜。**這支不在伺服器執行** —— 伺服器沒有人可以答 | `askUser()`（前端）；`run_tool()` 會直接拒絕 |
 | `submit_plan` + 計畫模式 | 先講計畫、人核准，寫入工具才出現在 `tool_defs()` 裡 | `Session.plan`（`on` / `approved` / `text`） |
-| `AGENTS.md` 自動讀入 | 不同 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），講的是同一件事 | `project_md()`，接在 `agent_rules()` 最後 |
+| `AGENTS.md` 自動讀入 | 支援 AGENTS.md／GROK.md／.cursorrules | `project_md()`，接在 `agent_rules()` 最後 |
 
 計畫模式的閘門做在**兩層**：`tool_defs()` 那一層沒核准之前寫入工具
 根本不會出現在送給模型的清單裡（跟其他分層一樣的理由 —— 看不到才不會一直嘗試），
@@ -1792,7 +1792,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **`READ_STATE` 永遠不清** | 一次 session 幾百筆，記憶體無所謂 | 真要淘汰換 `OrderedDict` 加上限 |
 | **原始碼指紋比 mtime 不比內容**（[serve.py](serve.py) `source_stamp`） | `touch` 與 `git checkout` 會誤觸 | 誤判的代價只是多重啟一次。真的嫌吵再換成讀檔算 sha1 |
 | **GPU 節點是寫死的 glob 清單**（[sandbox/bwrap.py](sandbox/bwrap.py) `GPU_NODES`） | 只有 NVIDIA 驗過，其餘照文件寫 | 在沙盒裡 `ls /dev` 看少了什麼，往清單補一條。細節見 [sandbox/README.md](sandbox/README.md) |
-| **容器後端不接 GPU** | docker／podman 裡沒有顯示卡 | `--gpus all` 需要 NVIDIA Container Toolkit，沒裝會讓 docker 直接失敗，所以不無條件加。要做就得先偵測 |
+| **容器 GPU 要明確開啟** | 預設不接顯示卡 | `--sandbox-gpu` 會加 `--gpus all`；需要 NVIDIA Container Toolkit，所以不無條件開啟 |
 | **重複失敗只比「工具名＋參數完全一樣」**（[07-tools.js](frontend/js/07-tools.js) `REPEAT_LIMIT`） | 差一個空白就繞過去 | 模型重試時通常原封不動送同一份。真的漏掉再做參數正規化 |
 | **檔位可以自己打開寫入權限**（[02-const.js](frontend/js/02-const.js) `autoWrites`） | 選了「改檔案自動」等於同意模型改檔案，沒有第二次確認 | 那個檔位的名字就是同意本身。反過來（兩邊各存各的）的症狀是畫面顯示全自動、那支筆卻是灰的，而使用者看不出為什麼。打開時一定跳提示 |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |

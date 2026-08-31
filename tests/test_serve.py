@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))          # 測試搬進 tests/ 之後才找得到 serve.py
@@ -30,6 +31,11 @@ import serve
 RULES = ".zackllmgui-rules.json"
 
 HERE = ROOT
+
+
+def shell_python(code: str) -> str:
+    """交給本機 shell 的跨平台 Python 指令；測的是 shell 路徑，不是 Unix 工具。"""
+    return f'"{sys.executable}" -c "{code}"'
 
 
 def post(url, data, headers=None):
@@ -136,8 +142,8 @@ def test_tools_toggle_over_http():
 
         serve.set_workspace(str(HERE))
         code, body = post(base + "/tool", json.dumps({"name": "run_shell",
-                          "args": {"command": "echo on"}}).encode())
-        assert code == 200 and "on" in body["result"], body
+                          "args": {"command": "echo enabled"}}).encode())
+        assert code == 200 and "enabled" in body["result"], body
 
         code, body = post(base + "/tools", json.dumps({"enabled": False}).encode())
         assert body["tools"] is False and serve.ALLOW_TOOLS is False
@@ -263,7 +269,7 @@ def test_ext_forwarding():
 def test_tool_output_truncated():
     serve.ALLOW_TOOLS = True
     serve.set_workspace(str(HERE))
-    out = serve.run_tool("run_shell", {"command": "printf 'x%.0s' $(seq 1 20000)"})
+    out = serve.run_tool("run_shell", {"command": shell_python("print('x'*20000)")})
     assert len(out) < serve.TOOL_OUTPUT_LIMIT + 200 and "已截斷" in out
     serve.ALLOW_TOOLS = False
     serve.cur().ws = None
@@ -310,12 +316,23 @@ def test_workspace_jail():
 
         # symlink 指到工作區外也要擋掉（resolve() 會解開連結）
         link = ws / "escape"
-        os.symlink("/etc", link)
+        if os.name == "nt":
+            outside = Path(tempfile.mkdtemp())
+            (outside / "passwd").write_text("secret", encoding="utf-8")
+            made = subprocess.run([os.environ.get("ComSpec", "cmd.exe"), "/c", "mklink", "/J",
+                                   str(link), str(outside)], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0
+            assert made, "Windows 測試需要能建立目錄 junction"
+        else:
+            os.symlink("/etc", link)
         try:
             serve.run_tool("read_file", {"path": "escape/passwd"})
             raise AssertionError("symlink 逃逸沒有被擋")
         except (PermissionError, FileNotFoundError):
             pass
+        if os.name == "nt":
+            os.rmdir(link)
+            shutil.rmtree(outside)
 
         # 家目錄與根目錄不能當工作區
         for bad_root in [str(Path.home()), "/"]:
@@ -462,7 +479,7 @@ def test_plan_gate():
 
 
 def test_project_md():
-    """AGENTS.md / CLAUDE.md 要被讀進工具規則裡（幾套 agent 的共同慣例）。"""
+    """AGENTS.md 要被讀進工具規則裡。"""
     with Workspace() as ws:
         assert serve.project_md() == ("", "")
         (ws / "AGENTS.md").write_text("這個專案一律用四格縮排。", encoding="utf-8")
@@ -602,6 +619,7 @@ def test_windows_delete_commands_are_gated_too():
     `rmdir /s /q` 跟 `rm -rf` 是同一件事，以前完全放行。尺度跟 rm 那條對齊。
     """
     for cmd in ["rmdir /s /q build", "rmdir /Q /S build", "rd /s /q x",
+                "Remove-Item build -Recurse -Force", "Remove-Item -fo -r build",
                 "del /s /q *.obj", "format c:", "diskpart"]:
         assert serve.command_risk(cmd)[0] == "block", cmd
 
@@ -656,8 +674,9 @@ def test_cross_site_post_is_refused_over_http():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory() as tmp:
         mark = Path(tmp) / "should-not-exist"
-        body = json.dumps({"name": "run_shell",
-                           "args": {"command": f"touch {mark}"}}).encode()
+        command = shell_python(
+            "from pathlib import Path;" + f"Path({str(mark)!r}).touch()")
+        body = json.dumps({"name": "run_shell", "args": {"command": command}}).encode()
         try:
             serve.ALLOW_TOOLS = True          # 放在 try 裡面：中途爆掉不能留給後面的測試
             serve.set_workspace(str(HERE))
@@ -752,7 +771,8 @@ def test_verify_endpoint_is_gated_like_run_shell():
     try:
         serve.ALLOW_TOOLS = True
         with Workspace():
-            code, out = post(base + "/verify", json.dumps({"command": "echo 過了"}).encode(),
+            code, out = post(base + "/verify",
+                             json.dumps({"command": shell_python("print('過了')")}).encode(),
                              {"Origin": base})
             assert code == 200 and out["exit"] == 0 and "過了" in out["output"], out
             for bad in ("rm -rf ~", "sudo apt install x", ""):
@@ -1047,7 +1067,7 @@ def test_run_stream_over_http():
     try:
         with Workspace():
             body = json.dumps({"name": "run_shell",
-                               "args": {"command": "echo 一; echo 二"}}).encode()
+                               "args": {"command": shell_python("print('一');print('二')")}}).encode()
             req = urllib.request.Request("http://127.0.0.1:8803/run", data=body,
                                          headers={"Content-Type": "application/json"},
                                          method="POST")
@@ -1087,7 +1107,7 @@ def test_run_output_caps():
                 with urllib.request.urlopen(req, timeout=60) as res:
                     return [json.loads(ln) for ln in res.read().decode().splitlines() if ln.strip()]
 
-            out = call("yes 灌爆輸出用的一行字")
+            out = call(shell_python("print('x'*3000000)"))
             done = [o for o in out if o.get("done")][0]
             assert done["flooded"] is True, "輸出沒有被上限攔下來"
             assert "已被中止" in done["result"], done["result"][-200:]
@@ -1230,9 +1250,9 @@ def test_checkpoint_catches_what_the_journal_misses():
         assert sorted((f["st"], f["path"]) for f in rows[0]["files"]) == [
             ("A", "new.py"), ("M", "pkg/calc.py")]
 
-        # commit 訊息要讀得懂：git log refs/zackllmgui/ckpt/* 是最後一條救命索
+        # git 物件不能留下提示、對話 id 或本機絕對路徑；那會在備份／mirror push 外洩。
         msg = git("log", "-1", "--format=%B", first["commit"]).stdout
-        assert "幫我改 calc.py" in msg and "工作區" in msg, msg
+        assert "工作區檢查點" in msg and "幫我改" not in msg and str(ws) not in msg, msg
 
         out = serve.rewind_to(first["id"])
         assert not out["failed"], out["failed"]
@@ -1434,7 +1454,9 @@ def test_mcp_follows_the_workspace():
         shutil.rmtree(b, ignore_errors=True)
 
 
-def test_sandbox_wrap_and_gate():
+@mock.patch("sandbox.container.runtime", return_value="docker")
+@mock.patch("sandbox.container.available", return_value="docker")
+def test_sandbox_wrap_and_gate(_available, _runtime):
     """沙盒預設關；開了之後指令要被包成沙盒，而且路徑要換成裡面看得到的。
 
     這裡驗的是「包出來的 argv 對不對」與各後端的共同保證；
@@ -1459,7 +1481,8 @@ def test_sandbox_wrap_and_gate():
         cmd, cwd, use_shell, head = serve.build_command("run_shell", {"command": "ls"})
         assert use_shell is True and cmd == "ls", "沒開沙盒就該是原本的行為"
 
-        serve.ALLOW_SANDBOX = True
+        keep_gpu = serve.SANDBOX_GPU
+        serve.ALLOW_SANDBOX, serve.SANDBOX_GPU = True, False
         try:
             cmd, cwd, use_shell, head = serve.build_command("run_shell", {"command": "ls"})
             assert use_shell is False and isinstance(cmd, list), cmd
@@ -1470,6 +1493,10 @@ def test_sandbox_wrap_and_gate():
             assert str(ws) in joined, "工作區沒有掛進去"
             assert cmd[-1] == "ls" and cmd[-2] == "-lc", cmd
             assert head == "$ ls", "確認卡上要顯示原本那行指令，不是一長串 docker run"
+            serve.SANDBOX_GPU = True
+            gpu_cmd, _, _, _ = serve.build_command("run_shell", {"command": "nvidia-smi"})
+            assert "--gpus" in gpu_cmd and "all" in gpu_cmd, gpu_cmd
+            serve.SANDBOX_GPU = False
 
             # 擋下來的指令走沙盒也一樣擋 —— 風險判斷不能因為包了容器就跳過
             try:
@@ -1487,8 +1514,11 @@ def test_sandbox_wrap_and_gate():
             # 沙盒裡該用哪個 python，分兩種情況：
             venv = ws / ".venv" / "bin"
             venv.mkdir(parents=True)
-            (venv / "python").symlink_to("/usr/local/bin/python3.13")
-            assert not (venv / "python").exists(), "前提變了：這個連結應該是斷的"
+            if os.name == "nt":
+                (venv / "python").write_text("", encoding="utf-8")
+            else:
+                (venv / "python").symlink_to("/usr/local/bin/python3.13")
+                assert not (venv / "python").exists(), "前提變了：這個連結應該是斷的"
 
             keep_backend = serve.SANDBOX_BACKEND
             try:
@@ -1508,7 +1538,7 @@ def test_sandbox_wrap_and_gate():
             finally:
                 serve.SANDBOX_BACKEND = keep_backend
         finally:
-            serve.ALLOW_SANDBOX = False
+            serve.ALLOW_SANDBOX, serve.SANDBOX_GPU = False, keep_gpu
 
 
 def test_journal_per_chat():
@@ -1600,7 +1630,8 @@ def test_c_project_gets_c_tools_not_python_ones():
         rules = serve.agent_rules()
         assert "C/C++" in rules and "cmake" in rules, rules
         assert "pip install" not in rules, "C 專案不該收到 pip 的規則"
-        assert "rm -r build" in rules, "rm -rf 會被擋，要先講替代做法"
+        clean = "rmdir /s build" if os.name == "nt" else "rm -r build"
+        assert clean in rules, "危險的強制遞迴刪除會被擋，要先講替代做法"
 
         # 加一個 .py 回去就兩邊都算
         (ws / "tool.py").write_text("x = 1\n", encoding="utf-8")
@@ -1754,7 +1785,10 @@ def test_agent_rules_never_names_a_tool_it_did_not_send():
             serve.ALLOW_SANDBOX, serve.SANDBOX_BACKEND = on, backend
 
 
-def test_sandbox_backends_per_os():
+@mock.patch("sandbox.bwrap.available", return_value="bwrap")
+@mock.patch("sandbox.container.runtime", return_value="docker")
+@mock.patch("sandbox.container.available", return_value="docker")
+def test_sandbox_backends_per_os(_available, _runtime, _bwrap):
     """一個作業系統一種做法，而且每一種都要說得出自己擋了什麼。
 
     這裡不需要真的裝 bwrap / docker —— 驗的是「宣告」與「包出來的形狀」。
@@ -1785,9 +1819,12 @@ def test_sandbox_backends_per_os():
     # 而容器是 Windows 上唯一的後端：C/C++ 專案一進沙盒就沒有工具鏈。
     assert "gcc:14" in sb.wrap("make", "/tmp", backend="container", image="gcc:14")
     assert sb.container.IMAGE in sb.wrap("make", "/tmp", backend="container")
+    gpu_cmd = sb.wrap("nvidia-smi", "/tmp", backend="container", gpu=True)
+    assert "--gpus" in gpu_cmd and "all" in gpu_cmd
     # 核心層後端用的是宿主機的工具鏈，多收一個用不到的參數不能炸
     assert sb.bwrap.wrap("make", "/tmp", image="gcc:14")[-2:] == ["-lc", "make"]
     assert hasattr(serve, "SANDBOX_IMAGE"), "serve.py 要有地方存 --sandbox-image"
+    assert hasattr(serve, "SANDBOX_GPU"), "serve.py 要能明確開啟容器 GPU"
 
     detected = sb.detect()
     assert set(detected) >= {"host", "backends", "backend", "ok", "why"}
@@ -1811,7 +1848,7 @@ def test_sandbox_backends_per_os():
             # 遮蔽要排在工作區的 bind 前面，不然工作區在 /tmp 或家目錄底下時
             # 會被後面的 tmpfs 蓋成空的（踩過）
             joined = " ".join(argv)
-            assert joined.index("--tmpfs /tmp") < joined.index("--bind /tmp /tmp"), \
+            assert joined.index("--tmpfs /tmp") < joined.index("--bind"), \
                 "tmpfs 排在 bind 後面的話，工作區會被蓋掉"
 
 
@@ -2214,7 +2251,8 @@ def test_background_shell_does_not_block():
     """
     with Workspace():
         out = serve.run_tool("run_shell",
-                             {"command": "echo start; sleep 3; echo end",
+                             {"command": shell_python(
+                                 "import time;print('start',flush=True);time.sleep(3);print('end')"),
                               "background": True})
         assert "background" not in out           # 回的是 id 不是參數名
         jid = re.search(r"\bjob\d+\b", out)
@@ -2258,10 +2296,11 @@ def test_background_jobs_have_a_ceiling():
             if j["code"] is None:
                 serve.run_tool("check_job", {"id": j["id"], "kill": True})
         try:
+            slow = shell_python("import time;time.sleep(30)")
             for _ in range(serve.BG_MAX):
-                serve.run_tool("run_shell", {"command": "sleep 30", "background": True})
+                serve.run_tool("run_shell", {"command": slow, "background": True})
             try:
-                serve.run_tool("run_shell", {"command": "sleep 30", "background": True})
+                serve.run_tool("run_shell", {"command": slow, "background": True})
                 assert False, "超過上限還是開得起來"
             except RuntimeError as e:
                 assert "上限" in str(e) and "check_job" in str(e), e
@@ -2485,6 +2524,9 @@ def test_orphan_worktrees_are_findable_and_closeable():
 
         out = serve.agent_close(o["id"])
         assert out["committed"] is True and out["commits"] == 1, out
+        msg = git_out(ws, "log", "-1", "--format=%B", o["branch"])
+        assert msg.strip() == "更新專案檔案" and "找出登入" not in msg, msg
+        assert ("co" + "-authored") not in msg.lower(), msg
         assert not Path(info["path"]).exists(), "收不掉"
         files = git_out(ws, "show", "--name-only", "--format=", o["branch"])
         assert "跑到一半.txt" in files, files
@@ -2691,6 +2733,10 @@ def test_worktree_links_node_modules_without_risking_it():
         info = serve.agent_open("work")
         wt = Path(info["path"])
         try:
+            if not info["linked"]:
+                assert os.name == "nt", info
+                assert (ws / "node_modules" / "left-pad" / "index.js").is_file()
+                return
             assert info["linked"] == ["node_modules"], info
             assert (wt / "node_modules").is_symlink()
             assert (wt / "node_modules" / "left-pad" / "index.js").read_text() == "x", \
@@ -2829,7 +2875,8 @@ def test_agent_stop_reaches_descendants_and_jobs():
                 pass
             # 用底層的 _start_job 直接掛一條在 b 名下，不必真的走 run_shell 的權限
             with serve.as_agent(b["id"]):
-                out = serve._start_job("sleep 30", ["sleep", "30"], None, False, "$ sleep 30")
+                cmd = [sys.executable, "-c", "import time;time.sleep(30)"]
+                out = serve._start_job("python sleep", cmd, None, False, "$ python sleep")
             job = out.split("id = ")[1].split("（")[0].strip()
             assert serve.JOBS[job]["agent"] == b["id"], "背景指令沒有記上是誰開的"
 

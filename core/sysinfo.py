@@ -12,14 +12,38 @@ SYS_CACHE = {"at": 0.0, "data": {}}
 SYS_TTL = 1.5                      # 開兩個分頁時不要變成一秒兩次 nvidia-smi
 
 
-def cpu_percent() -> float:
-    """/proc/stat 兩次取樣之間的忙碌比例。第一次沒有基準，回 -1。"""
+def _windows_cpu_times():
+    """Windows 的 (total, idle) 100 ns ticks；失敗回 None。"""
+    if os.name != "nt":
+        return None
     try:
-        with open("/proc/stat", encoding="utf-8") as fh:
-            v = [float(x) for x in fh.readline().split()[1:]]
+        import ctypes
+        from ctypes import wintypes
+
+        idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+        if not ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+
+        def ticks(value):
+            return (value.dwHighDateTime << 32) | value.dwLowDateTime
+
+        return ticks(kernel) + ticks(user), ticks(idle)
     except Exception:
-        return -1.0
-    idle, total = v[3] + (v[4] if len(v) > 4 else 0), sum(v)
+        return None
+
+
+def cpu_percent() -> float:
+    """兩次取樣之間的忙碌比例。第一次沒有基準，回 -1。"""
+    current = _windows_cpu_times()
+    if current is None:
+        try:
+            with open("/proc/stat", encoding="utf-8") as fh:
+                v = [float(x) for x in fh.readline().split()[1:]]
+            current = (sum(v), v[3] + (v[4] if len(v) > 4 else 0))
+        except Exception:
+            return -1.0
+    total, idle = current
     prev = CPU_LAST.get("v")
     CPU_LAST["v"] = (total, idle)
     if not prev or total <= prev[0]:
@@ -30,6 +54,28 @@ def cpu_percent() -> float:
 def ram_info() -> dict:
     """RAM 用量（GB）。用 MemAvailable 不是 MemFree —— cache 拿得回來，
     算成已用會看起來永遠快滿。"""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                            ("total_phys", ctypes.c_ulonglong),
+                            ("avail_phys", ctypes.c_ulonglong),
+                            ("total_page", ctypes.c_ulonglong),
+                            ("avail_page", ctypes.c_ulonglong),
+                            ("total_virtual", ctypes.c_ulonglong),
+                            ("avail_virtual", ctypes.c_ulonglong),
+                            ("avail_extended", ctypes.c_ulonglong)]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                gib = 1024.0 ** 3
+                return {"used": round((status.total_phys - status.avail_phys) / gib, 1),
+                        "total": round(status.total_phys / gib, 1)}
+        except Exception:
+            return {}
     try:
         got = {}
         with open("/proc/meminfo", encoding="utf-8") as fh:

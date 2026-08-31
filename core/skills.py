@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from core.jobs import kill_tree
+from core.jobs import decode_output, kill_tree, process_group_kwargs
 from core.workspace import HERE, cur
 from tools.schemas import TOOL_SCHEMAS
 
@@ -53,8 +53,9 @@ def skill_live(body: str, run, allowed, build) -> str:
             argv, cwd, use_shell, _ = build("run_shell", {"command": cmd})
             # 用 Popen 而不是 subprocess.run：逾時的時候 run 只殺得到最上面那個 sh，
             # 真正在跑的孫子會活下來，而且沒有任何一支看得到它（見 kill_tree）。
-            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, start_new_session=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    **process_group_kwargs())
             try:
                 out = proc.communicate(timeout=15)[0]
             except subprocess.TimeoutExpired:
@@ -63,7 +64,7 @@ def skill_live(body: str, run, allowed, build) -> str:
                 done[cmd] = ("", "跑超過 15 秒已中止，可能已經有副作用")
                 continue
             # 只去頭尾的換行：porcelain 那種輸出前兩欄是空白，strip() 會把它吃掉
-            done[cmd] = (out.decode("utf-8", "replace").strip("\n")[:SKILL_CMD_OUT], "")
+            done[cmd] = (decode_output(out, use_shell).strip("\r\n")[:SKILL_CMD_OUT], "")
         except Exception as e:
             done[cmd] = ("", f"{type(e).__name__}: {e}")
 

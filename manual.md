@@ -42,6 +42,7 @@ python serve.py --allow-write                      # 啟動時就允許改檔案
 python serve.py --sandbox                          # 開機就把 run_shell 關進沙盒（自己挑後端）
 python serve.py --sandbox container                # 指定後端：bwrap / seatbelt / container
 python serve.py --sandbox-image gcc:14             # 換容器映像檔（預設那個沒有編譯器）
+python serve.py --sandbox container --sandbox-gpu  # 容器接 NVIDIA GPU（需 Container Toolkit）
 python serve.py --no-tools                         # 關掉本機工具（預設是開著的）
 python serve.py --trust-remote                     # 非本機的瀏覽器也能開工具（見下方警告）
 ```
@@ -334,7 +335,7 @@ C/C++ 專案裡：
 `compile_commands.json` 在根目錄（`bear`／`compiledb`）、什麼建置系統都沒有、
 Python 與 C 混合。
 
-> **Windows／macOS 的路寫好了，但沒有機器可以驗。** 下面這幾條是程式碼裡確實
+> **Windows 已在 Windows 11 實測；macOS 的路寫好了但還沒有機器可以驗。** 下面這幾條是程式碼裡確實
 > 這樣寫的，等有機器再測 —— 現在請當成「應該會這樣」而不是「實測如此」：
 >
 > - 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
@@ -358,7 +359,7 @@ Python 與 C 混合。
   （附選項就變成按鈕），答案回灌給模型。
 - **計畫模式**：打開之後，模型得先 `submit_plan` 送出計畫、你按「核准」，
   修改檔案的工具才會出現。
-- **專案說明**：工作區根目錄有 `AGENTS.md`／`CLAUDE.md`／`GROK.md`／`.cursorrules`
+- **專案說明**：工作區根目錄有 `AGENTS.md`／`GROK.md`／`.cursorrules`
   時會自動讀進系統提示，優先於內建通則。工作區對話框會顯示讀到了哪一份。
 - **連網瀏覽**（功能與工具 → 連網瀏覽，預設關）：`run_browser` 讓模型
   **不知道網址時也查得到東西** —— `action="search"` 用關鍵字搜，
@@ -432,7 +433,7 @@ Python 與 C 混合。
   挑不出來的話按鈕會直接告訴你這個平台該裝什麼。核心層的做法（bubblewrap／sandbox-exec）
   排在容器前面，因為它**不換掉檔案系統** —— pytest、node、gcc、CUDA 都還在原地，
   而容器裡「映像檔沒裝的就是沒有」。預設映像檔是 `python:3.13-slim`，
-  裡面**沒有編譯器也沒有 cmake**；要跑 C/C++ 就換一個：`--sandbox-image gcc:14`。這台實測 bubblewrap 每次多花 7 ms，docker 是 176 ms。
+  裡面**沒有編譯器也沒有 cmake**；要跑 C/C++ 就換一個：`--sandbox-image gcc:14`。Linux 實測 bubblewrap 每次多花 7 ms、docker 約 176 ms；Windows Docker Desktop 約 600 ms。
   三支工具裡只有 `setup_env` 開網路 —— pip 一定要連得出去，開放範圍就縮在那一步。
   細節與「加一個後端要寫什麼」在 [sandbox/README.md](sandbox/README.md)。
 

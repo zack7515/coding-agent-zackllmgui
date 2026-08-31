@@ -51,6 +51,22 @@ def tail_of(out: str, keep: int = 100) -> str:
     return head + "\n".join(lines[-keep:])
 
 
+def decode_output(data, windows_shell: bool = False) -> str:
+    """外部工具多半是 UTF-8；Windows cmd 內建指令則跟著主控台 code page。"""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if os.name == "nt" and windows_shell:
+            try:
+                import ctypes
+                return data.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}", "replace")
+            except Exception:
+                pass
+        return data.decode("utf-8", "replace")
+
+
 def kill_tree(proc) -> None:
     """殺掉整棵程序樹，不是只殺最上面那一個。
 
@@ -58,6 +74,17 @@ def kill_tree(proc) -> None:
     `proc.kill()` 只殺得到 sh，孫子繼續握著 stdout，讀取執行緒永遠等不到 EOF。
     Popen 開 start_new_session 自成一個 process group，這裡整組送 SIGKILL。
     """
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return
     try:
         os.killpg(os.getpgid(proc.pid), 9)
     except Exception:
@@ -67,7 +94,15 @@ def kill_tree(proc) -> None:
             pass
 
 
-def _job_reader(job, proc, watchdog) -> None:
+def process_group_kwargs() -> dict:
+    """讓逾時／中斷時能一次收掉整棵程序樹。"""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP |
+                subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
+def _job_reader(job, proc, watchdog, use_shell: bool) -> None:
     """把程序的輸出一路讀進 ring buffer。跑完就記下 exit code。
 
     整支都在 try 裡：這條執行緒死掉的話 job 會永遠停在「還在跑」，
@@ -75,7 +110,7 @@ def _job_reader(job, proc, watchdog) -> None:
     """
     try:
         for line in proc.stdout:
-            line = line.rstrip("\n")
+            line = decode_output(line, use_shell).rstrip("\r\n")
             if len(line) > MAX_LINE_CHARS:
                 line = line[:MAX_LINE_CHARS] + "…（這一行被截斷）"
             with JOBS_LOCK:                # 讀取端會 join 這個 deque，不能邊改邊讀
@@ -114,15 +149,18 @@ def _start_job(command: str, cmd, cwd, use_shell: bool, head: str) -> str:
                # 不然「已中斷」只中斷了一半 —— 指令還在這台機器上跑。
                "agent": (rec or {}).get("id", ""), "chat": workspace.cur_chat()}
         JOBS[jid] = job
-    proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, bufsize=1, text=True,
-                            encoding="utf-8", errors="replace",
-                            start_new_session=True)
+    try:
+        proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=0, **process_group_kwargs())
+    except Exception:
+        with JOBS_LOCK:
+            JOBS.pop(jid, None)
+        raise
     job["proc"] = proc
     watchdog = threading.Timer(BG_TIMEOUT, kill_tree, args=(proc,))
     watchdog.daemon = True             # 不然 serve.py 要等一小時才關得掉
     watchdog.start()
-    t = threading.Thread(target=_job_reader, args=(job, proc, watchdog), daemon=True)
+    t = threading.Thread(target=_job_reader, args=(job, proc, watchdog, use_shell), daemon=True)
     t.start()
     return (f"{head}\n已經丟到背景跑，id = {jid}（上限 {BG_TIMEOUT // 60} 分鐘）。\n"
             f"**現在先去做別的事**，不要空轉等它。之後用 check_job(\"{jid}\") 收結果 ——"

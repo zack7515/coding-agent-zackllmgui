@@ -14,7 +14,7 @@
 **功能清單不列在這裡了** —— 那份會過期，而且 [README 的功能一覽](README.md#功能一覽)
 與 [manual.md](manual.md#功能) 本來就有。這份文件只記**還沒做的**與**為什麼是這個順序**。
 
-一句話：對照 Cursor、Codex 與一套商用 IDE 擴充的公開行為逐項比對過，
+一句話：對照數套本機與商用 coding agent 的公開行為逐項比對過，
 **功能層與機制層都沒有「補洞」等級的缺口了**。原本的能力類剩五項，沒有一項是缺口 ——
 一項是舒適度（語音朗讀），四項卡在「還不知道要不要做」或「沒有東西可以驗」。
 
@@ -464,7 +464,7 @@ worktree 借 node_modules，再加上量過之後決定不做的延後載入工�
 這五條是幾輪下來實際有用的，跟這一輪做了什麼無關：
 
 **一、便宜的調查會砍掉昂貴的實作。** 最有價值的一次不是寫了什麼，是查到
-「線上的 agent 多半不用容器做本機沙盒」（Codex CLI 在 macOS 用 Seatbelt、
+「線上的 agent 多半不用容器做本機沙盒」（macOS 常用 Seatbelt、
 Linux 用 Landlock + seccomp）—— 原本排第一的 `--sandbox-image` 因此整個不必做，
 換成 bubblewrap 之後快 25 倍、工具鏈與 GPU 都不用管。
 
@@ -579,7 +579,7 @@ MCP 更明顯，一台檔案系統 server 二十支工具就是每輪再加幾�
 2. **`run_tests` 不能把宿主機的絕對路徑帶進容器。** 工作區在裡面叫 `/work`，
    所以 target 要換成相對路徑，python 也要用相對的或裸的 `python`。
 
-**後來換掉了**：查過線上 agent 怎麼做之後（多半不用容器，Codex CLI 在 macOS 用
+**後來換掉了**：查過線上 agent 怎麼做之後（多半不用容器，macOS 可用
 Seatbelt、Linux 用 Landlock + seccomp），解法不是換映像檔而是換後端。
 現在 Linux 預設走 bubblewrap：**每次多 7 ms**（容器是 176 ms），
 宿主機的 pytest / node / gcc 直接可用，`--dev-bind /dev /dev` 之後

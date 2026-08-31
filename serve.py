@@ -67,7 +67,8 @@ from core.agents import (AGENTS_DIR, SUB_DEPTH_MAX, agent_chain, agent_close,
                          agent_types, agent_view, agents_roots, as_agent,
                          bind_agent, git_at, worktree_orphans)
 from core.jobs import (BG_MAX, BG_TIMEOUT, BG_WAIT, BG_WAIT_MAX, JOBS, JOBS_LOCK,
-                       _job_tail, _start_job, jobs_state, kill_tree, tail_of)
+                       _job_tail, _start_job, decode_output, jobs_state, kill_tree,
+                       process_group_kwargs, tail_of)
 from core import skills as _skills
 from core.skills import (SKILL_CMD, SKILL_CMD_MAX, SKILL_DESC_MAX,
                          SKILL_LIST_MAX, SKILLS_DIR, parse_skill, skill_body,
@@ -107,9 +108,8 @@ SHELL_TIMEOUT = 30
 ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁上也隨時能切
 
 AT_FILE_CAP = 3000                 # 輸入框打 @ 時最多列幾個檔案
-# 專案自己的說明檔。不同的 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），
-# 這裡三種都收，找到第一個就用。
-AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GROK.md", ".cursorrules")
+# 專案自己的說明檔。收常見的通用檔名，找到第一個就用。
+AGENT_FILES = ("AGENTS.md", "GROK.md", ".cursorrules")
 PROJECT_MD_LIMIT = 6000
 
 
@@ -134,6 +134,7 @@ SANDBOX_BACKEND = ""               # 空的＝照 sandbox/ 的偏好順序自己
 # 容器後端的映像檔。預設那個（python:3.13-slim）沒有編譯器，C/C++ 要自己換。
 # 只從命令列給：換映像檔等於換掉沙盒裡的整個世界。
 SANDBOX_IMAGE = ""
+SANDBOX_GPU = False                 # 容器需額外 runtime；不無條件開，避免整個沙盒起不來
 SEARCH_HITS = 80
 TEST_TIMEOUT = 900
 STREAM_TOOLS = {"run_shell", "run_tests"}   # 這兩支走 /run 串流，其他工具沒必要
@@ -534,7 +535,7 @@ def rg_rows(pattern: str):
     for line in proc.stdout.decode("utf-8", "replace").splitlines():
         part = line.split(":", 2)
         if len(part) == 3:
-            rows.append((part[0], part[1], part[2]))
+            rows.append((Path(part[0]).as_posix(), part[1], part[2]))
     return rows
 
 
@@ -775,7 +776,7 @@ def _tool_run_shell(command: str, background: bool = False) -> str:
         return _start_job(command, cmd, cwd, use_shell, head)
     proc = subprocess.run(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=SHELL_TIMEOUT)
-    out = proc.stdout.decode("utf-8", "replace")
+    out = decode_output(proc.stdout, use_shell)
     return f"[exit {proc.returncode}]\n{out}"
 
 
@@ -985,7 +986,8 @@ def sandbox_state() -> dict:
     偵測的是**跑 serve.py 這一台**（工具本來就在這台跑），不是開網頁那一台。
     """
     info = sandbox.detect()
-    return dict(info, on=ALLOW_SANDBOX, backend=SANDBOX_BACKEND or info["backend"])
+    return dict(info, on=ALLOW_SANDBOX, backend=SANDBOX_BACKEND or info["backend"],
+                gpu=SANDBOX_GPU)
 
 
 def sandbox_python() -> str:
@@ -1022,7 +1024,7 @@ def build_command(name: str, args: dict):
             # 沙盒裡沒有網路，所以 curl 把東西送出去這條路直接斷掉；
             # cwd 一樣是工作區，指令本身一個字都不用改。
             return (sandbox.wrap(command, ws_root(), backend=SANDBOX_BACKEND,
-                                 image=SANDBOX_IMAGE),
+                                 image=SANDBOX_IMAGE, gpu=SANDBOX_GPU),
                     str(ws_root()), False, f"$ {command}")
         return command, (str(cur().ws) if cur().ws else None), True, f"$ {command}"
     if name == "run_tests":
@@ -1033,7 +1035,7 @@ def build_command(name: str, args: dict):
             if args.get("k"):
                 line += " -k " + shlex.quote(str(args["k"]))
             return (sandbox.wrap(line, ws_root(), backend=SANDBOX_BACKEND,
-                                 image=SANDBOX_IMAGE),
+                                 image=SANDBOX_IMAGE, gpu=SANDBOX_GPU),
                     str(ws_root()), False, "[" + line + "]")
         cmd = detect_python() + ["-m", "pytest", "-q", "--color=no"]
         if args.get("target"):
@@ -2034,9 +2036,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, bufsize=1, text=True,
-                                encoding="utf-8", errors="replace",
-                                start_new_session=True)
+                                stderr=subprocess.STDOUT, bufsize=0, **process_group_kwargs())
         limit = TEST_TIMEOUT if name == "run_tests" else SHELL_TIMEOUT
         watchdog = threading.Timer(limit, kill_tree, args=(proc,))
         watchdog.start()
@@ -2055,10 +2055,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._chunk({"line": head})
             for line in proc.stdout:
-                line = line.rstrip("\n")
+                line = decode_output(line, use_shell).rstrip("\r\n")
+                raw_chars = len(line)
                 if len(line) > MAX_LINE_CHARS:
                     line = line[:MAX_LINE_CHARS] + f"…（這一行被截斷，原本 {len(line)} 字元）"
-                total += len(line) + 1
+                total += raw_chars + 1
                 if len(ring) == RING_LINES:
                     dropped += 1
                 ring.append(line)
@@ -2384,8 +2385,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"這條指令不會自動執行：{why}"}, 400)
                 return
             argv, cwd, use_shell, _ = build_command("run_shell", {"command": cmd})
-            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, start_new_session=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    **process_group_kwargs())
             try:
                 out = proc.communicate(timeout=TEST_TIMEOUT)[0]
             except subprocess.TimeoutExpired:
@@ -2396,7 +2398,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
         self._json({"command": cmd, "exit": proc.returncode,
-                    "output": tail_of(out.decode("utf-8", "replace"))})
+                    "output": tail_of(decode_output(out, use_shell))})
 
     def _do_view(self) -> None:
         """把工作區裡的檔案內容送給介面顯示。
@@ -2510,12 +2512,15 @@ def build_server(ollama: str, bind: str, port: int) -> ThreadingHTTPServer:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description="ZackLLMGUI 啟動器（同時代理 Ollama API，避開 CORS）")
     parser.add_argument("--ollama", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
                         help="Ollama 位址，例如 http://192.168.1.20:11434")
-    parser.add_argument("--port", type=int, default=5678, help="本機服務的 port（預設 8777）")
-    parser.add_argument("--host", default="0.0.0.0",
+    parser.add_argument("--port", type=int, default=5678, help="本機服務的 port（預設 5678）")
+    parser.add_argument("--host", default="127.0.0.1",
                         help="綁定位址；要讓同網段其他裝置連進來就填 0.0.0.0")
     parser.add_argument("--no-browser", action="store_true", help="不要自動開瀏覽器")
     parser.add_argument("--workspace", default="",
@@ -2538,12 +2543,16 @@ def main() -> int:
     parser.add_argument("--sandbox-image", default="", metavar="映像檔",
                         help="容器後端要用哪個映像檔（預設 python:3.13-slim）。"
                              "那一個裡面沒有編譯器，所以 C/C++ 專案要換成有工具鏈的，"
-                             "例如 gcc:14 或自己 build 一個。只影響容器後端，"
-                             "bubblewrap／sandbox-exec 用的是你機器上原本的工具鏈。")
+                              "例如 gcc:14 或自己 build 一個。只影響容器後端，"
+                              "bubblewrap／sandbox-exec 用的是你機器上原本的工具鏈。")
+    parser.add_argument("--sandbox-gpu", action="store_true",
+                        help="把 GPU 接進容器沙盒（Docker 需要 NVIDIA Container Toolkit，"
+                             "映像檔仍須包含工作負載需要的 CUDA runtime）。")
     args = parser.parse_args()
 
-    global ALLOW_TOOLS, TRUST_REMOTE, ALLOW_SANDBOX, SANDBOX_BACKEND, SANDBOX_IMAGE
+    global ALLOW_TOOLS, TRUST_REMOTE, ALLOW_SANDBOX, SANDBOX_BACKEND, SANDBOX_IMAGE, SANDBOX_GPU
     SANDBOX_IMAGE = args.sandbox_image
+    SANDBOX_GPU = args.sandbox_gpu
     ALLOW_TOOLS = not args.no_tools
     if args.sandbox:
         want = "" if args.sandbox == "auto" else args.sandbox

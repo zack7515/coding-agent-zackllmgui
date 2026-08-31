@@ -21,7 +21,7 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 ## 目前只確定 Linux 可以
 
 開發與實測都在 Linux 上（Ubuntu 24.04 / Python 3.13 / bubblewrap）。
-其他平台的路**都寫好了，但還沒有機器可以驗**：
+Windows 的本機工具、Docker Desktop 沙盒與 GPU 接入已實測；macOS 路徑已實作但尚未實機驗證：
 
 | | 狀態 |
 |---|---|
@@ -146,6 +146,7 @@ C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**�
 > **Windows／macOS 寫好了但沒驗過。** 編譯器認 MSVC（`cl.exe` 走 `/Zs`）、
 > MinGW 與 Clang，交叉編譯器與版號（`arm-none-eabi-gcc`、`clang++-18`）也算；
 > 沙盒在 Windows 上走容器，預設映像檔沒有編譯器，用 `--sandbox-image gcc:14` 換掉。
+> 要讓容器使用 NVIDIA GPU，再加 `--sandbox-gpu`（需要 NVIDIA Container Toolkit）。
 > **認不出來的編譯器一律跳過不做檢查**，所以最壞的情況是少一條回饋，不是一排誤報。
 
 ### 改完就自動檢查

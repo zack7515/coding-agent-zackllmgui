@@ -38,7 +38,7 @@ def backup_file(p: Path) -> str:
             break
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(p, dst)
-    return str(dst.relative_to(root))
+    return dst.relative_to(root).as_posix()
 
 
 def journal_path() -> Path:
@@ -131,7 +131,8 @@ def tmp_index():
 
         def run(*a, timeout: int = 120) -> str:
             proc = subprocess.run(["git"] + list(a), cwd=str(ws_root()), env=env,
-                                  capture_output=True, text=True, timeout=timeout)
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=timeout)
             if proc.returncode != 0:
                 raise RuntimeError((proc.stderr or proc.stdout).strip()[:400] or "git 失敗")
             return proc.stdout.strip()
@@ -140,20 +141,8 @@ def tmp_index():
 
 
 def ckpt_msg(note: str, files: list) -> str:
-    """檢查點的 commit 訊息。`git log refs/zackllmgui/ckpt/*` 要讀得懂。"""
-    note = " ".join(str(note or "").split())
-    head = f"檢查點：{note[:60]}" if note else "檢查點"
-    body = [head, ""]
-    if note:
-        body += ["提示：" + note[:800], ""]
-    if files:
-        body += [f"上一輪改了 {len(files)} 個檔案："]
-        body += [f"  {f['st']} {f['path']}" for f in files[:40]]
-        if len(files) > 40:
-            body.append(f"  …還有 {len(files) - 40} 個")
-        body.append("")
-    body += [f"對話：{workspace.cur_chat() or '（未指定）'}", f"工作區：{ws_root()}"]
-    return "\n".join(body)
+    """不把提示、對話或本機絕對路徑寫進 git 物件。"""
+    return f"工作區檢查點（{len(files)} 個檔案變更）" if files else "工作區檢查點"
 
 
 def ckpt_files(tree: str, nxt: str = "") -> list:
@@ -190,8 +179,8 @@ def checkpoint(note: str = "", msg: int = -1) -> dict:
             git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)   # 沒 ref 釘著會被 gc 掃掉
     except Exception as e:
         return {"skipped": f"{type(e).__name__}: {e}"}
-    return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
-                              "", False, tree=tree, commit=sha, msg=msg),
+    return {"id": journal_add("checkpoint", "", "", False,
+                               tree=tree, commit=sha, msg=msg),
             "commit": sha, "tree": tree}
 
 
