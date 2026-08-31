@@ -86,9 +86,8 @@ def repo_map(files, rel) -> str:
             key = (st.st_mtime_ns, st.st_size)
         except OSError:
             continue
-        # make 產在專案根目錄的執行檔沒有副檔名，只能靠 mode 認。能執行又沒有
-        # 副檔名的幾乎只有編譯出來的東西 —— 腳本通常有 .sh，沒有的話少列一行也不痛。
-        # 放在這裡而不是 ws_walk：那個 stat 本來就要做，這條等於不用錢。
+        # make 產在根目錄的執行檔沒有副檔名，只能靠 mode 認（腳本通常有 .sh）。
+        # 放在這裡而不是 ws_walk：那個 stat 本來就要做，等於不用錢。
         if not f.suffix and st.st_mode & 0o111:
             n -= 1                 # 沒列出來就不該佔 MAP_FILES 的額度
             continue

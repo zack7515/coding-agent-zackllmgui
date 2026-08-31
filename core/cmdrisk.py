@@ -25,9 +25,8 @@ BLOCKED_CMDS = [
     (r"\bgit\s+push\b[^|;]*--force(?!-with-lease)", "強制推送（會覆蓋遠端歷史）"),
     (r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
     (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
-    # Windows。沙盒沒開的話 run_shell 走的是 cmd，上面那幾條一條都打不到 ——
-    # 而 `rmdir /s /q` 跟 `rm -rf` 是同一件事。跟 rm 那條同一個尺度：
-    # 遞迴不擋（救得回來的照樣要問），**遞迴又不問**才擋。
+    # Windows：沙盒沒開時 run_shell 走 cmd，上面那幾條一條都打不到。
+    # 尺度跟 rm 那條一樣 —— 遞迴不擋，遞迴又不問才擋。
     (r"\b(rmdir|rd)\s+(/[a-z]+\s+)*/(s\s+(/[a-z]+\s+)*/q|q\s+(/[a-z]+\s+)*/s)\b",
      "rmdir /s /q（工作區裡的東西請改用 rmdir /s <路徑>，不要加 /q）"),
     (r"\bdel\s+(/[a-z]+\s+)*/s\b", "del /s（遞迴刪除，沒有備份救得回來）"),
@@ -41,7 +40,7 @@ BLOCKED_CMDS = [
 RISKY_CMDS = [
     (r"\bsudo\b", "用 sudo 提權"),
     (r"\brm\b", "刪除檔案", True),
-    # Windows 的刪除。del/erase/rmdir 在 Linux 上不是指令，錯殺頂多多問一次；
+    # del/erase/rmdir 在 Linux 上不是指令，錯殺頂多多問一次；
     # rd 太像一般英文字，只在後面接旗標時才算。
     (r"\b(del|erase|rmdir)\s+\S|\brd\s+/|\bRemove-Item\b", "刪除檔案（Windows）", True),
     (r"\bpip\s+(install|uninstall)|\bnpm\s+(i|install|uninstall)\b|\bconda\s+(install|remove)",

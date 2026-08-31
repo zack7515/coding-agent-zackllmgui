@@ -66,10 +66,8 @@ def probe(backend: str = "", **opts) -> list:
                         f"uid={made.stat().st_uid}（你是 {os.getuid()}）",
                         "不是的話你自己刪不掉它建出來的東西"))
 
-        # 工具鏈也只記錄不判定 —— 需不需要編譯器是專案的事。
-        # 但這一項在容器後端上一定要看得到：預設映像檔 python:3.13-slim 裡
-        # 沒有 gcc 也沒有 cmake，而 Windows 上容器是唯一的後端。少了這一行，
-        # 使用者要跑完一次 cmake 失敗才會知道，而模型會先花三輪想辦法自己裝。
+        # 工具鏈只記錄不判定 —— 需不需要編譯器是專案的事。
+        # 但容器後端一定要看得到：預設映像檔裡沒有 gcc 也沒有 cmake。
         (ws / "probe.c").write_text("int main(void){ return 0; }\n", encoding="utf-8")
         try:
             _, text = run("got=; for t in cc gcc g++ make cmake ninja; do "

@@ -13,8 +13,8 @@ from .probe import bench, probe
 def main() -> int:
     as_json = "--json" in sys.argv
     want = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--backend=")), "")
-    # 裸的後端名字也接受：`python -m sandbox container` 看起來就該能用，
-    # 以前它會安靜地忽略掉那個字然後去測 bwrap —— 測錯後端還說「全部通過」。
+    # 裸的後端名字也接受。以前 `python -m sandbox container` 會安靜地
+    # 忽略那個字然後去測 bwrap —— 測錯後端還說「全部通過」。
     want = want or next((a for a in sys.argv[1:] if not a.startswith("-")), "")
     image = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--image=")), "")
     opts = {"image": image} if image else {}

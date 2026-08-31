@@ -131,10 +131,8 @@ AUTO_MODES = ("off", "read", "edit", "full", "ws")
 ALLOW_SANDBOX = False
 
 SANDBOX_BACKEND = ""               # 空的＝照 sandbox/ 的偏好順序自己挑
-# 容器後端要用哪個映像檔。空的＝sandbox/container.py 的預設（python:3.13-slim）。
-# 存在的理由：那個預設裡**沒有編譯器**，而容器是 Windows 上唯一的後端 ——
-# 不換映像檔的話，Windows 上的 C/C++ 專案一進沙盒就沒有 gcc 也沒有 cmake。
-# 只從命令列給，不開放網頁改：換映像檔等於換掉沙盒裡的整個世界。
+# 容器後端的映像檔。預設那個（python:3.13-slim）沒有編譯器，C/C++ 要自己換。
+# 只從命令列給：換映像檔等於換掉沙盒裡的整個世界。
 SANDBOX_IMAGE = ""
 SEARCH_HITS = 80
 TEST_TIMEOUT = 900
@@ -1117,8 +1115,8 @@ def agent_rules() -> str:
               "- 同一個檔案要改好幾處時用 edits 一次送完，不要一輪改一處。",
               "- 要刪檔案用 delete_file，不要用 run_shell 下 rm —— "
               "delete_file 會先備份、還原得回來，rm 不會。",
-              # run_tests 只在 Python 專案裡送得出去（見 tool_defs 的 needs 閘門）。
-              # 在 C/C++ 專案裡提它的名字，小模型就會去呼叫一支不存在的工具。
+              # run_tests 有 needs:"python" 的閘門，C/C++ 專案收不到那支工具。
+              # 提到名字就是把它種進 context，小模型會去呼叫清單上沒有的東西。
               "- 一次做完一件事就驗證一次，不要改一整輪才驗。"
               + ("驗證用 run_tests。" if "python" in langs else ""),
               "- 測試失敗時修的是程式，不是測試。真的認為測試寫錯，先說出來讓使用者決定。"]
@@ -1126,29 +1124,23 @@ def agent_rules() -> str:
         r.append("- 缺套件時用 setup_env 裝進工作區的 .venv，不要用 run_shell 下 pip install。")
     if "c" in langs:
         # 有 CMake 就講 CMake，沒有就不要教它建一份 —— 那是專案的決定不是這裡的。
-        # 這裡以前還接一句「沒有 run_tests 可用」，拿掉了：講出那個名字就是把它
-        # 種進 context，小模型照樣會去呼叫一支清單上沒有的工具。工具清單本來就是
-        # 權威，不存在的東西連否定句都不該出現。
+        # 不提 run_tests，連「沒有 run_tests 可用」這種否定句也不提（理由同上）。
         r.append("- C/C++：編譯與測試用 run_shell 跑專案自己的那一套"
                  + ("（cmake -S . -B build、cmake --build build、ctest --test-dir build"
                     " --output-on-failure）。" if (cur().ws / "CMakeLists.txt").is_file()
                     else "（make、或直接 gcc／g++）。"))
-        # rm 是 sh 的指令。沙盒開著就一定是 sh（bwrap／容器都是 sh -lc），
-        # 沒開的話 run_shell 走的是本機的 shell —— Windows 上那是 cmd。
+        # 沙盒開著一定是 sh；沒開的話走本機 shell，Windows 上那是 cmd。
         if ALLOW_SANDBOX or os.name != "nt":
             r.append("- 要清掉建置目錄用 `rm -r build`，不要加 -f —— 加了會被擋下來。")
         else:
             r.append("- 要清掉建置目錄用 `rmdir /s build`，不要加 /q —— 加了會被擋下來。")
     if ALLOW_SANDBOX:
-        # 講的必須是**實際會用到的那個後端**。核心層（bwrap／sandbox-exec）沒有換掉
-        # 檔案系統，宿主機的 gcc、cmake、node 都還在；容器裡只有映像檔的內容。
-        # 這兩句話反過來說的後果不一樣：跟 bwrap 的模型說「只看得到工作區」，
-        # 它會以為系統標頭與編譯器不存在，然後開始想辦法自己弄一份。
+        # 講的必須是實際會用到的那個後端。跟 bwrap 底下的模型說「只看得到工作區」，
+        # 它會以為系統編譯器不存在，然後想辦法自己弄一份。
         try:
             same_fs = getattr(sandbox.pick(SANDBOX_BACKEND), "SAME_FS", False)
         except RuntimeError:
             same_fs = False
-        # run_tests 一樣關在沙盒裡，但它只在 Python 專案送得出去，所以名字也只在那時提
         who = "run_shell 與 run_tests" if "python" in langs else "run_shell"
         if same_fs:
             r.append(f"- {who} 在沙盒裡跑：工作區以外唯讀、**沒有網路**。"
@@ -1375,74 +1367,69 @@ def git_action(action: str, message: str = "") -> dict:
 # ponytail: 只認 ruff、eslint 與 C/C++ 的 -fsyntax-only，寫死。
 #           typecheck 要先解決「跑整包很慢」。
 LINT_TIMEOUT = 20
-# C/C++ 的單檔語法檢查一定要有真的編譯旗標。直接 `gcc -fsyntax-only x.cpp`
-# 十次有九次會噴「找不到 include」—— 那是缺 -I，不是程式碼有問題，
-# 而誤報比沒有更糟（模型會照著亂改）。compile_commands.json 是 CMake
-# 開 CMAKE_EXPORT_COMPILE_COMMANDS 就會生的標準檔，clangd／clang-tidy 也吃它。
-# 沒有這個檔就安靜跳過 —— 跟「eslint 沒設定檔就跳過」同一條規則。
+# 單檔語法檢查一定要有真的編譯旗標：裸跑 gcc -fsyntax-only 會噴「找不到 include」，
+# 那是缺 -I 不是程式碼有錯，而誤報比沒有更糟。沒有這個檔就安靜跳過。
+# glob 樣式：CLion 是 cmake-build-debug／release／…，VS 的開啟資料夾模式是 out/build/<設定>/。
 CC_DB = ("compile_commands.json", "build/compile_commands.json",
-         "cmake-build-debug/compile_commands.json", "out/build/compile_commands.json")
-# 「只檢查語法」每家寫法不一樣，所以要先認出驅動程式是誰。
-# **認不出來就跳過**：猜錯旗標換來的是一整排誤報，比沒有檢查糟得多。
-# 名字要容得下交叉編譯器與版號 —— arm-none-eabi-gcc、gcc-13、clang++-18 都算數。
+         "cmake-build-*/compile_commands.json", "out/build/compile_commands.json",
+         "out/build/*/compile_commands.json")
+# 「只檢查語法」每家寫法不一樣，先認出驅動程式是誰，認不出來就跳過。
+# 樣式容得下交叉編譯器與版號：arm-none-eabi-gcc、gcc-13、clang++-18。
 CC_GNU = re.compile(r"(?:^|-)(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)(?:-[\d.]+)?$", re.I)
 CC_MSVC = re.compile(r"(?:^|-)(?:cl|clang-cl)$", re.I)
-# MSVC 的輸出旗標（/Fo 目的檔、/Fd pdb、/Fe 執行檔、/Fp 前置標頭）。
-# /Zs 本來就不產出東西，拿掉只是不留任何機會在別人的建置目錄裡寫檔。
-CC_MSVC_OUT = re.compile(r"^[/-]F[odpe]", re.I)
-# 拆 command 字串要用哪一套引號規則。獨立成常數是為了測得到 —— 直接讀 os.name
-# 的話，測試沒辦法在 Linux 上假裝自己是 Windows（連 pathlib 都會跟著壞掉）。
+CC_MSVC_OUT = re.compile(r"^[/-]F[odpe]", re.I)   # MSVC 的輸出旗標，/Zs 用不到
+# 拆 command 用哪一套引號規則。獨立成常數是為了測得到 —— 直接讀 os.name 的話，
+# 測試沒辦法在 Linux 上假裝自己是 Windows。
 CC_POSIX = os.name != "nt"
 
 
 def cc_flags(path: Path):
     """從 compile_commands.json 找出這個檔案的編譯指令。回傳 (argv, cwd) 或 None。"""
     for name in CC_DB:
-        db = ws_root() / name
-        if not db.is_file():
+        for db in sorted(ws_root().glob(name)):
+            hit = _cc_row(db, path)
+            if hit:
+                return hit
+    return None
+
+
+def _cc_row(db: Path, path: Path):
+    """一份 compile_commands.json 裡有沒有這個檔案。有就回 (argv, cwd)。"""
+    try:
+        rows = json.loads(db.read_text("utf-8", errors="replace"))
+    except (ValueError, OSError):
+        return None
+    for r in rows:
+        if Path(r.get("file", "")).resolve() != path.resolve():
             continue
-        try:
-            rows = json.loads(db.read_text("utf-8", errors="replace"))
-        except (ValueError, OSError):
+        # arguments 是現成的陣列，優先用。只有 command 時才自己拆，而 shlex 的
+        # POSIX 模式會把 C:\VS\bin\cl.exe 的反斜線當跳脫字元吃掉。
+        argv = r.get("arguments")
+        if not argv:
+            argv = shlex.split(r.get("command", ""), posix=CC_POSIX)
+            if not CC_POSIX:
+                argv = [a.strip('"') for a in argv]
+        if not argv:
             continue
-        for r in rows:
-            if Path(r.get("file", "")).resolve() != path.resolve():
-                continue
-            # arguments 是現成的陣列，優先用它。只有 command 的時候才要自己拆，
-            # 而 shlex 預設是 POSIX 模式 —— 那會把 C:\VS\bin\cl.exe 的反斜線
-            # 當成跳脫字元吃掉，變成 C:VSbincl.exe。Windows 上要關掉，
-            # 代價是引號會留在 token 裡，所以再脫一層。
-            argv = r.get("arguments")
-            if not argv:
-                argv = shlex.split(r.get("command", ""), posix=CC_POSIX)
-                if not CC_POSIX:
-                    argv = [a.strip('"') for a in argv]
-            if not argv:
-                continue
-            # 不要用 Path().stem：在 Linux 上讀到 Windows 的資料庫時，
-            # PosixPath 不認得反斜線，整條 C:\VS\bin\cl.exe 會變成一個檔名。
-            exe = re.split(r"[\\/]", argv[0])[-1]
-            exe = exe[:-4] if exe.lower().endswith(".exe") else exe
-            if CC_GNU.search(exe):
-                check, msvc = "-fsyntax-only", False
-            elif CC_MSVC.search(exe):
-                check, msvc = "/Zs", True
-            else:
-                return None            # icc、tcc 之類認不得的，不要猜
-            # 丟掉輸出相關的旗標：只檢查語法不產出東西，留著 -o／/Fo 反而會出錯
-            out = []
-            skip = False
-            for a in argv[1:]:
-                if skip:
-                    skip = False
-                    continue
-                if a in ("-o", "-c") or (msvc and a.lower() in ("/c", "-c")):
-                    skip = a == "-o"
-                    continue
-                if msvc and CC_MSVC_OUT.match(a):
-                    continue
+        # 不用 Path().stem：Linux 上讀到 Windows 的資料庫時 PosixPath 不認得反斜線
+        exe = re.split(r"[\\/]", argv[0])[-1]
+        exe = exe[:-4] if exe.lower().endswith(".exe") else exe
+        if CC_GNU.search(exe):
+            check, msvc = "-fsyntax-only", False
+        elif CC_MSVC.search(exe):
+            check, msvc = "/Zs", True
+        else:
+            return None                # icc、tcc 之類認不得的，不要猜
+        # 輸出旗標要丟掉：只檢查語法不產出東西，留著 -o／/Fo 反而會出錯
+        out, skip = [], False
+        for a in argv[1:]:
+            if skip:
+                skip = False
+            elif a in ("-o", "-c") or (msvc and a.lower() in ("/c", "-c")):
+                skip = a == "-o"
+            elif not (msvc and CC_MSVC_OUT.match(a)):
                 out.append(a)
-            return ([argv[0], check] + out, r.get("directory") or str(ws_root()))
+        return ([argv[0], check] + out, r.get("directory") or str(ws_root()))
     return None
 
 
@@ -1464,11 +1451,8 @@ def lint_after_write(path: Path) -> str:
         cmd = ["ruff", "check", "--no-cache", "--quiet", ws_rel(path)]
     elif ext in repomap.C_EXT:
         # 標頭檔不在 compile_commands.json 裡（那只記翻譯單元），所以只檢查 .c/.cpp。
-        # 改了標頭要等編譯才知道 —— 那是這個做法的界線，不要為了補它去猜旗標。
-        # ponytail: 在容器後端裡 configure 出來的資料庫記的是容器內路徑（/work/…），
-        #           跟宿主機的檔案對不起來，於是這條回饋線安靜地不存在。不做路徑對映：
-        #           會用容器後端的機器（Windows）通常宿主機上本來就沒有編譯器，
-        #           對映完照樣跑不動。要這條回饋線就在宿主機上 configure 一次。
+        # ponytail: 容器裡 configure 出來的資料庫記的是 /work/…，跟宿主機對不起來，
+        #           這條線就安靜地不存在。不做路徑對映 —— 那種機器通常也沒有編譯器。
         hit = cc_flags(path) if ext not in (".h", ".hpp", ".hh", ".hxx") else None
         if not hit:
             return ""

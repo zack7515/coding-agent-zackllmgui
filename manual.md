@@ -309,9 +309,10 @@ C/C++ 專案裡：
 - `run_tests` 與 `setup_env` 不會出現在工具清單上，編譯測試用 `run_shell` 跑
   `cmake -S . -B build`、`cmake --build build`、`ctest --test-dir build --output-on-failure`。
   這幾句會寫進送給模型的規則裡，不用你交代。
-- 語法檢查要有 `compile_commands.json`（CMake 加 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-  就會生在 `build/` 底下）。沒有就跳過 —— 直接猜編譯旗標會在任何有自訂 include
-  路徑的專案上噴「找不到標頭檔」，那種誤報比沒有更糟。
+- 語法檢查要有 `compile_commands.json`（CMake 加 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`）。
+  找的地方：專案根目錄、`build/`、`cmake-build-*/`（CLion）、
+  `out/build/`（Visual Studio 的開啟資料夾模式）。沒有就跳過 —— 直接猜編譯旗標
+  會在任何有自訂 include 路徑的專案上噴「找不到標頭檔」，那種誤報比沒有更糟。
 - 標頭檔（`.h` / `.hpp`）不做語法檢查：它們不在 `compile_commands.json` 裡。
 - 編譯器認得 GCC／Clang（含交叉編譯器與版號，`arm-none-eabi-gcc`、`clang++-18` 都算）
   與 MSVC（`cl.exe`／`clang-cl` 用 `/Zs`）。**認不出來的一律跳過** ——
@@ -333,8 +334,8 @@ C/C++ 專案裡：
 `compile_commands.json` 在根目錄（`bear`／`compiledb`）、什麼建置系統都沒有、
 Python 與 C 混合。
 
-> **其他作業系統沒有實機驗過。** 下面這幾條是程式碼裡確實這樣寫的，
-> 但沒有 Windows／macOS 機器跑過，就當成「應該會這樣」而不是「實測如此」：
+> **Windows／macOS 的路寫好了，但沒有機器可以驗。** 下面這幾條是程式碼裡確實
+> 這樣寫的，等有機器再測 —— 現在請當成「應該會這樣」而不是「實測如此」：
 >
 > - 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
 > - **開了沙盒**的話 Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
@@ -422,8 +423,8 @@ Python 與 C 混合。
   | 平台 | 用什麼 | 要裝什麼 | 驗過沒 |
   |---|---|---|---|
   | Linux | bubblewrap | `sudo apt install bubblewrap` | ✅ 實測 |
-  | macOS | 內建的 `sandbox-exec` | 不用裝 | ⚠️ 沒驗過 |
-  | Windows | Docker Desktop | Docker Desktop | ⚠️ 沒驗過 |
+  | macOS | 內建的 `sandbox-exec` | 不用裝 | 🛠️ 寫好了沒驗 |
+  | Windows | Docker Desktop | Docker Desktop | 🛠️ 寫好了沒驗 |
 
   **只有 Linux 實測過**（容器後端也是在 Linux 上驗的）。開之前先在你那台跑一次
   `python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。

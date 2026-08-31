@@ -50,12 +50,10 @@ def test_repo_map_takes_files_and_rel_from_outside():
 
 
 def test_repo_map_leaves_out_build_artifacts():
-    """編譯產物不該佔專案地圖的位置。
+    """編譯產物不該佔專案地圖的位置 —— 那是每一輪都要重送的固定成本。
 
-    地圖是**每一輪都要重送**的固定成本，多一個 .o 就是每次呼叫都多一行。
-    而 DENY_DIRS 只擋得掉 build/ —— Makefile 專案的產出就落在原地。
-    沒有副檔名的執行檔（`make` 最常見的產出）只能靠 mode 認，
-    那個 stat 在 repo_map 裡本來就要做，所以這條等於不用錢。
+    DENY_DIRS 只擋得掉 build/，Makefile 專案的產出落在原地；沒有副檔名的
+    執行檔只能靠 mode 認，而那個 stat 在 repo_map 裡本來就要做。
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

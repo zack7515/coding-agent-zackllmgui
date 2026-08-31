@@ -597,10 +597,9 @@ def test_command_risk():
 
 
 def test_windows_delete_commands_are_gated_too():
-    """沙盒沒開的話 Windows 上的 run_shell 走的是 cmd —— 上面那些 POSIX 規則一條都打不到。
+    """沙盒沒開時 Windows 走 cmd，上面那些 POSIX 規則一條都打不到。
 
-    `rmdir /s /q` 跟 `rm -rf` 是同一件事，以前完全放行。尺度跟 rm 那條對齊：
-    遞迴不擋（救得回來的照樣要問），**遞迴又不問**才擋。
+    `rmdir /s /q` 跟 `rm -rf` 是同一件事，以前完全放行。尺度跟 rm 那條對齊。
     """
     for cmd in ["rmdir /s /q build", "rmdir /Q /S build", "rd /s /q x",
                 "del /s /q *.obj", "format c:", "diskpart"]:
@@ -1666,16 +1665,22 @@ def test_c_syntax_check_needs_real_compile_flags():
         assert serve.cc_flags(ws / "inc" / "util.h") is None
         assert serve.lint_after_write(ws / "inc" / "util.h") == ""
 
+        # 資料庫不一定在 build/：CLion 是 cmake-build-<設定>，
+        # Visual Studio 的開啟資料夾模式是 out/build/<設定>
+        (ws / "compile_commands.json").unlink()
+        for sub in ("cmake-build-release", "out/build/x64-Debug"):
+            d = ws / sub
+            d.mkdir(parents=True)
+            (d / "compile_commands.json").write_text(json.dumps(db), encoding="utf-8")
+            assert serve.cc_flags(src) is not None, sub
+            shutil.rmtree(ws / sub.split("/")[0])
+
 
 def test_cc_flags_survives_windows_paths_and_msvc():
-    """compile_commands.json 在 Windows 上長得不一樣，兩個地方會壞。
-
-    1. shlex 預設是 POSIX 引號規則，會把 `C:\\VS\\bin\\cl.exe` 的反斜線
-       當成跳脫字元吃掉 —— 變成 `C:VSbincl.exe`，連 MinGW 的 g++ 都找不到。
-    2. `-fsyntax-only` 是 GCC/Clang 的寫法，MSVC 不認得；而且這裡會把 `-c`
-       拿掉，cl.exe 就會真的去連結，在別人的建置目錄裡留下 .obj 與 .exe。
-
-    認不得的驅動程式一律回 None：猜錯旗標換來一整排誤報，比沒有檢查糟得多。
+    """compile_commands.json 在 Windows 上長得不一樣，兩個地方會壞：
+    shlex 的 POSIX 引號規則會把 `C:\\VS\\bin\\cl.exe` 的反斜線吃掉；
+    `-fsyntax-only` MSVC 不認得，而且 `-c` 被拿掉之後 cl.exe 會真的去連結。
+    認不得的驅動程式一律回 None —— 猜錯旗標換來一整排誤報。
     """
     def db(ws, cmdline, name):
         src = ws / name
@@ -1714,10 +1719,8 @@ def test_cc_flags_survives_windows_paths_and_msvc():
 def test_agent_rules_never_names_a_tool_it_did_not_send():
     """規則裡提到的工具必須真的送得出去，講的沙盒必須真的是會用到的那一個。
 
-    tool_defs() 的原則是「沒開放的功能一個字都不要提」，但寫入類的規則裡
-    寫死了一句「用 run_tests 驗證」—— C/C++ 專案收不到那支工具，卻收得到那句話。
-    沙盒那句更糟：不管後端是誰都說「在容器裡跑：只看得到工作區」，
-    而 bwrap 的檔案系統就是宿主機的。跟它說系統編譯器不存在，它會去自己弄一份。
+    以前寫死了「用 run_tests 驗證」，而 C/C++ 專案收不到那支工具；沙盒那句
+    不管後端是誰都說「在容器裡跑」，而 bwrap 的檔案系統就是宿主機的。
     """
     with Workspace() as ws:
         for f in ws.rglob("*.py"):

@@ -21,19 +21,20 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 ## 目前只確定 Linux 可以
 
 開發與實測都在 Linux 上（Ubuntu 24.04 / Python 3.13 / bubblewrap）。
-**其他作業系統一次都沒有在實機上跑過**，下面這張表就是全部的實話：
+其他平台的路**都寫好了，但還沒有機器可以驗**：
 
 | | 狀態 |
 |---|---|
 | **Linux** | ✅ 實測。工具、沙盒（bubblewrap）、C/C++ 那四條回饋線、`python -m sandbox` 全部跑過 |
-| macOS | ⚠️ **沒驗過。** 程式碼裡有 `seatbelt` 後端（系統內建的 `sandbox-exec`），照文件寫的，沒有機器可以跑 |
-| Windows | ⚠️ **沒驗過。** 沙盒只能走容器（Docker Desktop），MSVC 那條語法檢查也是照文件寫的 |
+| macOS | 🛠️ 寫好了沒驗。`seatbelt` 後端走系統內建的 `sandbox-exec` |
+| Windows | 🛠️ 寫好了沒驗。沙盒走容器（Docker Desktop），編譯器認 MSVC 與 MinGW |
 
 會踩到平台差異的是**本機工具**那一塊：沙盒挑哪個後端、`run_shell` 走哪個 shell、
 編譯器怎麼呼叫、危險指令怎麼寫。純聊天（不開工作區、不開工具）跑得動 Python 就行。
 
-先在你那台跑一次 `python -m sandbox` —— 它會實際執行一遍逐項驗證，
-不是讀設定檔猜的。全部通過再開沙盒。
+沒驗過的那兩條刻意寫成**失敗就退回沒有**，不會退回亂報：認不出來的編譯器直接
+跳過語法檢查，挑不出沙盒後端就告訴你這台該裝什麼。到那台機器上先跑一次
+`python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。
 
 ## 功能一覽
 
@@ -134,16 +135,18 @@ C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**�
 > 所以沒有 per-write 的語法檢查可做。用 `run_shell` 跑 `dotnet test` 一樣可以，
 > 但上面那四格全部是空的。
 
+`compile_commands.json` 會在這幾個地方找：專案根目錄、`build/`、
+`cmake-build-*/`（CLion）、`out/build/`（Visual Studio 的開啟資料夾模式）。
+沒有就跳過 —— CMake 加 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` 就會生一份。
+
 上面這一整套**是在 Linux 上驗的**：bubblewrap 沙盒裡 `cmake` configure → build →
 `ctest` 全過，`edit_file` 拿掉一個分號馬上回語法錯誤，`gcc`／`g++`／`nvcc` 與
 顯示卡在沙盒裡都看得到。
 
-> **其他作業系統沒有實機驗過。** 程式碼裡是這樣寫的，但沒跑過就是沒跑過：
-> Windows 的 `cl.exe` 走 `/Zs`、`compile_commands.json` 只有 Ninja 與 Makefile
-> 產生器會生（Visual Studio 產生器不會，那一格就會是空的）；
-> 沙盒在 Windows 上只能走容器，而預設映像檔 `python:3.13-slim` 裡沒有編譯器，
-> 要用 `--sandbox-image gcc:14` 換掉。認不出來的編譯器一律跳過不做檢查 ——
-> 所以最壞的情況是「少一條回饋」，不會變成一排誤報。
+> **Windows／macOS 寫好了但沒驗過。** 編譯器認 MSVC（`cl.exe` 走 `/Zs`）、
+> MinGW 與 Clang，交叉編譯器與版號（`arm-none-eabi-gcc`、`clang++-18`）也算；
+> 沙盒在 Windows 上走容器，預設映像檔沒有編譯器，用 `--sandbox-image gcc:14` 換掉。
+> **認不出來的編譯器一律跳過不做檢查**，所以最壞的情況是少一條回饋，不是一排誤報。
 
 ### 改完就自動檢查
 
