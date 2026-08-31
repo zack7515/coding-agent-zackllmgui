@@ -60,7 +60,29 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))          # tools/ 跟 serve.py 放在一起
 
 import sandbox
-from core import repomap, sysinfo
+from core import repomap, restore, sysinfo, workspace
+from core.agents import (AGENTS_DIR, SUB_DEPTH_MAX, agent_chain, agent_close,
+                         agent_guard, agent_open, agent_stop, agent_trace,
+                         agent_types, agent_view, agents_roots, as_agent,
+                         bind_agent, git_at, worktree_orphans)
+from core.jobs import (BG_MAX, BG_TIMEOUT, BG_WAIT, BG_WAIT_MAX, JOBS, JOBS_LOCK,
+                       _job_tail, _start_job, jobs_state, kill_tree, tail_of)
+from core import skills as _skills
+from core.skills import (SKILL_CMD, SKILL_CMD_MAX, SKILL_DESC_MAX,
+                         SKILL_LIST_MAX, SKILLS_DIR, parse_skill, skill_body,
+                         skill_commands, skill_find, skill_trusted,
+                         skills_list, skills_roots)
+from core.mcp import (MCP, MCP_CONFIG, mcp_call, mcp_config_path, mcp_load,
+                      mcp_start, mcp_status, mcp_stop, mcp_tool_defs, mcps)
+from core.rules import (RULES_FILE, rule_match, rules_files, rules_load,
+                        rules_path, rules_save)
+from core.restore import (backup_file, checkpoint, journal_add, journal_for,
+                          journal_path, journal_read, restore_backup,
+                          rewind_to, ws_is_git)
+from core.workspace import (BACKUP_DIR, DENY_DIRS, DENY_FILES, MAX_FILE_BYTES,
+                            SESSIONS, SESSIONS_LOCK, SESSIONS_MAX, Session,
+                            WORKTREE_DIR, WORKTREE_LINK, WORKTREE_MAX, WORKTREE_SKIP,
+                            _CUR, cur, session_for, ws_path, ws_rel, ws_root, ws_walk)
 from core.cmdrisk import RISKY_CMDS, canon, command_risk
 from core.extract import extract_text
 from tools import browser
@@ -82,78 +104,12 @@ TOOL_OUTPUT_LIMIT = 8000           # 工具結果塞回模型前先截斷，別�
 SHELL_TIMEOUT = 30
 ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁上也隨時能切
 
-# ── 工作區（改檔案／跑測試用，見 plan-agent.md） ──────────────────── #
-BACKUP_DIR = ".zackllmgui-backup"
-WORKTREE_DIR = ".zackllmgui-worktrees"   # 隔離型子代理各自的 git worktree
-WORKTREE_MAX = 8                   # 同時最多幾份，忘了收的不會無限長
-WORKTREE_LINK = ("node_modules",)  # 開 worktree 時從主 repo 連過去的資料夾
-# ponytail: 一個名字就夠了。第二個出現時這裡是加一個字串，不是開一份設定檔 ——
-# 條件很嚴：純相依、名字全世界一樣、重建很貴。vendor/target 都還沒真的遇到。
-# .venv 刻意不連：那一份是 detect_python() 用讀的借過去的，連過去的話子代理的
-# setup_env 會裝進主專案。
-WORKTREE_SKIP = (BACKUP_DIR, WORKTREE_DIR) + WORKTREE_LINK
-# 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
-DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-             "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", "dist",
-             "build", ".next", ".idea", ".vscode", BACKUP_DIR, WORKTREE_DIR}
-# 這些檔案不讓模型讀，免得金鑰跟著進 context
-# 這裡也擋 .zackllmgui-*.json：那幾個檔案決定「什麼可以自動放行」，
-# 讓模型讀得到等於讓它知道怎麼繞，寫得到就等於自己給自己開權限。
-DENY_FILES = re.compile(r"^(\.env(\..*)?|.*\.env|.*\.pem|.*\.key|.*\.pfx|id_rsa.*|"
-                        r".*\.p12|.*credentials.*\.json|\.npmrc|\.netrc|"
-                        r"\.zackllmgui-.*\.json)$", re.I)
-MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看的
 AT_FILE_CAP = 3000                 # 輸入框打 @ 時最多列幾個檔案
 # 專案自己的說明檔。不同的 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），
 # 這裡三種都收，找到第一個就用。
 AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GROK.md", ".cursorrules")
 PROJECT_MD_LIMIT = 6000
 
-
-class Session:
-    """一個瀏覽器分頁的狀態（工作區、寫入權、自動模式、待辦、計畫）。
-
-    這五樣不能是全域的：兩個分頁各開一個專案時，A 的 write_file 會靜靜寫進
-    B 的資料夾。分頁每個請求都帶 X-Tab，照它找回自己那一份。
-    工具開關、沙盒、連網、MCP、背景指令仍是行程一份 —— 那是對這台服務授的權。
-    """
-    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "agents", "seen")
-
-    def __init__(self, base=None):
-        self.ws = base.ws if base else None            # Path；沒設定就沒有任何檔案工具
-        self.write = base.write if base else False     # 寫入類工具要再多一道開關
-        self.auto = "off"                              # 只影響系統提示怎麼寫，不決定放不放行
-        self.todos = []                                # [{"text": ..., "done": bool}]
-        self.todo_mtime = 0.0                          # 上次自己寫進去的時間戳，用來分辨「誰改的」
-        self.plan = {"text": "", "approved": False, "on": False}
-        self.agents = {}                               # 子代理 id -> {"ws", "branch"}
-        self.seen = time.time()
-
-
-SESSIONS = {"": Session()}         # "" 是預設分頁：命令列 --workspace 設的就是它
-SESSIONS_MAX = 32                  # 分頁關掉不會通知伺服器，滿了就丟最久沒動的
-SESSIONS_LOCK = threading.Lock()
-_CUR = threading.local()
-
-
-def cur() -> "Session":
-    """這個請求屬於哪個分頁。沒帶 X-Tab（測試、curl）就是預設那一份。"""
-    return getattr(_CUR, "s", None) or SESSIONS[""]
-
-
-def session_for(tab: str) -> "Session":
-    tab = str(tab or "")[:64]
-    if not tab:
-        return SESSIONS[""]
-    with SESSIONS_LOCK:
-        s = SESSIONS.get(tab)
-        if s is None:
-            # 新分頁承接命令列給的工作區，否則 --workspace 開起來的分頁會是空的
-            s = SESSIONS[tab] = Session(SESSIONS[""])
-            if len(SESSIONS) > SESSIONS_MAX:
-                del SESSIONS[min(((v.seen, k) for k, v in SESSIONS.items() if k))[1]]
-        s.seen = time.time()
-        return s
 
 # 計畫模式住在 Session.plan["on"]：工作區、修改權限、自動模式、待辦、MCP 都跟著
 # 分頁走，這一個沒跟的話，A 分頁打開計畫模式會把 B 分頁的寫入工具一起收走。
@@ -182,50 +138,8 @@ RING_LINES = 2000                  # 串流時最多留這麼多行回灌給模�
 MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_LINE_CHARS = 4000              # 單行上限。minified JS 或 base64 一行就好幾 MB
 
-# ── 背景指令 ──────────────────────────────────────────────────── #
-# run_shell 只有 30 秒，npm install、cargo build 都跑不完，而且同步的時候
-# 整個 agent 迴圈卡在那裡。背景版交給一條讀取執行緒，立刻回一個 id。
-# 這推翻了 tech.md〈長指令為什麼沒做 job API〉—— 那個結論的前提是
-# 「人一定在旁邊看著」，自動模式讓前提不成立了。
-BG_TIMEOUT = 3600                  # 背景指令的上限，一小時
-BG_MAX = 8                         # 同時最多這麼多條，忘了收的不會無限累積
-# check_job 預設等一下再回話。實測過不等的版本：模型每兩秒問一次，
-# 45 秒的指令燒掉七輪還沒收到結果 —— 提示詞寫「不要空轉」完全沒有用。
-# 等待期間 CPU 是閒的，換來的是一輪抵十輪。
-BG_WAIT = 20
-BG_WAIT_MAX = 300
-JOBS = {}                          # id -> {proc, lines, code, ...}
-JOBS_LOCK = threading.Lock()
-JOB_SEQ = 0
-
-# focus chain（跟 Cline 學的）：待辦清單同時是工作區裡的一份 markdown。
-# 模型跑的時候你直接編輯它，下一輪就會同步進去 —— 不用插話也能改方向。
 TODO_FILE = ".zackllmgui-todos.md"
 
-# ── MCP（Model Context Protocol）客戶端 ──────────────────────────── #
-MCP_CONFIG = ".zackllmgui-mcp.json"
-RULES_FILE = ".zackllmgui-rules.json"   # 允許規則：兩份都讀，專案的優先
-MCP_TOOL_CAP = 12                  # 一台 server 最多收這麼多支工具，否則每輪光工具定義就燒掉幾千 token
-MCP = {}                           # 工作區 -> {server 名 -> {"proc", "tools", "lock", "id", "error"}}
-# 為什麼多包一層：工作區、修改權限、自動模式、待辦、計畫都跟著分頁走了，MCP 不跟的話
-# 兩個分頁開兩個專案時，拿到的是「先啟動的那個專案」的 server（連 cwd 都是它的），
-# 另一個分頁的工具會安靜地指向錯的目錄。
-
-# ── 操作紀錄與 rewind ───────────────────────────────────────────── #
-# 每一次改檔案都記一行。備份本來就有了，缺的是「先後順序」——
-# 沒有順序就只能一個檔一個檔還原，沒辦法「退回十分鐘前」。
-JOURNAL = "journal.jsonl"          # 放在 BACKUP_DIR 底下
-# 現在是哪一則對話在呼叫工具。網頁每次呼叫都會帶上來，記進 journal，
-# 「紀錄」分頁才能只顯示這一則對話改過的東西。
-# ponytail: 一個全域變數，靠請求順序決定。一次只跑一個工具（每一次都要人確認）
-#           所以夠用；真的要平行跑工具的話得改成傳參數穿到 journal_add。
-CURRENT_CHAT = ""
-SKILLS_DIR = "skills"    # serve.py 旁邊；工作區有自己的就用工作區的
-SKILL_LIST_MAX = 30      # 系統提示裡最多列幾個 skill
-SKILL_DESC_MAX = 120     # 每一則描述最多幾個字
-AGENTS_DIR = "agents"              # 子代理型別，一種一個 .md，規則同上
-AGENT_BODY_LIMIT = 4000
-SKILL_BODY_LIMIT = 8000
 
 
 def ollama_is_local() -> bool:
@@ -286,52 +200,6 @@ def restart_self() -> None:
     """用現在的參數把自己換掉。Python 3.4+ 的 socket 預設 close-on-exec，
     所以聽著的那個 port 會在 exec 的瞬間放掉，新的行程綁得回來。"""
     os.execv(sys.executable, [sys.executable] + sys.argv)
-
-
-def ws_root() -> Path:
-    if cur().ws is None:
-        raise RuntimeError("還沒設定工作區資料夾（介面：設定 → 工作區）")
-    return cur().ws
-
-
-def ws_path(rel: str, must_exist: bool = False) -> Path:
-    """把相對路徑轉成工作區內的絕對路徑，並確認它真的還在工作區裡。
-
-    resolve() 會把 symlink 一起解開，所以指向外面的連結也會在這裡被擋下來。
-    這是整個檔案工具的安全邊界，不要為了方便繞過它。
-    """
-    root = ws_root().resolve()
-    raw = str(rel if rel is not None else ".").strip()
-    if raw.startswith("~"):
-        raise PermissionError("路徑只能相對於工作區")
-    target = (root / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
-    if target != root and root not in target.parents:
-        raise PermissionError(f"路徑超出工作區：{raw}")
-    parts = target.relative_to(root).parts if target != root else ()
-    for part in parts:
-        if part in DENY_DIRS:
-            raise PermissionError(f"{part} 是不開放的資料夾")
-    if parts and DENY_FILES.match(parts[-1]):
-        raise PermissionError(f"{parts[-1]} 屬於機密檔案，不開放讀寫")
-    if must_exist and not target.exists():
-        raise FileNotFoundError(f"找不到 {raw}")
-    return target
-
-
-def ws_rel(p: Path) -> str:
-    root = ws_root().resolve()
-    return "." if p == root else str(p.relative_to(root))
-
-
-def ws_walk():
-    """走訪工作區，跳過封鎖目錄。"""
-    root = ws_root().resolve()
-    for base, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in DENY_DIRS and not d.startswith("."))
-        for name in sorted(files):
-            if DENY_FILES.match(name):
-                continue
-            yield Path(base) / name
 
 
 def detect_python() -> list:
@@ -552,267 +420,6 @@ def set_workspace(path: str) -> dict:
         raise PermissionError("請指定專案資料夾，不要用家目錄或根目錄")
     cur().ws = p
     return workspace_info()
-
-
-def backup_file(p: Path) -> str:
-    """改檔案之前先留一份，介面上才有「還原」可以按。
-
-    時間戳只到秒，同一秒內改同一個檔案兩次就會蓋掉前一份備份 ——
-    模型連續改同一個檔案時這是常態，不是邊角情況。撞到就在後面加序號，
-    第一份（也就是最原始的那一份）永遠留得住。
-    """
-    root = ws_root().resolve()
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    rel = p.relative_to(root)
-    for n in range(1, 1000):
-        dst = root / BACKUP_DIR / stamp / rel
-        if not dst.exists():
-            break
-        dst = root / BACKUP_DIR / f"{stamp}-{n}" / rel
-        if not dst.exists():
-            break
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(p, dst)
-    return str(dst.relative_to(root))
-
-
-def journal_path() -> Path:
-    return ws_root().resolve() / BACKUP_DIR / JOURNAL
-
-
-def journal_add(tool: str, rel: str, backup: str, created: bool, **extra) -> str:
-    """記一筆改檔案的操作。回傳這一筆的 id。
-
-    寫失敗不能讓工具跟著失敗 —— 紀錄是為了方便，不是為了正確性。
-    """
-    entry = {
-        "id": f"{time.time():.6f}",
-        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "tool": tool, "path": rel, "backup": backup, "created": created,
-        "chat": CURRENT_CHAT, **extra,
-    }
-    try:
-        f = journal_path()
-        f.parent.mkdir(parents=True, exist_ok=True)
-        with f.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    return entry["id"]
-
-
-def journal_read() -> list:
-    f = journal_path()
-    if not f.is_file():
-        return []
-    out = []
-    for line in f.read_text("utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
-
-
-def journal_for(chat: str) -> list:
-    """這則對話的還原點。有檢查點就一輪一列，沒有就退回「一次改檔案一列」。
-
-    undo_count／other_chats 是給確認框用的：還原一定是照時間倒著做，退回某一點
-    會連別則對話後來改的一起退掉，那要講出來。
-    """
-    entries = journal_read()
-    rows = [e for e in entries if e.get("tree")] or entries
-    out = []
-    for i, e in enumerate(rows):
-        if chat and e.get("chat") and e["chat"] != chat:
-            continue
-        extra = {}
-        if e.get("tree"):
-            # 下一個檢查點是**全部裡面**的下一個，不是這則對話的下一個：
-            # 兩個檢查點之間改的就是那一輪改的，跟誰問的無關
-            nxt = rows[i + 1]["tree"] if i + 1 < len(rows) else ""
-            try:
-                extra["files"] = ckpt_files(e["tree"], nxt)
-            except Exception:
-                extra["files"] = []
-        rest = rows[i:]
-        out.append(dict(e, **extra, undo_count=len(rest),
-                        other_chats=sum(1 for x in rest
-                                        if x.get("chat") and x.get("chat") != e.get("chat"))))
-    return out
-
-
-# ── 每則提示一個檢查點 ──────────────────────────────────────────── #
-# 上面那套只有三支檔案工具會記，run_shell 改的一個字都沒進去。這裡一輪照一張相。
-# 做法是 git 的 shadow commit：臨時 index 寫成 tree、commit-tree 成孤兒 commit、
-# 用 ref 釘住。HEAD、分支、使用者的暫存區都沒動 —— 用 stash 或 checkout 會蓋掉。
-# ponytail: 不是 git repo 就不照相，.gitignore 忽略的也不在快照裡。
-CKPT_REF = "refs/zackllmgui/ckpt"
-CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR)
-
-
-def ws_is_git() -> bool:
-    return cur().ws is not None and (cur().ws / ".git").exists()
-
-
-@contextlib.contextmanager
-def tmp_index():
-    """在一份用完就丟的 index 上跑 git，使用者的 .git/index 不會被碰到。"""
-    with tempfile.TemporaryDirectory() as tmp:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
-
-        def run(*a, timeout: int = 120) -> str:
-            proc = subprocess.run(["git"] + list(a), cwd=str(ws_root()), env=env,
-                                  capture_output=True, text=True, timeout=timeout)
-            if proc.returncode != 0:
-                raise RuntimeError((proc.stderr or proc.stdout).strip()[:400] or "git 失敗")
-            return proc.stdout.strip()
-
-        yield run
-
-
-def ckpt_msg(note: str, files: list) -> str:
-    """檢查點的 commit 訊息。`git log refs/zackllmgui/ckpt/*` 要讀得懂。"""
-    note = " ".join(str(note or "").split())
-    head = f"檢查點：{note[:60]}" if note else "檢查點"
-    body = [head, ""]
-    if note:
-        body += ["提示：" + note[:800], ""]
-    if files:
-        body += [f"上一輪改了 {len(files)} 個檔案："]
-        body += [f"  {f['st']} {f['path']}" for f in files[:40]]
-        if len(files) > 40:
-            body.append(f"  …還有 {len(files) - 40} 個")
-        body.append("")
-    body += [f"對話：{CURRENT_CHAT or '（未指定）'}", f"工作區：{ws_root()}"]
-    return "\n".join(body)
-
-
-def ckpt_files(tree: str, nxt: str = "") -> list:
-    """這個檢查點之後改了哪些檔案。nxt 留空就比到現在的工作區。"""
-    with tmp_index() as git:
-        if not nxt:
-            git("add", "-A", *CKPT_SKIP)
-            nxt = git("write-tree")
-        rows = git("diff", "--name-status", tree, nxt).splitlines()
-    return [{"st": r.split("\t")[0][:1], "path": r.split("\t")[-1]}
-            for r in rows if "\t" in r]
-
-
-def checkpoint(note: str = "") -> dict:
-    """照一張相。回傳 {"id":…} 或 {"skipped": 原因}。
-
-    拍不到不能擋住使用者送出訊息，所以每條出路都是「跳過並說原因」，不丟例外。
-    """
-    if cur().ws is None:
-        return {"skipped": "還沒設定工作區"}
-    if not ws_is_git():
-        return {"skipped": "工作區不是 git repo，這則提示沒有檢查點"}
-    try:
-        with tmp_index() as git:
-            git("add", "-A", *CKPT_SKIP)
-            tree = git("write-tree")
-            prev = next((e for e in reversed(journal_read()) if e.get("tree")), None)
-            if prev and prev["tree"] == tree:
-                return {"skipped": "跟上一個檢查點一模一樣", "tree": tree}
-            # 訊息裡帶上一輪改了什麼：這一相拍的就是那一輪的結果
-            done = ckpt_files(prev["tree"], tree) if prev else []
-            sha = git("commit-tree", tree, "-m", ckpt_msg(note, done))
-            git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)   # 沒 ref 釘著會被 gc 掃掉
-    except Exception as e:
-        return {"skipped": f"{type(e).__name__}: {e}"}
-    return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
-                              "", False, tree=tree, commit=sha),
-            "commit": sha, "tree": tree}
-
-
-def restore_tree(tree: str) -> list:
-    """把工作區變回這棵 tree 的樣子，多出來的檔案一起刪掉。回傳變動的檔名。"""
-    with tmp_index() as git:
-        git("add", "-A", *CKPT_SKIP)
-        now = git("write-tree")
-        names = [ln.split("\t", 1)[-1]
-                 for ln in git("diff", "--name-status", now, tree).splitlines() if ln.strip()]
-        # 兩棵樹的 read-tree -m -u 會連多出來的檔案一起刪掉，
-        # 那是 `git checkout <tree> -- .` 做不到的那一半
-        git("read-tree", "-m", "-u", now, tree)
-    # ponytail: 只動工作區不動 index，所以這輪 git add 過的新檔會變成
-    #           「暫存區有、磁碟沒有」。要收拾得改寫人家的暫存區，那更糟。
-    return names
-
-
-def rewind_to(entry_id: str) -> dict:
-    """把工作區退回「某一筆操作發生之前」的樣子。
-
-    做法是把那一筆之後（含那一筆）的操作**反著做回去**：
-    有備份就複製回來，是新建的檔案就刪掉。順序不能反 ——
-    同一個檔案被改過三次時，只有從最新往回走才會停在正確的版本。
-    """
-    entries = journal_read()
-    idx = next((i for i, e in enumerate(entries) if e.get("id") == entry_id), -1)
-    if idx < 0:
-        raise ValueError("找不到這個還原點")
-
-    undone, failed = [], []
-    if entries[idx].get("tree"):
-        # 檢查點：整棵樹換回去。只有這一條退得掉 run_shell 改的東西
-        try:
-            names = restore_tree(entries[idx]["tree"])
-            undone = [f"還原到檢查點（{len(names)} 個檔案）"] + names[:50]
-        except Exception as ex:
-            failed.append(f"檢查點還原失敗：{type(ex).__name__}: {ex}")
-        keep = entries[:idx]
-        try:
-            journal_path().write_text(
-                "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in keep),
-                encoding="utf-8")
-        except OSError:
-            pass
-        return {"undone": undone, "failed": failed, "entries": keep}
-
-    for e in reversed(entries[idx:]):
-        rel = e.get("path", "")
-        try:
-            target = ws_path(rel)
-            if e.get("created"):
-                if target.exists():
-                    target.unlink()
-                undone.append(f"刪除 {rel}（原本不存在）")
-            elif e.get("backup"):
-                restore_backup(e["backup"])
-                undone.append(f"還原 {rel}")
-            else:
-                failed.append(f"{rel}：沒有備份可以還原")
-        except Exception as ex:
-            failed.append(f"{rel}：{type(ex).__name__}: {ex}")
-
-    # 還原本身也是一次操作，記下來（但不記成可以再被 rewind 的項目）
-    keep = entries[:idx]
-    try:
-        f = journal_path()
-        f.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in keep),
-                     encoding="utf-8")
-    except OSError:
-        pass
-    return {"undone": undone, "failed": failed, "entries": keep}
-
-
-def restore_backup(rel: str) -> str:
-    root = ws_root().resolve()
-    src = (root / rel).resolve()
-    if root / BACKUP_DIR not in src.parents and (root / BACKUP_DIR) != src.parent:
-        raise PermissionError("只能還原備份資料夾裡的檔案")
-    if not src.exists():
-        raise FileNotFoundError(f"找不到備份 {rel}")
-    # .zackllmgui-backup/<時間戳>/<原本的相對路徑>
-    parts = Path(rel).parts
-    dest = ws_path(str(Path(*parts[2:])))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    return ws_rel(dest)
 
 
 def unified(old: str, new: str, name: str, labels=("現在", "改後")) -> str:
@@ -1167,89 +774,6 @@ def _tool_run_shell(command: str, background: bool = False) -> str:
     return f"[exit {proc.returncode}]\n{out}"
 
 
-def kill_tree(proc) -> None:
-    """殺掉整棵程序樹，不是只殺最上面那一個。
-
-    `shell=True` 跑的是 `sh -c`，指令一複雜 sh 會 fork，真正在跑的是它的孫子。
-    `proc.kill()` 只殺得到 sh，孫子繼續握著 stdout，讀取執行緒永遠等不到 EOF。
-    Popen 開 start_new_session 自成一個 process group，這裡整組送 SIGKILL。
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), 9)
-    except Exception:
-        try:
-            proc.kill()          # Windows 沒有 process group，退回去殺單一程序
-        except Exception:
-            pass
-
-
-def _job_reader(job, proc, watchdog) -> None:
-    """把程序的輸出一路讀進 ring buffer。跑完就記下 exit code。
-
-    整支都在 try 裡：這條執行緒死掉的話 job 會永遠停在「還在跑」，
-    模型就會一直去 check_job 直到輪數用完。
-    """
-    try:
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if len(line) > MAX_LINE_CHARS:
-                line = line[:MAX_LINE_CHARS] + "…（這一行被截斷）"
-            with JOBS_LOCK:                # 讀取端會 join 這個 deque，不能邊改邊讀
-                job["lines"].append(line)
-    except Exception as e:
-        with JOBS_LOCK:
-            job["lines"].append(f"（讀取輸出時出錯：{type(e).__name__}: {e}）")
-    finally:
-        watchdog.cancel()
-        try:
-            job["code"] = proc.wait()
-        except Exception:
-            job["code"] = -1
-        job["ended"] = time.time()
-        try:
-            proc.stdout.close()
-        except Exception:
-            pass
-
-
-def _start_job(command: str, cmd, cwd, use_shell: bool, head: str) -> str:
-    global JOB_SEQ
-    with JOBS_LOCK:
-        alive = [j for j in JOBS.values() if j["code"] is None]
-        if len(alive) >= BG_MAX:
-            raise RuntimeError(
-                f"背景指令已經有 {len(alive)} 條在跑（上限 {BG_MAX}）。"
-                f"先用 check_job 把跑完的收掉，或用 check_job(kill=true) 終止不要的。")
-        JOB_SEQ += 1
-        jid = f"job{JOB_SEQ}"
-        rec = getattr(_CUR, "agent", None)
-        job = {"id": jid, "cmd": " ".join(str(command).split())[:200], "code": None,
-               "lines": collections.deque(maxlen=RING_LINES),
-               "started": time.time(), "ended": 0.0, "proc": None,
-               # 誰丟的。中斷一個子代理時要連它的背景指令一起殺，
-               # 不然「已中斷」只中斷了一半 —— 指令還在這台機器上跑。
-               "agent": (rec or {}).get("id", ""), "chat": CURRENT_CHAT}
-        JOBS[jid] = job
-    proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, bufsize=1, text=True,
-                            encoding="utf-8", errors="replace",
-                            start_new_session=True)
-    job["proc"] = proc
-    watchdog = threading.Timer(BG_TIMEOUT, kill_tree, args=(proc,))
-    watchdog.daemon = True             # 不然 serve.py 要等一小時才關得掉
-    watchdog.start()
-    t = threading.Thread(target=_job_reader, args=(job, proc, watchdog), daemon=True)
-    t.start()
-    return (f"{head}\n已經丟到背景跑，id = {jid}（上限 {BG_TIMEOUT // 60} 分鐘）。\n"
-            f"**現在先去做別的事**，不要空轉等它。之後用 check_job(\"{jid}\") 收結果 ——"
-            f"還沒跑完的話它會告訴你已經跑了多久。")
-
-
-def _job_tail(job) -> str:
-    with JOBS_LOCK:
-        return tail_of("\n".join(job["lines"]))
-
-
 def _tool_check_job(id: str = "", kill: bool = False, wait: int = BG_WAIT) -> str:
     """收背景指令的結果。id 留空就列出全部。
 
@@ -1298,26 +822,6 @@ def _tool_check_job(id: str = "", kill: bool = False, wait: int = BG_WAIT) -> st
     return (f"{job['id']} 跑完了（exit {job['code']}，花了 {secs} 秒）：\n{_job_tail(job)}")
 
 
-def jobs_state() -> list:
-    """給網頁看的背景指令狀態。關掉分頁再打開，這些還在。"""
-    with JOBS_LOCK:
-        every = list(JOBS.values())
-    return [{"id": j["id"], "cmd": j["cmd"], "code": j["code"],
-             "secs": int((j["ended"] or time.time()) - j["started"]),
-             "agent": j.get("agent", ""), "chat": j.get("chat", "")}
-            for j in every]
-
-
-SKILL_CMD = re.compile(r"!`([^`\n]{1,200})`")
-SKILL_CMD_MAX = 5          # 一份 skill 最多跑幾行
-SKILL_CMD_OUT = 1500       # 每一行的輸出最多留幾個字
-
-
-def skill_commands(body: str) -> list:
-    """skill 正文裡寫成 !`指令` 的那幾行。"""
-    return SKILL_CMD.findall(body)[:SKILL_CMD_MAX]
-
-
 def auto_cmd_block(cmd: str) -> str:
     """這一行為什麼不能在沒有確認卡的情況下跑。空字串＝可以跑。
 
@@ -1336,55 +840,6 @@ def auto_cmd_block(cmd: str) -> str:
     return why if level != "ok" else ""
 
 
-def skill_live(body: str, run: bool = True) -> str:
-    """把 !`指令` 換成它現在的輸出。
-
-    SKILL.md 是靜態文字，但流程需要現場狀態（`git status`、有沒有 `.venv`）。
-    這是一個新的執行入口，所以每一道關卡都走既有的：`auto_cmd_block()` 判能不能跑、
-    `build_command()` 做風險檢查與沙盒包裝。run=False 見 `_tool_load_skill`。
-    """
-    if not run:
-        return SKILL_CMD.sub(
-            lambda m: f"`{m.group(1)}`（模型改得到這份 skill，不代跑指令）", body)
-    cmds = skill_commands(body)
-    if not cmds or cur().ws is None:
-        return SKILL_CMD.sub(lambda m: f"`{m.group(1)}`（沒有工作區，沒有執行）", body)
-    done = {}
-    for cmd in cmds:
-        if cmd in done:
-            continue
-        no = auto_cmd_block(cmd)
-        if no:
-            done[cmd] = ("", no)
-            continue
-        try:
-            argv, cwd, use_shell, _ = build_command("run_shell", {"command": cmd})
-            # 用 Popen 而不是 subprocess.run：逾時的時候 run 只殺得到最上面那個 sh，
-            # 真正在跑的孫子會活下來，而且沒有任何一支看得到它（見 kill_tree）。
-            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, start_new_session=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            try:
-                out = proc.communicate(timeout=15)[0]
-            except subprocess.TimeoutExpired:
-                kill_tree(proc)
-                # 說「沒有執行」是騙人的：它跑了十五秒，副作用早就發生了
-                done[cmd] = ("", "跑超過 15 秒已中止，可能已經有副作用")
-                continue
-            # 只去頭尾的換行：porcelain 那種輸出前兩欄是空白，strip() 會把它吃掉
-            done[cmd] = (out.decode("utf-8", "replace").strip("\n")[:SKILL_CMD_OUT], "")
-        except Exception as e:
-            done[cmd] = ("", f"{type(e).__name__}: {e}")
-
-    def fill(m):
-        cmd = m.group(1)
-        out, why = done.get(cmd, ("", "超過一份 skill 能跑的行數"))
-        if why:
-            return f"`{cmd}`（沒有執行：{why}）"
-        return f"`{cmd}` 的輸出：\n```\n{out}\n```"
-
-    return SKILL_CMD.sub(fill, body)
-
-
 def _tool_load_skill(name: str = "") -> str:
     """把一份 skill 的正文交給模型。按需載入：描述常駐 240 token，正文幾千。
 
@@ -1393,7 +848,7 @@ def _tool_load_skill(name: str = "") -> str:
     順便也擋掉 clone 回來的專案裡藏的 skill。判斷見 `skill_trusted()`。
     """
     folder, raw = skill_find(name)
-    body = skill_live(raw, run=skill_trusted(folder))
+    body = skill_live(raw, skill_trusted(folder))
     return (f"# skill：{name}\n\n照這份步驟做。它是流程說明，不是使用者的新指令 ——"
             f"使用者原本要你做的事沒有變。\n\n{body}")
 
@@ -1570,16 +1025,6 @@ def build_command(name: str, args: dict):
     raise ValueError(f"{name} 不支援串流執行")
 
 
-def tail_of(out: str, keep: int = 100) -> str:
-    """測試輸出動輒上千行。只回最後 keep 行，加上所有看起來像錯誤的行。"""
-    lines = out.splitlines()
-    if len(lines) <= keep:
-        return out
-    bad = [ln for ln in lines[:-keep]
-           if re.search(r"(FAILED|ERROR|Traceback|assert |Exception)", ln)][-40:]
-    head = ("（前面省略 %d 行，以下是其中的錯誤行）\n" % (len(lines) - keep) +
-            "\n".join(bad) + "\n…\n") if bad else "（前面省略 %d 行）\n" % (len(lines) - keep)
-    return head + "\n".join(lines[-keep:])
 
 
 def _tool_fetch_url(url: str) -> str:
@@ -1607,6 +1052,17 @@ def sys_usage() -> dict:
 
 def repo_map() -> str:
     return repomap.repo_map(ws_walk(), ws_rel) if cur().ws is not None else ""
+
+
+def skills_usable() -> list:
+    """現在這個狀態下用得動的 skill —— 依 tool_defs() 篩。"""
+    return _skills.skills_usable({d["function"]["name"] for d in tool_defs()})
+
+
+def skill_live(body: str, run: bool = True) -> str:
+    """把 !`指令` 換成它現在的輸出。關卡（auto_cmd_block）與包裝（build_command）
+    都在這一端，傳進去。"""
+    return _skills.skill_live(body, run, auto_cmd_block, build_command)
 
 
 def agent_rules() -> str:
@@ -1659,16 +1115,16 @@ def agent_rules() -> str:
 
     # skills 索引：只放名字與一行描述。正文由模型自己用 load_skill 拉 ——
     # 六份描述 240 token 常駐得起，六份正文是幾千 token 而且九成用不到。
-    skills = skills_usable() if ALLOW_TOOLS else []
-    if skills:
+    usable = skills_usable() if ALLOW_TOOLS else []
+    if usable:
         # 這段每一輪都要重送，所以是固定成本：一份 skill 多幾行，是每一次呼叫都多幾行。
         # 有些 agent 為此開了兩個設定（清單佔 context 的比例、每則描述的字數上限）；
         # 這裡直接寫死，因為本機模型的 context 小得多，可調的空間本來就不大。
         r.append("\n## 現成的做法（要用就先 load_skill 把步驟載進來）")
-        r += [f"- {s['name']}：{s['description'][:SKILL_DESC_MAX]}"
-              for s in skills[:SKILL_LIST_MAX]]
-        if len(skills) > SKILL_LIST_MAX:
-            r.append(f"- （還有 {len(skills) - SKILL_LIST_MAX} 個沒列出來，"
+        r += [f"- {x['name']}：{x['description'][:SKILL_DESC_MAX]}"
+              for x in usable[:SKILL_LIST_MAX]]
+        if len(usable) > SKILL_LIST_MAX:
+            r.append(f"- （還有 {len(usable) - SKILL_LIST_MAX} 個沒列出來，"
                      "用 load_skill 指名還是叫得到）")
 
     name, text = project_md()
@@ -1794,154 +1250,6 @@ WS_TOOLS = {"read_file", "list_dir", "search_files", "run_shell", "run_tests",
             "setup_env", "check_job"} | WRITE_TOOLS
 
 
-# ══════════════════════ MCP 客戶端 ══════════════════════ #
-# grok-build 有一整個 xai-grok-mcp crate（stdio + HTTP、OAuth、elicitation、liveness）。
-# 這裡只做最小可用的那一塊：stdio 上的 JSON-RPC，把對方的 tools/list 併進 tool_defs()。
-# 守住三點：一樣要過確認卡、一樣只接受本機請求、工具數量要有上限。
-
-def mcp_config_path() -> Path:
-    """設定檔位置：工作區優先，其次是 serve.py 旁邊。"""
-    if cur().ws is not None and (cur().ws / MCP_CONFIG).is_file():
-        return cur().ws / MCP_CONFIG
-    return HERE / MCP_CONFIG
-
-
-def mcp_key() -> str:
-    rec = getattr(_CUR, "agent", None)
-    return str((rec or {}).get("root") or cur().ws or HERE)
-
-
-def mcps() -> dict:
-    """這個分頁（或這個子代理）的 MCP 連線。
-
-    子代理走 root：worktree 是同一個專案的另一份 checkout，為它再開一整套 server
-    是白花行程。沒有 worktree 的子代理 root 是 None，自然落回上層的工作區。
-    """
-    return MCP.setdefault(mcp_key(), {})
-
-
-def _mcp_rpc(server: str, method: str, params: dict, timeout: float = 30):
-    """送一次 JSON-RPC 並等對應 id 的回覆。通知（沒有 id）直接跳過。"""
-    st = mcps()[server]
-    proc = st["proc"]
-    with st["lock"]:
-        st["id"] += 1
-        msg_id = st["id"]
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": msg_id,
-                                     "method": method, "params": params}) + "\n")
-        proc.stdin.flush()
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                raise RuntimeError(f"MCP server {server} 已結束")
-            try:
-                obj = json.loads(line)
-            except ValueError:
-                continue                      # 有些 server 會在 stdout 印雜訊
-            if obj.get("id") != msg_id:
-                continue                      # 通知或別人的回覆
-            if "error" in obj:
-                raise RuntimeError(str(obj["error"].get("message") or obj["error"]))
-            return obj.get("result") or {}
-    raise TimeoutError(f"MCP server {server} 超過 {timeout} 秒沒有回應")
-
-
-def _mcp_notify(server: str, method: str, params: dict) -> None:
-    st = mcps()[server]
-    with st["lock"]:
-        st["proc"].stdin.write(json.dumps({"jsonrpc": "2.0", "method": method,
-                                           "params": params}) + "\n")
-        st["proc"].stdin.flush()
-
-
-def mcp_start(name: str, spec: dict) -> None:
-    proc = subprocess.Popen(
-        [spec["command"]] + list(spec.get("args") or []),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        cwd=str(cur().ws) if cur().ws else None,
-        env={**os.environ, **(spec.get("env") or {})},
-        text=True, encoding="utf-8", bufsize=1)
-    mcps()[name] = {"proc": proc, "tools": [], "lock": threading.Lock(), "id": 0, "error": ""}
-    _mcp_rpc(name, "initialize", {
-        "protocolVersion": "2024-11-05", "capabilities": {},
-        "clientInfo": {"name": "ZackLLMGUI", "version": "1.0"}}, timeout=20)
-    _mcp_notify(name, "notifications/initialized", {})
-    tools = (_mcp_rpc(name, "tools/list", {}, timeout=20) or {}).get("tools") or []
-    keep = spec.get("tools")
-    if keep:
-        tools = [t for t in tools if t.get("name") in keep]
-    if len(tools) > MCP_TOOL_CAP:
-        # 一個檔案系統 server 就可能塞二十支工具，全送給模型等於每輪多燒好幾千 token
-        tools = tools[:MCP_TOOL_CAP]
-        mcps()[name]["error"] = f"工具超過 {MCP_TOOL_CAP} 支，只取前面幾支（用 tools 欄位自己挑）"
-    mcps()[name]["tools"] = tools
-
-
-def mcp_stop(key: str = "") -> None:
-    """關掉 server。不給 key 就是全部 —— 收攤的時候用。"""
-    for k in ([key] if key else list(MCP)):
-        for st in MCP.pop(k, {}).values():
-            try:
-                st["proc"].terminate()
-            except Exception:
-                pass
-
-
-def mcp_load() -> dict:
-    """重讀設定檔並重開這個工作區的 server。回傳每一台的狀態。"""
-    mcp_stop(mcp_key())
-    cfg_file = mcp_config_path()
-    if not cfg_file.is_file():
-        return {"config": str(cfg_file), "servers": []}
-    try:
-        cfg = json.loads(cfg_file.read_text("utf-8"))
-    except ValueError as e:
-        return {"config": str(cfg_file), "servers": [], "error": f"設定檔不是合法的 JSON：{e}"}
-    for name, spec in (cfg.get("servers") or {}).items():
-        if not isinstance(spec, dict) or not spec.get("command"):
-            continue
-        try:
-            mcp_start(name, spec)
-        except Exception as e:
-            mcps()[name] = {"proc": None, "tools": [], "lock": threading.Lock(), "id": 0,
-                         "error": f"{type(e).__name__}: {e}"}
-    return mcp_status()
-
-
-def mcp_status() -> dict:
-    return {"config": str(mcp_config_path()),
-            "servers": [{"name": n, "tools": [t.get("name") for t in st["tools"]],
-                         "error": st["error"]} for n, st in mcps().items()]}
-
-
-def mcp_tool_defs() -> list:
-    """MCP 工具併進來時加前綴，免得跟本地工具或彼此撞名。"""
-    out = []
-    for server, st in mcps().items():
-        for t in st["tools"]:
-            schema = t.get("inputSchema") or {"type": "object", "properties": {}}
-            out.append({"type": "function", "function": {
-                "name": f"mcp__{server}__{t.get('name')}",
-                "description": (t.get("description") or "")[:600],
-                "parameters": schema}})
-    return out
-
-
-def mcp_call(full_name: str, args: dict) -> str:
-    _, server, tool = full_name.split("__", 2)
-    if server not in mcps() or mcps()[server]["proc"] is None:
-        raise ValueError(f"MCP server {server} 沒有在跑")
-    res = _mcp_rpc(server, "tools/call", {"name": tool, "arguments": args}, timeout=120)
-    parts = []
-    for item in (res.get("content") or []):
-        if item.get("type") == "text":
-            parts.append(item.get("text", ""))
-        else:
-            parts.append(f"（{item.get('type')} 內容，這裡不顯示）")
-    return "\n".join(parts) or "（沒有回傳內容）"
-
-
 # ══════════════════════ git 整合 ══════════════════════ #
 
 def git_run(*a, timeout: int = 60):
@@ -1989,656 +1297,6 @@ def git_action(action: str, message: str = "") -> dict:
             raise RuntimeError(out or "stash 失敗")
         return dict(git_state(), message=out + "\n（用 git stash pop 可以救回來）")
     raise ValueError(f"不認識的動作：{action}")
-
-
-# ══════════════════════ skills ══════════════════════ #
-# 一個資料夾一份 SKILL.md，格式與範本見 skills/README.md。
-# 目前只給人用（在對話框打 / 叫出來），模型端的 load_skill 還沒接。
-
-def skills_roots() -> list:
-    """要掃的 skills 資料夾，順序是 [內建, 工作區]。
-
-    兩邊都讀，同名時工作區的贏。**不能寫成二選一** ——
-    那樣的話模型照 make-skill 在專案裡寫下第一份 skill 的瞬間，
-    內建那六份會全部從清單上消失（踩過）。
-    """
-    roots = [HERE / SKILLS_DIR]
-    if cur().ws is not None:
-        ws = cur().ws / SKILLS_DIR
-        if ws.is_dir() and ws.resolve() != (HERE / SKILLS_DIR).resolve():
-            roots.append(ws)
-    return [r for r in roots if r.is_dir()]
-
-
-def parse_skill(md: str) -> tuple:
-    """回傳 (中繼資料, 正文)。格式壞掉就丟 ValueError。"""
-    if not md.startswith("---"):
-        raise ValueError("開頭要有 --- 夾起來的中繼資料")
-    end = md.find("\n---", 3)
-    if end < 0:
-        raise ValueError("中繼資料沒有結尾的 ---")
-    meta = {}
-    for line in md[3:end].strip().splitlines():
-        if ":" in line and not line.lstrip().startswith("#"):
-            k, v = line.split(":", 1)
-            meta[k.strip()] = v.strip()
-    return meta, md[end + 4:].strip()
-
-
-def skills_list() -> list:
-    """所有可用的 skill，只讀中繼資料（正文要另外拿）。同名時工作區的蓋掉內建的。"""
-    found = {}
-    for root in skills_roots():
-        scope = "專案" if root != HERE / SKILLS_DIR else "內建"
-        for folder in sorted(root.iterdir()):
-            if not folder.is_dir() or folder.name.startswith("_"):
-                continue
-            f = folder / "SKILL.md"
-            if not f.is_file():
-                continue
-            try:
-                meta, _ = parse_skill(f.read_text("utf-8", errors="replace"))
-            except ValueError:
-                continue
-            if meta.get("name") and meta.get("description"):
-                found[meta["name"]] = {
-                    "name": meta["name"], "description": meta["description"],
-                    "scope": scope,
-                    "tools": [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]}
-    return [found[k] for k in sorted(found)]
-
-
-def skills_usable() -> list:
-    """現在這個狀態下真的用得動的 skill。
-
-    `tools:` 用來**篩清單**不是限制工具：skill 是流程說明不是沙盒，做到一半被擋住
-    比多給幾支工具糟。工作區唯讀時列一份要 write_file 的 skill 只會帶進死路。
-    只管清單，`load_skill` 指名還是叫得到；認不得的工具名（MCP 的）不算數。
-    """
-    have = {d["function"]["name"] for d in tool_defs()}
-    known = {t["name"] for t in TOOL_SCHEMAS}
-    return [s for s in skills_list()
-            if all(t in have for t in s["tools"] if t in known)]
-
-
-def skill_find(name: str) -> tuple:
-    """回傳 (資料夾, 正文)。**資料夾決定它有沒有資格執行指令**，見 skill_trusted。"""
-    clean = str(name or "").strip()
-    # 反著找：工作區的優先，跟 skills_list() 的覆蓋規則一致
-    for root in reversed(skills_roots()):
-        folder = root / clean
-        # 名稱只當資料夾名用，不接受路徑；底線開頭的是範本，不給讀。
-        # 比對 Path(clean).name 而不是 folder.parent —— 後者是**字面**比對，
-        # (root/"..").parent 就等於 root，`..` 一路讀到 skills/ 的上一層去。
-        if (not clean or clean != Path(clean).name or clean.startswith("_")
-                or not (folder / "SKILL.md").is_file()):
-            continue
-        _, body = parse_skill((folder / "SKILL.md").read_text("utf-8", errors="replace"))
-        return folder, body[:SKILL_BODY_LIMIT]
-    raise ValueError(f"沒有這個 skill：{name}")
-
-
-def skill_body(name: str) -> str:
-    return skill_find(name)[1]
-
-
-def skill_trusted(folder: Path) -> bool:
-    """這份 skill 的檔案，模型自己改得到嗎？改得到就不准它跑指令。
-
-    問的是「在不在工作區裡」，不是「在不在內建資料夾裡」—— 預設工作區就是
-    `os.getcwd()`，那兩個會是同一個資料夾，用後者等於這道關卡沒開。
-    代價是工作區設在 checkout 上時內建那幾份也不跑，那是對的：模型確實改得動。
-    """
-    try:
-        folder = folder.resolve()
-        ws = cur().ws
-        if ws is None:
-            return True
-        folder.relative_to(ws.resolve())    # 沒丟例外＝在工作區裡面
-        return False
-    except ValueError:
-        return True
-    except OSError:
-        return False
-
-
-# ══════════════════════ 子代理型別 ══════════════════════ #
-# 一種子代理是一個檔案，不是一段程式碼：加一種寫份 md 丟進 agents/ 就好。
-# 每一種自己宣告拿得到哪些工具 —— 唯讀靠工具清單擋，不是靠提示詞求它別寫。
-# 跟那些商用 agent 不一樣的一點：這裡**一定要有深度上限**。它們的煞車是提示詞，
-# 因為有人在看著帳單；這裡的前提是放著跑三十分鐘沒人看，所以要機制。
-
-
-def agents_roots() -> list:
-    """要掃的 agents 資料夾，順序是 [內建, 工作區]。同名時工作區的贏，規則同 skills。"""
-    roots = [HERE / AGENTS_DIR]
-    if cur().ws is not None:
-        ws = cur().ws / AGENTS_DIR
-        if ws.is_dir() and ws.resolve() != (HERE / AGENTS_DIR).resolve():
-            roots.append(ws)
-    return [r for r in roots if r.is_dir()]
-
-
-def agent_types() -> list:
-    """可用的子代理型別。tools 是 ["*"] 代表「除了永遠不給的以外都給」。"""
-    found = {}
-    for root in agents_roots():
-        scope = "專案" if root.resolve() != (HERE / AGENTS_DIR).resolve() else "內建"
-        for f in sorted(root.glob("*.md")):
-            if f.name.startswith("_"):
-                continue
-            try:
-                meta, body = parse_skill(f.read_text("utf-8", errors="replace"))
-            except (ValueError, OSError):
-                continue
-            if not meta.get("description"):
-                continue
-            name = (meta.get("name") or f.stem).strip()
-            tools = [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]
-            found[name] = {
-                "name": name, "description": meta["description"], "scope": scope,
-                "tools": tools or ["*"],
-                "isolation": meta.get("isolation", "").strip(),
-                "model": meta.get("model", "").strip(),
-                "prompt": body[:AGENT_BODY_LIMIT],
-            }
-    return [found[k] for k in sorted(found)]
-
-
-def git_at(root: Path, *args) -> str:
-    """在指定的資料夾跑 git。跟 git_run() 不同：那一支固定跑在工作區根目錄，
-    這一支要能指到 worktree 或主 repo 兩邊。"""
-    # quotepath=false：不然中文檔名會變成 "\345\255..." 一路送到畫面上
-    p = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(root)] + list(args),
-                       capture_output=True, text=True, timeout=120)
-    if p.returncode != 0:
-        raise RuntimeError((p.stderr or p.stdout).strip()[:400] or "git 失敗")
-    return p.stdout
-
-
-AGENT_NEVER = ("ask_user_question", "todo_write")
-# 前者問了也沒人看得懂上下文；後者是主代理那一條線的待辦，子代理跟它同一個 Session，
-# 寫進去會真的把清單蓋掉。型別檔寫進 tools 也沒用 —— 這一條在伺服器擋。
-SUB_DEPTH_MAX = 2     # 子代理再開子代理的層數上限。網頁那一層也擋，但真正算數的是這裡
-
-
-def agent_open(type_name: str = "", parent: str = "", chat: str = "",
-               task: str = "") -> dict:
-    """登記一個子代理。**每一種都要登記，不只隔離型的。**
-
-    為什麼不只在需要 worktree 時才登記：工具白名單如果只靠網頁「不送那幾支定義」，
-    模型幻覺出一個工具名就繞過去了 —— 送到 /tool 的是名字，伺服器不知道這是誰在叫。
-    登記之後 agent_guard() 才擋得住，那才是規則；網頁那一層只是「不要讓它看到」。
-    """
-    types = {t["name"]: t for t in agent_types()}
-    t = types.get(str(type_name or "")) or (agent_types()[0] if types else None)
-    if t is None:
-        raise ValueError("agents/ 裡沒有任何子代理型別")
-    s = cur()
-    up = s.agents.get(str(parent)) if parent else None
-    if parent and up is None:
-        raise ValueError(f"沒有這個上層子代理：{parent}")
-    if up and up.get("stopped"):
-        raise PermissionError(f"上層子代理 {parent} 已經被中斷，不能再開下一層")
-    depth = (up["depth"] + 1) if up else 1
-    if depth > SUB_DEPTH_MAX:
-        raise PermissionError(f"子代理最多 {SUB_DEPTH_MAX} 層，這是第 {depth} 層")
-    if len(s.agents) >= WORKTREE_MAX:
-        raise RuntimeError(f"同時最多 {WORKTREE_MAX} 個子代理，先收掉沒在用的")
-
-    aid = f"a{int(time.time() * 1000) % 100000000:08d}{len(s.agents)}"
-    ws = up["ws"] if up else ws_root().resolve()
-    rec = {"id": aid, "type": t["name"], "tools": list(t["tools"]),
-           "isolation": "", "ws": ws, "branch": "", "root": None, "linked": [],
-           "parent": str(parent or ""), "depth": depth, "chat": str(chat or "")[:64],
-           "started": time.time(), "calls": 0, "last": None,
-           "stopped": False, "why": "", "task": str(task or "")[:200]}
-    # 下一層跑在上一層的 worktree 裡：它是同一件工作的細分，而各開一份的話
-    # 下一層是從 HEAD 開出來的，看不到上一層還沒提交的修改。
-    if t["isolation"] == "worktree" and not (up and up["isolation"]):
-        info = worktree_add()
-        rec.update(isolation="worktree", ws=info["ws"], branch=info["branch"],
-                   root=info["root"], linked=info["linked"])
-    elif up and up["isolation"]:
-        rec.update(isolation="inherited", branch=up["branch"], root=up["root"])
-    s.agents[aid] = rec
-    return agent_view(rec)
-
-
-def worktree_add() -> dict:
-    """給子代理一份自己的 git worktree。
-
-    兩個會改檔案的子代理平行跑時，原本只有「不要平行」一條路；各給一份 checkout
-    之後衝突變成 merge 問題，而 merge 有現成工具。邊界照舊由 ws_path() 一支擋
-    （root 換成 worktree），不必再寫第二個路徑檢查。
-    """
-    root = ws_root().resolve()
-    if not (root / ".git").exists():
-        raise RuntimeError("這個工作區不是 git 儲存庫，給不了獨立的 worktree")
-    tag = f"{int(time.time() * 1000) % 100000000:08d}"
-    dst = root / WORKTREE_DIR / tag
-    branch = f"zackllmgui/{tag}"
-    # 主 worktree 不該把這個資料夾看成未追蹤的檔案。寫 .git/info/exclude 而不是
-    # .gitignore：那是使用者的檔案，我們不動它。
-    try:
-        ex = Path(git_at(root, "rev-parse", "--git-common-dir").strip())
-        if not ex.is_absolute():
-            ex = root / ex
-        ex = ex / "info" / "exclude"
-        ex.parent.mkdir(parents=True, exist_ok=True)
-        line = WORKTREE_DIR + "/\n"
-        had = ex.read_text("utf-8", errors="replace") if ex.is_file() else ""
-        if line not in had:
-            with ex.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-    except Exception:
-        pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
-    git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
-    # 沒進版控的東西不會跟過來，而 node_modules 重建一次要幾分鐘、還多佔一份磁碟。
-    # **連過去等於共用**：子代理在裡面 npm install 會動到主專案那一份，
-    # 兩個子代理同時裝也會互相蓋。agents/work.md 有告訴它不要自己裝。
-    linked = []
-    for name in WORKTREE_LINK:
-        src, at = root / name, dst / name
-        if not src.is_dir() or at.exists() or at.is_symlink():
-            continue          # 有進版控的話 checkout 裡已經有了，不能蓋掉真的那一份
-        try:
-            os.symlink(src, at, target_is_directory=True)
-            linked.append(name)
-        except Exception:
-            pass              # Windows 沒權限就算了：子代理自己會發現裝不起來
-    return {"ws": dst.resolve(), "branch": branch, "root": root, "linked": linked}
-
-
-def branch_unique(root: Path, branch: str) -> int:
-    """這個分支上有幾個主 HEAD 沒有的 commit。**刪分支前要問的唯一問題。**
-
-    「工作目錄乾淨」不等於「分支上沒東西」—— 子代理自己 commit 過、或是上一次收的
-    時候幫它 commit 過，工作目錄都會是乾淨的。只看乾不乾淨就刪分支會把成果刪掉。
-    """
-    try:
-        return len([ln for ln in git_at(root, "rev-list", branch, "^HEAD").splitlines()
-                    if ln.strip()])
-    except Exception:
-        return 1                 # 問不出來就當它有東西：不刪比刪錯好
-
-
-def agent_commit_msg(rec: dict) -> str:
-    return f"子代理 {rec['id']}（{rec['type']}）：{rec.get('task') or '沒有說明'}"
-
-
-def worktree_orphans() -> list:
-    """磁碟上有、但這個分頁的登記裡沒有的 worktree。
-
-    不必另外存狀態，分支名 `zackllmgui/<tag>` 就是登記。Session.agents 活在行程裡，
-    serve.py 重啟之後那幾份就沒人認得、也就收不掉，這一支把它們找回來。
-    只列不刪：「沒有人認得」不等於「可以刪」。
-    """
-    root = ws_root().resolve()
-    if not (root / ".git").exists():
-        return []
-    live = {r["branch"] for r in cur().agents.values() if r["branch"]}
-    try:
-        blocks = git_at(root, "worktree", "list", "--porcelain").split("\n\n")
-    except Exception:
-        return []
-    out = []
-    for block in blocks:
-        info = dict(ln.split(" ", 1) for ln in block.splitlines() if " " in ln)
-        branch = info.get("branch", "").replace("refs/heads/", "", 1)
-        path = info.get("worktree", "")
-        if not branch.startswith("zackllmgui/") or branch in live:
-            continue
-        rec = {"id": "w" + branch.split("/", 1)[1], "branch": branch,
-               "path": path, "changes": 0, "gone": not Path(path).is_dir(),
-               "msg": "", "commits": branch_unique(root, branch), "secs": 0}
-        try:
-            # 分支上有自己的 commit 才拿它的訊息 —— 沒有的話那是開分支時的
-            # 那個 base commit，講的是別人的事
-            if rec["commits"]:
-                rec["msg"] = git_at(root, "log", "-1", "--format=%s", branch).strip()[:200]
-            rec["secs"] = int(time.time() - Path(path).stat().st_mtime)
-        except Exception:
-            pass
-        try:
-            rec["changes"] = len([
-                ln for ln in git_at(Path(path), "status", "--porcelain").splitlines()
-                if ln.strip()
-                and not ln[3:].strip('"').startswith(WORKTREE_SKIP)])
-        except Exception:
-            pass
-        out.append(rec)
-    return out
-
-
-def orphan_rec(aid: str) -> dict:
-    """把一筆孤兒 worktree 補成 agent_close() 看得懂的樣子。
-
-    它是死的（沒有 tools、沒有 chat），只夠拿來收 —— 收掉正是唯一還能對它做的事。
-    """
-    root = ws_root().resolve()
-    for o in worktree_orphans():
-        if o["id"] == str(aid):
-            return {"id": o["id"], "type": "orphan", "tools": [], "isolation": "worktree",
-                    "ws": Path(o["path"]), "branch": o["branch"], "root": root,
-                    "parent": "", "depth": 1, "chat": "", "started": time.time(),
-                    "calls": 0, "last": None, "stopped": True,
-                    "why": "沒人認得的 worktree", "task": o["msg"] or "serve.py 重啟前留下的"}
-    return None
-
-
-def agent_view(rec: dict) -> dict:
-    """給網頁看的樣子。Path 不能直接進 JSON，而且要看得出它現在在幹嘛。"""
-    return {"id": rec["id"], "type": rec["type"], "tools": rec["tools"],
-            "isolation": rec["isolation"], "path": str(rec["ws"]),
-            "branch": rec["branch"], "linked": rec.get("linked", []),
-            "parent": rec["parent"], "depth": rec["depth"],
-            "chat": rec["chat"], "secs": int(time.time() - rec["started"]),
-            "calls": rec["calls"], "last": rec["last"],
-            "stopped": rec["stopped"], "why": rec["why"],
-            "jobs": [j["id"] for j in jobs_of(rec["id"])]}
-
-
-def agent_kin(aid: str) -> list:
-    """這個子代理與它底下的所有後代。中斷要連根拔，不是只停自己。"""
-    s = cur()
-    out = []
-    todo = [str(aid)]
-    while todo:
-        cur_id = todo.pop()
-        rec = s.agents.get(cur_id)
-        if rec is None or rec in out:
-            continue
-        out.append(rec)
-        todo += [k for k, v in s.agents.items() if v["parent"] == cur_id]
-    return out
-
-
-def agent_chain(aid: str) -> list:
-    """從這個子代理往上走到根。**追溯根源用的就是這一支。**"""
-    s = cur()
-    out = []
-    seen = set()
-    node = s.agents.get(str(aid))
-    while node is not None and node["id"] not in seen:
-        seen.add(node["id"])
-        out.append(agent_view(node))
-        node = s.agents.get(node["parent"]) if node["parent"] else None
-    return out
-
-
-def jobs_of(aid: str) -> list:
-    with JOBS_LOCK:
-        return [j for j in JOBS.values() if j.get("agent") == str(aid)]
-
-
-def agent_stop(aid: str, why: str = "") -> dict:
-    """依 id 中斷：自己、所有後代，以及它們丟到背景的指令。
-
-    **這一支是規則不是提示。** 標記之後，任何綁在這些 id 上的呼叫都會被
-    agent_guard() 直接拒絕 —— 就算網頁那一端沒收到、或根本不理，也叫不動工具了。
-    背景指令活在這個行程裡，所以連它們一起殺，不然「中斷」只中斷了一半。
-    """
-    kin = agent_kin(aid)
-    if not kin:
-        raise ValueError(f"沒有這個子代理：{aid}")
-    killed = []
-    for rec in kin:
-        rec["stopped"] = True
-        rec["why"] = str(why or "使用者中斷")[:200]
-        for job in jobs_of(rec["id"]):
-            if job["code"] is None and job.get("proc") is not None:
-                kill_tree(job["proc"])
-                killed.append(job["id"])
-    return {"stopped": [r["id"] for r in kin], "jobs": killed,
-            "why": kin[0]["why"]}
-
-
-def agent_trace(aid: str) -> dict:
-    """給一個 id，說清楚它是什麼、誰開的、現在在跑什麼、丟了哪些背景指令。"""
-    chain = agent_chain(aid)
-    if not chain:
-        raise ValueError(f"沒有這個子代理：{aid}")
-    return {"agent": chain[0], "chain": chain,
-            "children": [agent_view(r) for r in agent_kin(aid) if r["id"] != str(aid)],
-            "jobs": [{"id": j["id"], "cmd": j["cmd"], "code": j["code"],
-                      "secs": int((j["ended"] or time.time()) - j["started"])}
-                     for j in jobs_of(aid)]}
-
-
-def agent_close(aid: str, force: bool = False) -> dict:
-    """收掉一個子代理（連同它底下沒收的後代）。
-
-    **有改動就先 commit 到自己的分支，再收掉目錄。** 不 commit 的話那些改動只是
-    未追蹤檔案：分支是空的、`git merge` 沒東西可合，目錄一旦沒人認得就只能留著。
-    落到分支上之後，「收掉目錄」與「留住成果」不再是二選一。
-    """
-    s = cur()
-    rec = s.agents.get(str(aid)) or orphan_rec(str(aid))
-    if rec is None:
-        raise ValueError(f"沒有這個子代理：{aid}")
-    for kid in [r for r in agent_kin(aid) if r["id"] != str(aid)]:
-        s.agents.pop(kid["id"], None)
-    out = {"id": str(aid), "branch": rec["branch"], "path": str(rec["ws"]),
-           "kept": False, "changes": 0, "stat": "", "committed": False,
-           "commits": 0, "merge": ""}
-    if rec["isolation"] != "worktree":
-        s.agents.pop(str(aid), None)
-        return out
-    try:
-        # 自己的備份目錄與巢狀 worktree 不算「子代理做的事」——
-        # 算進去的話每一份 worktree 都會回報有改動，那個訊號就沒有意義了
-        # 連過去的 node_modules 是**符號連結**不是資料夾，所以 .gitignore 裡的
-        # `node_modules/`（尾巴有斜線＝只比對資料夾）比對不到它，git 會回報 ?? node_modules。
-        # 不擋掉的話每一份 worktree 都會回報「有改動」，還會把一條斷掉的連結 commit 進分支。
-        lines = [ln for ln in git_at(rec["ws"], "status", "--porcelain").splitlines()
-                 if ln.strip()
-                 and not ln[3:].strip('"').startswith(WORKTREE_SKIP)]
-    except Exception:
-        lines = []
-    if lines:
-        out["changes"] = len(lines)
-        out["stat"] = "\n".join(lines)[:2000]
-        try:
-            # 只收子代理做的事：自己的備份目錄與巢狀 worktree 不算，
-            # 掃進去的話合併過來會把我們的內部檔案倒進使用者的專案
-            git_at(rec["ws"], "add", "-A", "--", ".",
-                   *[f":(exclude){d}" for d in WORKTREE_SKIP])
-            git_at(rec["ws"], "commit", "-q", "-m", agent_commit_msg(rec))
-            out["committed"] = True
-            out["merge"] = f"git merge {rec['branch']}"
-        except Exception as e:
-            # commit 不進去（例如這台 git 連身分都沒設）就退回舊行為：整份留著。
-            # 寧可讓資料夾積在專案裡，也不能把改動丟掉 —— 除非呼叫的人指名要丟。
-            if not force:
-                out["kept"] = True
-                out["error"] = f"改動 commit 不進去，先留著：{e}"
-                s.agents.pop(str(aid), None)
-                return out
-    out["commits"] = branch_unique(rec["root"], rec["branch"])
-    if out["commits"]:
-        # 主代理只拿到一個分支名的話，要收不收沒有依據。commit 之後 diff 才算得出來
-        try:
-            out["diff"] = git_at(rec["root"], "diff", "--stat",
-                                 f"HEAD...{rec['branch']}").strip()[:2000]
-        except Exception:
-            pass
-    try:
-        if Path(rec["ws"]).is_dir():
-            git_at(rec["root"], "worktree", "remove", "--force", str(rec["ws"]))
-        else:
-            git_at(rec["root"], "worktree", "prune")     # 資料夾被手動刪掉的情況
-        if not out["commits"]:
-            git_at(rec["root"], "branch", "-D", rec["branch"])
-        elif not out["merge"]:
-            out["merge"] = f"git merge {rec['branch']}"
-    except Exception as e:
-        out["kept"] = True
-        out["error"] = str(e)
-    s.agents.pop(str(aid), None)
-    return out
-
-
-@contextlib.contextmanager
-def as_agent(aid: str):
-    """只在**跑工具的那一段**切到子代理的身分。
-
-    回應裡的 todos／plan／tool_defs 仍然要是分頁自己的 —— 子代理的 Session 是新的，
-    待辦是空的，切過去不切回來會讓網頁上的待辦清單整個消失。
-    """
-    was_s = getattr(_CUR, "s", None)
-    was_a = getattr(_CUR, "agent", None)
-    try:
-        bind_agent(aid)
-        yield
-    finally:
-        _CUR.s, _CUR.agent = was_s, was_a
-
-
-def bind_agent(aid: str) -> None:
-    """把這個請求切到某個子代理的身分（工作區 + 工具白名單）。
-
-    只認 Session 自己開過的 id —— 路徑是伺服器產生的，不是請求帶進來的，
-    所以網頁那端沒辦法靠這條路指到任意資料夾。
-    """
-    if not aid:
-        _CUR.agent = None
-        return
-    s = cur()
-    rec = s.agents.get(str(aid))
-    if rec is None:
-        raise ValueError(f"沒有這個子代理：{aid}（可能已經收掉了）")
-    sub = Session(s)                 # 繼承 write
-    sub.ws = rec["ws"]
-    sub.auto = s.auto
-    sub.agents = s.agents            # 讓下一層還找得到
-    _CUR.s = sub
-    _CUR.agent = rec
-
-
-def agent_guard(name: str) -> None:
-    """綁在子代理身上的呼叫，工具白名單由這裡擋。
-
-    **兩層是刻意的，不是重複**：網頁那一層決定「不要讓模型看到它不該用的工具」，
-    這一層決定「就算它硬叫也叫不動」。只有前者的話，模型幻覺出一個工具名就過去了——
-    送到 /tool 的只是一個字串，伺服器原本無從知道是誰在叫。
-    """
-    rec = getattr(_CUR, "agent", None)
-    if not rec:
-        return
-    if rec["stopped"]:
-        raise PermissionError(f"子代理 {rec['id']} 已經被中斷（{rec['why']}），不再執行任何工具")
-    if name in AGENT_NEVER:
-        raise PermissionError(f"子代理不能用 {name}")
-    tools = rec["tools"] or ["*"]
-    if "*" not in tools and name not in tools:
-        raise PermissionError(
-            f"子代理型別「{rec['type']}」拿不到 {name}（它的工具是：{'、'.join(tools)}）")
-    rec["calls"] += 1
-    rec["last"] = {"tool": name, "at": time.time()}
-
-
-# ══════════════════════ 允許規則 ══════════════════════ #
-# 人真正想要的不是全有全無的三段，而是「pytest 一律放行、git commit 要問我、
-# secrets/ 永遠不准碰」。規則檔把這種判斷寫下來一次。
-#
-# 順序（第一個成立的說了算）：
-#   deny 規則 > 擋掉的危險指令 > 風險指令一律問 > allow 規則 > 自動模式
-# allow **不能**蓋過風險指令：那條保證寫在文件上，不能被一個設定檔拿掉。
-
-def rules_files() -> list:
-    """[(範圍, 路徑)]。兩份都讀，專案的排在前面（第一條命中的說了算）。
-
-    **不能寫成二選一。** skills 那邊踩過同一個坑：只要專案有了自己的一份，
-    全域那份就整個消失 —— 使用者加了一條專案規則，結果全域的 deny 全部失效。
-    """
-    out = []
-    if cur().ws is not None:
-        out.append(("專案", cur().ws / RULES_FILE))
-    here = HERE / RULES_FILE
-    if not out or out[0][1].resolve() != here.resolve():
-        out.append(("全域", here))
-    return out
-
-
-def rules_path(write: bool = False) -> Path:
-    """要寫到哪一份：有工作區就寫專案的，沒有就寫全域的。"""
-    files = rules_files()
-    return files[0][1] if (write and files) else (HERE / RULES_FILE)
-
-
-def rules_read_one(f: Path, scope: str) -> list:
-    if not f.is_file():
-        return []
-    try:
-        data = json.loads(f.read_text("utf-8", errors="replace"))
-    except ValueError:
-        return []          # 壞掉就當成沒有：規則是為了少按幾次，不能擋住整個程式
-    out = []
-    for r in (data.get("rules") if isinstance(data, dict) else data) or []:
-        if not isinstance(r, dict):
-            continue
-        act = str(r.get("action", "")).lower()
-        if act not in ("allow", "ask", "deny"):
-            continue
-        out.append({"tool": str(r.get("tool", "*")) or "*",
-                    "pattern": str(r.get("pattern", "*")) or "*",
-                    "action": act,
-                    "note": str(r.get("note", ""))[:200],
-                    "scope": scope})
-    return out
-
-
-def rules_load() -> list:
-    out = []
-    for scope, f in rules_files():
-        out += rules_read_one(f, scope)
-    # deny 一律排到最前面：第一條命中的說了算，禁止的不該被任何 allow 蓋掉
-    return ([r for r in out if r["action"] == "deny"]
-            + [r for r in out if r["action"] != "deny"])
-
-
-def rules_save(rules: list, scope: str = "") -> None:
-    """把某一個範圍的規則寫回它自己那一份檔案。"""
-    for sc, f in rules_files():
-        if scope and sc != scope:
-            continue
-        keep = [{k: v for k, v in r.items() if k != "scope"}
-                for r in rules if r.get("scope", sc) == sc]
-        if not keep and not f.is_file():
-            continue
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({"rules": keep}, ensure_ascii=False, indent=2) + "\n",
-                     encoding="utf-8")
-
-
-def rule_subject(name: str, args: dict) -> str:
-    """這一次呼叫要拿什麼去比對樣式。
-
-    指令類比指令本身、檔案類比路徑、連網類比網址 —— 都是使用者心裡
-    「我要放行的是什麼」的那個東西。
-    """
-    if not isinstance(args, dict):
-        return ""
-    for key in ("command", "path", "url", "query", "target", "name"):
-        if args.get(key):
-            return str(args[key])
-    return ""
-
-
-def rule_match(name: str, args: dict) -> dict:
-    """回傳命中的規則，沒有就回 None。第一條命中的說了算。"""
-    subject = rule_subject(name, args)
-    for r in rules_load():
-        if not fnmatch.fnmatch(name, r["tool"]):
-            continue
-        pat = r["pattern"]
-        # 路徑樣式常寫成 secrets/**，fnmatch 不認得 ** 的遞迴語意，補一個前綴比對
-        if (fnmatch.fnmatch(subject, pat)
-                or (pat.endswith("/**") and subject.startswith(pat[:-2]))
-                or (pat.endswith("*") and subject.startswith(pat[:-1]))):
-            return r
-    return None
 
 
 # ── 改完自動檢查 ─────────────────────────────────────────────── #
@@ -3377,8 +2035,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(8192) or b"{}")
-            global CURRENT_CHAT
-            CURRENT_CHAT = str(req.get("chat", ""))[:64]
+            workspace.CURRENT_CHAT = str(req.get("chat", ""))[:64]
             self._json(checkpoint(str(req.get("note", ""))))
         except Exception as e:
             self._json({"skipped": f"{type(e).__name__}: {e}"})
@@ -3641,8 +2298,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self._read_body(1024 * 1024) or b"{}")
-            global CURRENT_CHAT
-            CURRENT_CHAT = str(req.get("chat", ""))[:64]
+            workspace.CURRENT_CHAT = str(req.get("chat", ""))[:64]
             with as_agent(str(req.get("agent", ""))):
                 out = run_tool(req.get("name", ""), req.get("args") or {})
         except subprocess.TimeoutExpired:

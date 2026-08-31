@@ -1148,7 +1148,7 @@ def test_checkpoint_catches_what_the_journal_misses():
         assert [e["tool"] for e in serve.journal_read()] == ["checkpoint", "write_file"]
 
         # 一輪一列，這一輪動過的檔案掛在那一列底下（run_shell 改的也在）
-        rows = serve.journal_for(serve.CURRENT_CHAT)
+        rows = serve.journal_for(serve.workspace.CURRENT_CHAT)
         assert len(rows) == 1, rows
         assert sorted((f["st"], f["path"]) for f in rows[0]["files"]) == [
             ("A", "new.py"), ("M", "pkg/calc.py")]
@@ -1446,11 +1446,11 @@ def test_journal_per_chat():
         target = ws / "pkg" / "calc.py"
 
         # 三次改動故意在同一秒內完成：備份的時間戳只到秒，這是會撞的
-        serve.CURRENT_CHAT = "chat-A"
+        serve.workspace.CURRENT_CHAT = "chat-A"
         serve._tool_edit_file("pkg/calc.py", "a + b", "FIRST")
-        serve.CURRENT_CHAT = "chat-B"
+        serve.workspace.CURRENT_CHAT = "chat-B"
         serve._tool_write_file("pkg/new_b.py", "x = 1\n")
-        serve.CURRENT_CHAT = "chat-A"
+        serve.workspace.CURRENT_CHAT = "chat-A"
         serve._tool_edit_file("pkg/calc.py", "FIRST", "SECOND")
 
         a = serve.journal_for("chat-A")
@@ -1476,7 +1476,7 @@ def test_journal_per_chat():
         assert "a + b" in body and "FIRST" not in body and "SECOND" not in body, body
         assert not (ws / "pkg" / "new_b.py").exists(), "別則對話新建的檔案沒有跟著刪掉"
         assert serve.journal_for("chat-A") == [] and serve.journal_for("chat-B") == []
-        serve.CURRENT_CHAT = ""
+        serve.workspace.CURRENT_CHAT = ""
 
 
 def test_sandbox_backends_per_os():
@@ -2269,7 +2269,8 @@ def test_skill_listing_follows_what_is_open():
               {"name": "認不得的", "description": "d", "scope": "內建",
                "tools": ["mcp__x__y"]}]
     with Workspace() as ws:
-        was, serve.skills_list = serve.skills_list, lambda: skills
+        # skills_usable 住在 core.skills，patch 要打在它真正的家
+        was, serve._skills.skills_list = serve._skills.skills_list, lambda: skills
         try:
             serve.cur().write = True
             assert [s["name"] for s in serve.skills_usable()] == \
@@ -2280,7 +2281,7 @@ def test_skill_listing_follows_what_is_open():
             # 認不得的工具名（MCP 那種會來會去）不能拿來判斷一份 skill 死了沒
             assert "要寫檔" not in serve.agent_rules()
         finally:
-            serve.skills_list = was
+            serve._skills.skills_list = was
 
 
 def test_skill_body_can_carry_live_state():
@@ -2378,7 +2379,7 @@ def test_skill_listing_is_capped():
     long_desc = "很長的描述" * 60
     skills = [{"name": f"s{i}", "description": long_desc, "scope": "內建", "tools": []}
               for i in range(serve.SKILL_LIST_MAX + 5)]
-    was, serve.skills_list = serve.skills_list, lambda: skills
+    was, serve._skills.skills_list = serve._skills.skills_list, lambda: skills
     was_tools, serve.ALLOW_TOOLS = serve.ALLOW_TOOLS, True
     try:
         rules = serve.agent_rules()
@@ -2387,7 +2388,7 @@ def test_skill_listing_is_capped():
         assert long_desc not in rules, "描述沒有截短"
         assert long_desc[:serve.SKILL_DESC_MAX] in rules
     finally:
-        serve.skills_list, serve.ALLOW_TOOLS = was, was_tools
+        serve._skills.skills_list, serve.ALLOW_TOOLS = was, was_tools
 
 
 def test_worktree_links_node_modules_without_risking_it():
