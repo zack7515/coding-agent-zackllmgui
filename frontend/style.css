@@ -580,6 +580,11 @@ input[type=range]::-moz-range-thumb{
 }
 .sc-row .st.m{color:var(--accent);}      /* Modified */
 .sc-row .st.a{color:var(--ok, #3fb950);} /* Added */
+.sc-row .st.c{color:var(--warn, #d29922);} /* Checkpoint：一整則提示的起點 */
+/* 檢查點是「一輪的起點」，不是清單上的一個檔案 —— 上面畫一條線把它跟
+   它底下那幾筆改動分開，掃過去就看得出哪幾筆屬於哪一輪。 */
+.sc-row.ckpt{border-top:1px solid var(--line); margin-top:2px;}
+.sc-row.ckpt .nm{color:var(--ink2); max-width:60%;}
 .sc-head{
   display:flex; align-items:center; gap:6px; padding:8px 10px 4px 12px;
   font-size:11px; font-weight:600; letter-spacing:.04em; color:var(--ink3);

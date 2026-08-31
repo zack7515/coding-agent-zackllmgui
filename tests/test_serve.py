@@ -1114,6 +1114,47 @@ def test_journal_and_rewind():
             pass
 
 
+def test_checkpoint_catches_what_the_journal_misses():
+    """每則提示一個檢查點。**這是唯一退得掉 run_shell 改動的路。**
+
+    一筆一筆的還原點只有三支檔案工具會記，而模型用 `sed`、`npm`、`>>` 改的
+    東西同樣是「我想退回去」的時候要退的。檢查點用 git 的 shadow commit 照相：
+    HEAD、分支、使用者的暫存區都不能被動到 —— 那是這個做法能不能用的前提。
+    """
+    with Workspace() as ws:
+        def git(*a):
+            return subprocess.run(["git", "-C", str(ws)] + list(a),
+                                  capture_output=True, text=True)
+
+        # Workspace 的 .git 是個空殼，git 會罵 —— 重點是**跳過而不是丟例外**：
+        # 照不到相不能擋住使用者送出訊息
+        assert serve.checkpoint("還沒 init")["skipped"]
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+        head = git("log", "--oneline", "-1").stdout.strip()
+
+        first = serve.checkpoint("幫我改 calc.py")
+        assert first["commit"] and first["tree"], first
+        # 沒改到東西就不要一直長新的，不然清單會被一模一樣的列灌滿
+        assert "一模一樣" in serve.checkpoint("再問一次")["skipped"]
+
+        serve.run_tool("run_shell", {"command": "echo 'y = 2' >> pkg/calc.py"})
+        serve.run_tool("write_file", {"path": "new.py", "content": "新檔\n"})
+        assert "y = 2" in (ws / "pkg" / "calc.py").read_text()
+        # run_shell 改的東西**不會**有單筆還原點 —— 檢查點補的就是這一段
+        assert [e["tool"] for e in serve.journal_read()] == ["checkpoint", "write_file"]
+
+        out = serve.rewind_to(first["id"])
+        assert not out["failed"], out["failed"]
+        assert "y = 2" not in (ws / "pkg" / "calc.py").read_text(), "run_shell 改的要退掉"
+        assert not (ws / "new.py").exists(), "這一輪新增的檔案要刪掉"
+        assert not serve.journal_read(), "退回去的紀錄要一起清掉"
+        assert git("log", "--oneline", "-1").stdout.strip() == head, "HEAD 不能被動到"
+
+
 def test_skills_endpoint():
     """/ 選單要看得到 skills，而且 name 只能當資料夾名用。"""
     names = [s["name"] for s in serve.skills_list()]

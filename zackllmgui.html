@@ -589,6 +589,11 @@ input[type=range]::-moz-range-thumb{
 }
 .sc-row .st.m{color:var(--accent);}      /* Modified */
 .sc-row .st.a{color:var(--ok, #3fb950);} /* Added */
+.sc-row .st.c{color:var(--warn, #d29922);} /* Checkpoint：一整則提示的起點 */
+/* 檢查點是「一輪的起點」，不是清單上的一個檔案 —— 上面畫一條線把它跟
+   它底下那幾筆改動分開，掃過去就看得出哪幾筆屬於哪一輪。 */
+.sc-row.ckpt{border-top:1px solid var(--line); margin-top:2px;}
+.sc-row.ckpt .nm{color:var(--ink2); max-width:60%;}
 .sc-head{
   display:flex; align-items:center; gap:6px; padding:8px 10px 4px 12px;
   font-size:11px; font-weight:600; letter-spacing:.04em; color:var(--ink3);
@@ -2021,7 +2026,7 @@ function renderMarkdown(src) {
 // S.host 是「Ollama 在哪」—— 照 README 的建議把它指到 GPU 主機之後，
 // /tool、/ls、/workspace 這些還是要問**端出這個頁面的那一台**，
 // 不然檔案分頁會說「這個頁面不是本機開的」，而且工具全部打到 Ollama 去。
-const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp|sys)$/;
+const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|checkpoint|rules|skills|git|restore|extract|ext|mcp|sys)$/;
 
 function apiUrl(path) {
   if (SAME_ORIGIN && SRV_PATHS.test(path)) return location.origin + path;
@@ -3357,8 +3362,23 @@ async function send() {
   if (c.messages.length === 1) { autoTitle(c); renderChatList(); }
   S.stick = true;
   pin();
+  await checkpoint(text);
   await runStream(c);
   finishTurn();
+}
+
+// 每一則提示先照一張相。一筆一筆的還原點只記得**檔案工具**改過的東西 ——
+// run_shell 改的、模型自己 sed 掉的、npm 裝進去的都不在裡面，而那些同樣是
+// 「我想退回去」的時候要退的。codex 與 claude code 的檢查點也是每輪一張。
+// 拍不到（不是 git repo、git 出事）就算了，絕對不能擋住送出訊息。
+async function checkpoint(note) {
+  if (!S.tools || !S.ws.path) return;
+  try {
+    await fetch(apiUrl('/checkpoint'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat: current().id, note: String(note || '').slice(0, 100) })
+    });
+  } catch (e) { /* 照不到相不是送不出訊息的理由 */ }
 }
 
 async function regenerate() {
@@ -4836,6 +4856,20 @@ function rewindRow(e, newest) {
     + '<span class="dir"></span><span class="tm"></span>';
   // A = 新建（Added）、M = 修改（Modified），跟 git 與 VS Code 同一套字母
   const st = row.querySelector('.st');
+  // C = 檢查點（Checkpoint），一整則提示的起點；A = 新建、M = 修改，
+  // 跟 git 與 VS Code 同一套字母。
+  if (e.tree) {
+    row.classList.add('ckpt');
+    st.textContent = 'C';
+    st.className = 'st c';
+    row.querySelector('.nm').textContent = path || '（沒有內容）';
+    row.querySelector('.dir').textContent = '這則提示之前';
+    row.querySelector('.tm').textContent = clockOf(e.ts);
+    row.title = e.ts + '　送出這則提示之前的完整快照\n「' + path + '」'
+      + (newest ? '\n最新的一筆' : '')
+      + '\n點一下把整個工作區退回這個時間點 —— 包含 run_shell 改的東西';
+    return row;
+  }
   st.textContent = created ? 'A' : 'M';
   st.className = 'st ' + (created ? 'a' : 'm');
   row.querySelector('.nm').textContent = cut >= 0 ? path.slice(cut + 1) : path;
@@ -4861,9 +4895,12 @@ function renderRewind(entries, total) {
   box.innerHTML = '';
   $('rwCount').textContent = entries.length;
   if (!entries.length) {
+    const git = (S.ws.git_state || {}).repo;
     box.innerHTML = '<div class="fv-empty">' + (total
       ? '這則對話還沒改過檔案（工作區裡有其他對話改的 ' + total + ' 筆）。'
-      : '還沒有改過任何檔案。') + '</div>';
+      : '還沒有改過任何檔案。')
+      + (git ? '' : '<br>工作區不是 git repo，所以每則提示的檢查點沒有建立 ——'
+             + '只有檔案工具改的會有單筆還原點。') + '</div>';
     return;
   }
   // 用本機時間組今天的日期，不要用 toISOString（那是 UTC，跨日的時候會差一天）。
@@ -4888,6 +4925,17 @@ function renderRewind(entries, total) {
       // 只顯示這一則卻偷偷動到別人的，那是騙人 —— 講出來讓使用者決定。
       const others = e.other_chats
         ? '\n其中 ' + e.other_chats + ' 筆是「其他對話」改的，也會一起退回去。' : '';
+      // 檢查點退的是**整個工作區**，不是清單上那幾個檔案 —— 這一輪之後多出來的
+      // 檔案會被刪掉。差別夠大，要用不同的話講清楚。
+      if (e.tree) {
+        if (!confirm('把整個工作區退回送出這則提示之前的樣子？\n\n' +
+                     e.ts + '\n「' + e.path + '」\n\n' +
+                     '這一輪之後新增的檔案會被刪掉，改過的會退回去 ——\n' +
+                     '包含 run_shell 改的（那些沒有單筆還原點）。\n' +
+                     '你的 git 分支、HEAD 與暫存區不受影響，對話內容也不受影響。')) return;
+        doRewind(e.id);
+        return;
+      }
       if (!confirm('把工作區退回這一筆之前的樣子？\n\n' +
                    e.ts + ' ' + e.tool + ' ' + e.path +
                    '\n\n會退回 ' + e.undo_count + ' 筆改動。' + others +
@@ -6712,8 +6760,12 @@ function openHostHelp() {
 
 function openRewindHelp() {
   openHelp('還原檔案', [
-    ['做什麼', '每一次改檔案都有紀錄。選一個時間點，那之後的改動全部退回去 —— '
-      + '有備份的複製回來，當時新建的檔案刪掉。'],
+    ['兩種還原點', 'C（檢查點）＝送出每一則提示之前的完整快照，退回去是整個工作區；'
+      + 'M／A＝單獨一次改檔案，只退那一個檔案。'],
+    ['為什麼要有 C', '單筆還原點只有 write_file／edit_file／delete_file 會留。'
+      + '模型用 run_shell 下 sed、npm、>> 改的東西不在裡面 —— 檢查點補的就是這一段。'],
+    ['C 需要 git', '快照是 git 的 shadow commit（用臨時 index 做，你的 HEAD、分支、'
+      + '暫存區都不會被動到）。工作區不是 git repo 就只有單筆還原點。'],
     ['不會動到什麼', '只動工作區裡的檔案。對話一個字都不會變，所以還原之後'
       + '模型仍然記得它做過什麼。'],
     ['紀錄放在哪', '工作區的 .zackllmgui-backup/journal.jsonl，跟備份放在一起。']

@@ -44,6 +44,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import sys
 import threading
@@ -641,7 +642,7 @@ def journal_path() -> Path:
     return ws_root().resolve() / BACKUP_DIR / JOURNAL
 
 
-def journal_add(tool: str, rel: str, backup: str, created: bool) -> str:
+def journal_add(tool: str, rel: str, backup: str, created: bool, **extra) -> str:
     """記一筆改檔案的操作。回傳這一筆的 id。
 
     寫失敗不能讓工具跟著失敗 —— 紀錄是為了方便，不是為了正確性。
@@ -650,7 +651,7 @@ def journal_add(tool: str, rel: str, backup: str, created: bool) -> str:
         "id": f"{time.time():.6f}",
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tool": tool, "path": rel, "backup": backup, "created": created,
-        "chat": CURRENT_CHAT,
+        "chat": CURRENT_CHAT, **extra,
     }
     try:
         f = journal_path()
@@ -698,6 +699,89 @@ def journal_for(chat: str) -> list:
     return out
 
 
+# ── 每則提示一個檢查點 ──────────────────────────────────────────── #
+# 上面那套還原點是「一次改檔案記一筆」，而且**只有三支檔案工具會記**——
+# `run_shell` 改的、模型自己 sed 掉的、npm 裝進去的，一個字都沒進去。
+# 檢查點補的是另一半：每一則使用者提示開始之前，把整個工作區照一張相。
+#
+# 做法是 git 的 shadow commit：用一份**臨時 index** 把工作區寫成一棵 tree，
+# `commit-tree` 成一個沒有 parent 的孤兒 commit，再用 refs/zackllmgui/ 底下的
+# ref 釘住不讓 gc 掃掉。HEAD、分支、使用者的暫存區三個都沒動 ——
+# 這是關鍵：同一件事用 `git stash` 或 `git checkout` 做會蓋掉人家暫存的東西。
+#
+# ponytail: 不是 git repo 就不照相，介面直說。要在非 git 的資料夾也能用得
+#           每則提示複製一次整個工作區，那個成本比它值的錢貴。
+#           `.gitignore` 忽略的檔案也不在快照裡（.venv、node_modules 本來就
+#           不該進去），代價是模型寫進被忽略路徑的東西退不回來。
+CKPT_REF = "refs/zackllmgui/ckpt"
+CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR)
+
+
+def ws_is_git() -> bool:
+    return cur().ws is not None and (cur().ws / ".git").exists()
+
+
+@contextlib.contextmanager
+def tmp_index():
+    """在一份用完就丟的 index 上跑 git。使用者的 .git/index 完全不會被碰到。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+
+        def run(*a, timeout: int = 120) -> str:
+            proc = subprocess.run(["git"] + list(a), cwd=str(ws_root()), env=env,
+                                  capture_output=True, text=True, timeout=timeout)
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout).strip()[:400] or "git 失敗")
+            return proc.stdout.strip()
+
+        yield run
+
+
+def checkpoint(note: str = "") -> dict:
+    """照一張相。回傳 {"id":…} 或 {"skipped": 原因}。
+
+    **拍不到不能擋住使用者送出訊息**，所以每一條出路都是「跳過並說原因」，
+    不是丟例外。
+    """
+    if cur().ws is None:
+        return {"skipped": "還沒設定工作區"}
+    if not ws_is_git():
+        return {"skipped": "工作區不是 git repo，這則提示沒有檢查點"}
+    try:
+        with tmp_index() as git:
+            git("add", "-A", *CKPT_SKIP)
+            tree = git("write-tree")
+            prev = next((e for e in reversed(journal_read()) if e.get("tree")), None)
+            if prev and prev["tree"] == tree:
+                # 連問兩句都沒改到檔案時不要一直長新的 —— 清單會被灌滿一模一樣的列
+                return {"skipped": "跟上一個檢查點一模一樣", "tree": tree}
+            sha = git("commit-tree", tree, "-m",
+                      "zackllmgui 檢查點：" + " ".join(str(note or "").split())[:100])
+            # 沒有 ref 釘著的 commit 會被 gc 當垃圾掃掉，檢查點就變成空指標
+            git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)
+    except Exception as e:
+        return {"skipped": f"{type(e).__name__}: {e}"}
+    return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
+                              "", False, tree=tree, commit=sha),
+            "commit": sha, "tree": tree}
+
+
+def restore_tree(tree: str) -> list:
+    """把工作區變回這棵 tree 的樣子。多出來的檔案會被刪掉。回傳變動的檔名。"""
+    with tmp_index() as git:
+        git("add", "-A", *CKPT_SKIP)
+        now = git("write-tree")
+        names = [ln.split("\t", 1)[-1]
+                 for ln in git("diff", "--name-status", now, tree).splitlines() if ln.strip()]
+        # 兩棵樹的 read-tree -m 是二路合併，-u 把差異套到工作區 —— 包含**刪掉
+        # 多出來的檔案**，這是 `git checkout <tree> -- .` 做不到的那一半。
+        git("read-tree", "-m", "-u", now, tree)
+    # ponytail: 動的只有工作區，使用者的 index 沒跟著改 —— 所以他在這一輪裡
+    #           `git add` 過、而檢查點當時還不存在的檔案，會變成「暫存區裡有、
+    #           磁碟上沒有」。要一起收拾就得改寫人家的暫存區，那比這個小瑕疵糟。
+    return names
+
+
 def rewind_to(entry_id: str) -> dict:
     """把工作區退回「某一筆操作發生之前」的樣子。
 
@@ -711,6 +795,23 @@ def rewind_to(entry_id: str) -> dict:
         raise ValueError("找不到這個還原點")
 
     undone, failed = [], []
+    if entries[idx].get("tree"):
+        # 檢查點：整棵樹換回去。**只有這一條退得掉 run_shell 改的東西**——
+        # 下面那條一筆一筆退的路，只知道檔案工具記過的那幾個檔案。
+        try:
+            names = restore_tree(entries[idx]["tree"])
+            undone = [f"還原到檢查點（{len(names)} 個檔案）"] + names[:50]
+        except Exception as ex:
+            failed.append(f"檢查點還原失敗：{type(ex).__name__}: {ex}")
+        keep = entries[:idx]
+        try:
+            journal_path().write_text(
+                "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in keep),
+                encoding="utf-8")
+        except OSError:
+            pass
+        return {"undone": undone, "failed": failed, "entries": keep}
+
     for e in reversed(entries[idx:]):
         rel = e.get("path", "")
         try:
@@ -3458,6 +3559,8 @@ class Handler(BaseHTTPRequestHandler):
             self._do_restart()
         elif self.path == "/journal":
             self._do_journal()
+        elif self.path == "/checkpoint":
+            self._do_checkpoint()
         elif self.path == "/rewind":
             self._do_rewind()
         else:
@@ -3672,6 +3775,23 @@ class Handler(BaseHTTPRequestHandler):
                         "total": len(journal_read())})
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+
+    def _do_checkpoint(self) -> None:
+        """每一則使用者提示開始之前照一張相。網頁的 send() 會先叫這一支。
+
+        **一律回 200。** 拍不到快照（不是 git repo、git 出事）不能擋住使用者
+        送出訊息 —— 原因放在 skipped 裡讓介面說出來就好。
+        """
+        if not self._is_local():
+            self._json({"error": "只允許本機呼叫"}, 403)
+            return
+        try:
+            req = json.loads(self._read_body(8192) or b"{}")
+            global CURRENT_CHAT
+            CURRENT_CHAT = str(req.get("chat", ""))[:64]
+            self._json(checkpoint(str(req.get("note", ""))))
+        except Exception as e:
+            self._json({"skipped": f"{type(e).__name__}: {e}"})
 
     def _do_rewind(self) -> None:
         if not self._is_local():

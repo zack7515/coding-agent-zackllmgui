@@ -3,7 +3,7 @@
 // S.host 是「Ollama 在哪」—— 照 README 的建議把它指到 GPU 主機之後，
 // /tool、/ls、/workspace 這些還是要問**端出這個頁面的那一台**，
 // 不然檔案分頁會說「這個頁面不是本機開的」，而且工具全部打到 Ollama 去。
-const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|rules|skills|git|restore|extract|ext|mcp|sys)$/;
+const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|checkpoint|rules|skills|git|restore|extract|ext|mcp|sys)$/;
 
 function apiUrl(path) {
   if (SAME_ORIGIN && SRV_PATHS.test(path)) return location.origin + path;

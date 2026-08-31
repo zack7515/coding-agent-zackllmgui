@@ -904,6 +904,20 @@ function rewindRow(e, newest) {
     + '<span class="dir"></span><span class="tm"></span>';
   // A = 新建（Added）、M = 修改（Modified），跟 git 與 VS Code 同一套字母
   const st = row.querySelector('.st');
+  // C = 檢查點（Checkpoint），一整則提示的起點；A = 新建、M = 修改，
+  // 跟 git 與 VS Code 同一套字母。
+  if (e.tree) {
+    row.classList.add('ckpt');
+    st.textContent = 'C';
+    st.className = 'st c';
+    row.querySelector('.nm').textContent = path || '（沒有內容）';
+    row.querySelector('.dir').textContent = '這則提示之前';
+    row.querySelector('.tm').textContent = clockOf(e.ts);
+    row.title = e.ts + '　送出這則提示之前的完整快照\n「' + path + '」'
+      + (newest ? '\n最新的一筆' : '')
+      + '\n點一下把整個工作區退回這個時間點 —— 包含 run_shell 改的東西';
+    return row;
+  }
   st.textContent = created ? 'A' : 'M';
   st.className = 'st ' + (created ? 'a' : 'm');
   row.querySelector('.nm').textContent = cut >= 0 ? path.slice(cut + 1) : path;
@@ -929,9 +943,12 @@ function renderRewind(entries, total) {
   box.innerHTML = '';
   $('rwCount').textContent = entries.length;
   if (!entries.length) {
+    const git = (S.ws.git_state || {}).repo;
     box.innerHTML = '<div class="fv-empty">' + (total
       ? '這則對話還沒改過檔案（工作區裡有其他對話改的 ' + total + ' 筆）。'
-      : '還沒有改過任何檔案。') + '</div>';
+      : '還沒有改過任何檔案。')
+      + (git ? '' : '<br>工作區不是 git repo，所以每則提示的檢查點沒有建立 ——'
+             + '只有檔案工具改的會有單筆還原點。') + '</div>';
     return;
   }
   // 用本機時間組今天的日期，不要用 toISOString（那是 UTC，跨日的時候會差一天）。
@@ -956,6 +973,17 @@ function renderRewind(entries, total) {
       // 只顯示這一則卻偷偷動到別人的，那是騙人 —— 講出來讓使用者決定。
       const others = e.other_chats
         ? '\n其中 ' + e.other_chats + ' 筆是「其他對話」改的，也會一起退回去。' : '';
+      // 檢查點退的是**整個工作區**，不是清單上那幾個檔案 —— 這一輪之後多出來的
+      // 檔案會被刪掉。差別夠大，要用不同的話講清楚。
+      if (e.tree) {
+        if (!confirm('把整個工作區退回送出這則提示之前的樣子？\n\n' +
+                     e.ts + '\n「' + e.path + '」\n\n' +
+                     '這一輪之後新增的檔案會被刪掉，改過的會退回去 ——\n' +
+                     '包含 run_shell 改的（那些沒有單筆還原點）。\n' +
+                     '你的 git 分支、HEAD 與暫存區不受影響，對話內容也不受影響。')) return;
+        doRewind(e.id);
+        return;
+      }
       if (!confirm('把工作區退回這一筆之前的樣子？\n\n' +
                    e.ts + ' ' + e.tool + ' ' + e.path +
                    '\n\n會退回 ' + e.undo_count + ' 筆改動。' + others +

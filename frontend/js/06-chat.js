@@ -658,8 +658,23 @@ async function send() {
   if (c.messages.length === 1) { autoTitle(c); renderChatList(); }
   S.stick = true;
   pin();
+  await checkpoint(text);
   await runStream(c);
   finishTurn();
+}
+
+// 每一則提示先照一張相。一筆一筆的還原點只記得**檔案工具**改過的東西 ——
+// run_shell 改的、模型自己 sed 掉的、npm 裝進去的都不在裡面，而那些同樣是
+// 「我想退回去」的時候要退的。codex 與 claude code 的檢查點也是每輪一張。
+// 拍不到（不是 git repo、git 出事）就算了，絕對不能擋住送出訊息。
+async function checkpoint(note) {
+  if (!S.tools || !S.ws.path) return;
+  try {
+    await fetch(apiUrl('/checkpoint'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat: current().id, note: String(note || '').slice(0, 100) })
+    });
+  } catch (e) { /* 照不到相不是送不出訊息的理由 */ }
 }
 
 async function regenerate() {
