@@ -354,11 +354,15 @@ SKILL.md 的正文可以寫 !`git status`，`load_skill` 會把它換成現在�
 |---|---|---|---|
 | Linux | bubblewrap | 工作區以外唯讀、憑證目錄蓋掉、無網路 | ✅ 全部通過，每次多 7 ms |
 | macOS | 內建 `sandbox-exec` | 工作區以外不能寫、無網路（**讀取不擋**） | ⚠️ 沒有機器，未實測 |
-| Windows | Docker Desktop | 只掛得到工作區、無網路、資源上限 | ⚠️ 沒有機器，未實測 |
+| Windows | Docker Desktop | 只掛得到工作區、無網路、資源上限 | ✅ Windows 11 全部通過，每次約多 0.5–0.6 秒 |
 | 跨平台 | docker / podman | 同上 | ✅ 全部通過，每次多 176 ms |
 
 核心層的做法排在容器前面，因為它不換掉檔案系統 —— pytest、node、gcc、CUDA
 都還在原地，而容器裡「映像檔沒裝的就是沒有」。
+
+Windows 11 的實測環境為 Docker 28.1.1 與 NVIDIA RTX 3080：宿主機的工作區以外未掛載、
+容器 rootfs 用完即棄、憑證目錄不可見、網路關閉，`--sandbox-gpu` 開啟後容器可看到 GPU。
+這只證明隔離與裝置接入；要跑 CUDA 工作負載，映像檔仍須包含對應 runtime。
 
 `run_shell`、`run_tests`、`setup_env` 都會被包進去，**三支裡只有 `setup_env` 開網路**
 （pip 一定要連得出去，開放範圍就縮在裝套件那一步）。

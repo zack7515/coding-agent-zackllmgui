@@ -18,21 +18,20 @@ Python 3.8+，**只用標準函式庫**，不用 `pip install` 任何東西。�
 想直接按兩下 `zackllmgui.html` 也可以，只是 Ollama 那台要設 `OLLAMA_ORIGINS`，
 而且解析 PDF / Word 與本機工具用不了。兩種方式的差別見[使用手冊](manual.md#兩種開啟方式)。
 
-## 目前只確定 Linux 可以
+## 平台支援狀態
 
-開發與實測都在 Linux 上（Ubuntu 24.04 / Python 3.13 / bubblewrap）。
-Windows 的本機工具、Docker Desktop 沙盒與 GPU 接入已實測；macOS 路徑已實作但尚未實機驗證：
+Linux 與 Windows 11 都已實機驗證；macOS 路徑已實作但尚未實機驗證：
 
 | | 狀態 |
 |---|---|
 | **Linux** | ✅ 實測。工具、沙盒（bubblewrap）、C/C++ 那四條回饋線、`python -m sandbox` 全部跑過 |
+| **Windows 11** | ✅ 實測。本機工具、`cmd` 程序管理、CPU／RAM／NVIDIA GPU 資訊、Docker Desktop 沙盒與容器 GPU 全部跑過 |
 | macOS | 🛠️ 寫好了沒驗。`seatbelt` 後端走系統內建的 `sandbox-exec` |
-| Windows | 🛠️ 寫好了沒驗。沙盒走容器（Docker Desktop），編譯器認 MSVC 與 MinGW |
 
 會踩到平台差異的是**本機工具**那一塊：沙盒挑哪個後端、`run_shell` 走哪個 shell、
 編譯器怎麼呼叫、危險指令怎麼寫。純聊天（不開工作區、不開工具）跑得動 Python 就行。
 
-沒驗過的那兩條刻意寫成**失敗就退回沒有**，不會退回亂報：認不出來的編譯器直接
+尚未實測的 macOS 與 Windows C/C++ 工具鏈路徑刻意寫成**失敗就退回沒有**，不會退回亂報：認不出來的編譯器直接
 跳過語法檢查，挑不出沙盒後端就告訴你這台該裝什麼。到那台機器上先跑一次
 `python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。
 
@@ -42,9 +41,9 @@ Windows 的本機工具、Docker Desktop 沙盒與 GPU 接入已實測；macOS �
 |---|---|
 | **思考模式** | 控制項依模型能力自動變形：gpt-oss 給四段、qwen3 給開關、沒有的整組停用並**完全不送 `think` 欄位** |
 | **本機工具** | 讀檔、寫檔、列目錄、搜尋、`run_shell`、`run_tests`、`setup_env`、git、連網瀏覽 |
-| **語言支援**（Linux 實測） | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
+| **語言支援**（Linux 完整實測） | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。Windows 的一般工具流程已驗，MSVC／MinGW 的完整 C/C++ 流程尚未實測。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
-| **沙盒** | Linux 用 bubblewrap（**只有這個實測過**）、macOS 用 sandbox-exec、Windows 用容器。**預設關**，按鈕開。**顯示卡會自動接進去** |
+| **沙盒** | Linux 用 bubblewrap、macOS 用 sandbox-exec、Windows 用 Docker Desktop 容器；Linux 與 Windows 11 已實測。**預設關**，按鈕開。bwrap 自動接 GPU，容器要明確加 `--sandbox-gpu` |
 | **權限規則** | 確認卡上的「以後都放行」把這次的判斷寫成一條規則，不用每天重新點。allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
 | **專案地圖** | 開工作區時就算好「有哪些檔案、每個檔案裡有什麼」放進系統提示。模型不必再花三五輪 `list_dir`／`search_files` 猜檔名 —— 而**每一輪的成本是重吃一次整份 context** |
 | **改完自動檢查** | 模型寫完 `.py`／`.js` 自動跑 linter，錯誤直接回灌給它。不用設定、沒有開關 |
@@ -64,7 +63,7 @@ Windows 的本機工具、Docker Desktop 沙盒與 GPU 接入已實測；macOS �
 | **每個分頁各做各的** | 工作區、修改權限、自動模式、待辦、計畫、MCP 連線都**跟著分頁走** —— 兩個分頁開兩個專案不會互相蓋掉 |
 | **重開接回設定** | 那些狀態住在 `serve.py` 的行程裡，重啟就沒了；開頁面時自動接回來並告訴你接了哪幾項 |
 | **側欄可拖寬** | 左右兩側都能拖，雙擊還原，寬度記住 |
-| **還原點** | **一輪一個**：每則提示送出前照一張 git shadow commit，那一輪動過的檔案掛在底下（含 `run_shell` 改的）。點一列會先跳到你當時說的那句話再問，只動檔案不動對話 |
+| **還原點** | **一輪一個**：每則提示送出前照一張 git shadow commit，那一輪動過的檔案掛在底下（含 `run_shell` 改的）。commit 只記變更數，不寫提示、對話 id 或本機絕對路徑。點一列會先跳到你當時說的那句話再問，只動檔案不動對話 |
 | **子代理** | 把一段查找丟給另一個 context 去做，只把結論帶回來。型別是 `agents/*.md` 裡的檔案，加一種不必改程式；**工具清單由 `serve.py` 強制**，唯讀的就是唯讀的。會改檔案的跑在自己的 git worktree 裡（`.venv` 用讀的借、`node_modules` 用連的借，不必重建環境），所以可以平行跑 |
 | **子代理停得住、收得回來** | 每張卡片一顆「中斷」，或打 `/agents` 挑一個，連**後代與背景指令**一起停。改完自動 commit 到自己的分支，回報時附上 `git diff --stat` 與一句可以直接貼的 `git merge`；`serve.py` 重啟過也不會留下「沒人認得的資料夾」 |
 | **對話存 IndexedDB** | 不再卡在 `localStorage` 的 5MB；一則對話一筆，只寫改動的那一則。**資料不出這台瀏覽器**，伺服器只出算力 |
@@ -106,9 +105,11 @@ Windows 的本機工具、Docker Desktop 沙盒與 GPU 接入已實測；macOS �
 而網域指回 127.0.0.1 的那種把戲連 GET 都繞得過去）。
 **擋得住什麼、擋不住什麼**寫在 [safety/README.md](safety/README.md)，別跳過那份。
 
-順帶一提：**沙盒裡裝得動套件，也吃得到 GPU**（實測 `torch.cuda.is_available()` 在裡面是 `True`）。
-bwrap 是 namespace 層的隔離，不換掉檔案系統，宿主機的 pytest、gcc、node、CUDA 驅動本來就在那裡，
-沒有「映像檔裡沒裝」這回事。細節見 [sandbox/README.md](sandbox/README.md)。
+順帶一提：**沙盒裡裝得動套件，也吃得到 GPU**。Linux bwrap 實測
+`torch.cuda.is_available()` 是 `True`；Windows 11 的 Docker Desktop 容器也已透過
+`--sandbox-gpu` 看到 RTX 3080。bwrap 不換掉檔案系統，宿主機的 pytest、gcc、node、
+CUDA 驅動本來就在那裡；容器則必須自行準備映像檔內的工具鏈與 CUDA runtime。
+細節見 [sandbox/README.md](sandbox/README.md)。
 
 ### 支援哪些語言
 
@@ -143,10 +144,11 @@ C/C++ 專案裡 `run_tests` 與 `setup_env` **不會出現在工具清單上**�
 `ctest` 全過，`edit_file` 拿掉一個分號馬上回語法錯誤，`gcc`／`g++`／`nvcc` 與
 顯示卡在沙盒裡都看得到。
 
-> **Windows／macOS 寫好了但沒驗過。** 編譯器認 MSVC（`cl.exe` 走 `/Zs`）、
-> MinGW 與 Clang，交叉編譯器與版號（`arm-none-eabi-gcc`、`clang++-18`）也算；
-> 沙盒在 Windows 上走容器，預設映像檔沒有編譯器，用 `--sandbox-image gcc:14` 換掉。
-> 要讓容器使用 NVIDIA GPU，再加 `--sandbox-gpu`（需要 NVIDIA Container Toolkit）。
+> **Windows 11 的服務、本機工具、系統資訊與 Docker 沙盒已實測；MSVC／MinGW 的完整
+> C/C++ 流程與 macOS 尚未實機驗證。** 編譯器辨識支援 MSVC（`cl.exe` 走 `/Zs`）、
+> MinGW 與 Clang，交叉編譯器與版號（`arm-none-eabi-gcc`、`clang++-18`）也算。
+> Windows 沙盒走容器，預設映像檔沒有編譯器，用 `--sandbox-image gcc:14` 換掉；
+> NVIDIA GPU 再加 `--sandbox-gpu`（需要 NVIDIA Container Toolkit）。
 > **認不出來的編譯器一律跳過不做檢查**，所以最壞的情況是少一條回饋，不是一排誤報。
 
 ### 改完就自動檢查
@@ -283,12 +285,12 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 100 項
-python tests/test_core.py     # core/ 各模組的介面 8 項
+python tests/test_serve.py    # 後端 103 項
+python tests/test_core.py     # core/ 各模組的介面 11 項
 node   tests/test_gui.js      # 網頁 70 項
 ```
 
-兩份都不需要安裝任何東西，也不需要 Ollama 在跑。
+兩支 Python 測試只用專案本身與標準函式庫，三支都不需要 Ollama 在跑；網頁測試需要 Node.js。
 
 另外兩支是不同用途，不在這條線上：`tests/test_skills.py` 驗 `skills/` 的格式，
 `tests/test_agent.py` 需要 Ollama —— 它讓真的模型修好一個壞掉的專案，

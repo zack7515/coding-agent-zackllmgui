@@ -1215,7 +1215,8 @@ def test_checkpoint_catches_what_the_journal_misses():
     with Workspace() as ws:
         def git(*a):
             return subprocess.run(["git", "-C", str(ws)] + list(a),
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace")
 
         # Workspace 的 .git 是個空殼，git 會罵 —— 重點是**跳過而不是丟例外**：
         # 照不到相不能擋住使用者送出訊息
@@ -2455,7 +2456,8 @@ def git_repo(ws: Path) -> None:
 
 def git_out(ws: Path, *args) -> str:
     return subprocess.run(["git", "-c", "core.quotepath=false"] + list(args),
-                          cwd=ws, capture_output=True, text=True, timeout=30).stdout
+                          cwd=ws, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=30).stdout
 
 
 def test_worktree_isolates_writes():
