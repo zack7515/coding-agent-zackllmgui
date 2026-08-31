@@ -850,9 +850,8 @@ function openBrowser() {
 }
 
 /* ══════════════════════ 還原點（rewind） ══════════════════════ */
-// 備份一直都有（每次改檔案前複製一份），缺的是「先後順序」——
-// 沒有順序就只能一個檔一個檔還原，沒辦法「退回十分鐘前」。
-// serve.py 的 journal.jsonl 記的就是那個順序。
+// 一輪一個還原點：送出提示前照一張相，那一輪動過的檔案列在底下。
+// 順序記在 serve.py 的 journal.jsonl。
 function openRewind() {
   showPanel('params', true);
   showTab('hist');            // 內容由 showTab 去載，不然兩邊會各載一次
@@ -891,42 +890,63 @@ async function loadHistory() {
   }
 }
 
-// 照 VS Code 原始檔控制那一欄的排法：一行一個檔案，狀態字母在最前面，
-// 檔名、目錄（灰）、時間。新的在最上面 —— 要退回去的時候，人想的是
-// 「退到剛剛」不是「退到最早」，所以由新到舊 top-down。
+// 照 VS Code 原始檔控制那一欄的排法，新的在最上面 ——
+// 人想的是「退到剛剛」不是「退到最早」。
+// 一輪一列：C 是檢查點（這則提示的起點），點下去退整個工作區。
+// 沒有檢查點時（工作區不是 git repo）退回一次改檔案一列，A 新建、M 修改。
 function rewindRow(e, newest) {
   const row = document.createElement('div');
   row.className = 'sc-row';
-  const created = !!e.created;
   const path = String(e.path || '');
   const cut = path.lastIndexOf('/');
   row.innerHTML = '<span class="st"></span><span class="nm"></span>'
     + '<span class="dir"></span><span class="tm"></span>';
-  // A = 新建（Added）、M = 修改（Modified），跟 git 與 VS Code 同一套字母
   const st = row.querySelector('.st');
-  // C = 檢查點（Checkpoint），一整則提示的起點；A = 新建、M = 修改，
-  // 跟 git 與 VS Code 同一套字母。
+  row.querySelector('.tm').textContent = clockOf(e.ts);
   if (e.tree) {
+    const n = (e.files || []).length;
     row.classList.add('ckpt');
     st.textContent = 'C';
     st.className = 'st c';
     row.querySelector('.nm').textContent = path || '（沒有內容）';
-    row.querySelector('.dir').textContent = '這則提示之前';
-    row.querySelector('.tm').textContent = clockOf(e.ts);
-    row.title = e.ts + '　送出這則提示之前的完整快照\n「' + path + '」'
-      + (newest ? '\n最新的一筆' : '')
-      + '\n點一下把整個工作區退回這個時間點 —— 包含 run_shell 改的東西';
+    row.querySelector('.dir').textContent = n ? n + ' 個檔案' : '沒改到檔案';
+    row.title = e.ts + IS + '送出這則提示之前的快照\n「' + path + '」'
+      + (newest ? '\n最新的一輪' : '')
+      + '\n點一下把整個工作區退回這裡 —— 包含 run_shell 改的東西';
     return row;
   }
+  const created = !!e.created;
   st.textContent = created ? 'A' : 'M';
   st.className = 'st ' + (created ? 'a' : 'm');
   row.querySelector('.nm').textContent = cut >= 0 ? path.slice(cut + 1) : path;
   row.querySelector('.dir').textContent = cut > 0 ? path.slice(0, cut) : '';
-  row.querySelector('.tm').textContent = clockOf(e.ts);
-  row.title = e.ts + '　' + e.tool + '　' + path
+  row.title = e.ts + IS + e.tool + IS + path
     + (created ? '（這一次新建的）' : '（改過，有備份）')
     + (newest ? '\n最新的一筆' : '') + '\n點一下退回這一筆之前的狀態';
   return row;
+}
+
+// 檢查點底下列出那一輪動過的檔案。純資訊，點的是上面那一列。
+function fileLines(files) {
+  const box = document.createElement('div');
+  (files || []).slice(0, 40).forEach(function (f) {
+    const r = document.createElement('div');
+    r.className = 'sc-row sub';
+    r.innerHTML = '<span class="st"></span><span class="nm"></span>';
+    const st = r.querySelector('.st');
+    st.textContent = f.st;
+    st.className = 'st ' + (f.st === 'A' ? 'a' : f.st === 'D' ? 'd' : 'm');
+    r.querySelector('.nm').textContent = f.path;
+    r.title = f.path;
+    box.appendChild(r);
+  });
+  if ((files || []).length > 40) {
+    const more = document.createElement('div');
+    more.className = 'sc-row sub';
+    more.textContent = '…還有 ' + (files.length - 40) + ' 個';
+    box.appendChild(more);
+  }
+  return box;
 }
 
 // journal 存的是 "2026-08-25 14:31:46"。同一天只顯示時分秒，
@@ -970,17 +990,16 @@ function renderRewind(entries, total) {
     const row = rewindRow(e, i === 0);
     row.addEventListener('click', function () {
       // 還原一定是照時間倒著做的，所以會連帶退掉別則對話在這之後改的東西。
-      // 只顯示這一則卻偷偷動到別人的，那是騙人 —— 講出來讓使用者決定。
+      // 還原是照時間倒著做的，會連帶退掉別則對話後來改的 —— 講出來讓人決定
       const others = e.other_chats
-        ? '\n其中 ' + e.other_chats + ' 筆是「其他對話」改的，也會一起退回去。' : '';
-      // 檢查點退的是**整個工作區**，不是清單上那幾個檔案 —— 這一輪之後多出來的
-      // 檔案會被刪掉。差別夠大，要用不同的話講清楚。
+        ? '\n其中 ' + e.other_chats + ' 筆是「其他對話」的，也會一起退回去。' : '';
       if (e.tree) {
-        if (!confirm('把整個工作區退回送出這則提示之前的樣子？\n\n' +
+        const n = (e.files || []).length;
+        if (!confirm('把整個工作區退回送出這則提示之前？\n\n' +
                      e.ts + '\n「' + e.path + '」\n\n' +
-                     '這一輪之後新增的檔案會被刪掉，改過的會退回去 ——\n' +
-                     '包含 run_shell 改的（那些沒有單筆還原點）。\n' +
-                     '你的 git 分支、HEAD 與暫存區不受影響，對話內容也不受影響。')) return;
+                     '這一輪動過的 ' + n + ' 個檔案會退回去，之後新增的會刪掉 ——\n' +
+                     '包含 run_shell 改的。共退 ' + e.undo_count + ' 輪。' + others +
+                     '\n你的 git 分支、HEAD、暫存區與對話內容都不受影響。')) return;
         doRewind(e.id);
         return;
       }
@@ -991,6 +1010,7 @@ function renderRewind(entries, total) {
       doRewind(e.id);
     });
     box.appendChild(row);
+    if (e.tree && (e.files || []).length) box.appendChild(fileLines(e.files));
   });
 }
 

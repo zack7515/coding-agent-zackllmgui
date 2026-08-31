@@ -680,39 +680,42 @@ def journal_read() -> list:
 
 
 def journal_for(chat: str) -> list:
-    """某一則對話改過的東西。
+    """這則對話的還原點。有檢查點就一輪一列，沒有就退回「一次改檔案一列」。
 
-    每一筆多帶兩個數字，因為**還原一定是照時間倒著做的**：
-    退回某一筆之前，那之後的所有改動都要退掉 —— 包含別則對話改的。
-    只給這則對話的清單卻偷偷動到別人的東西，那是騙人；
-    所以把「總共會退幾筆」與「其中幾筆是別的對話」一起送出去，確認框寫得出實話。
+    undo_count／other_chats 是給確認框用的：還原一定是照時間倒著做，退回某一點
+    會連別則對話後來改的一起退掉，那要講出來。
     """
     entries = journal_read()
+    rows = [e for e in entries if e.get("tree")] or entries
     out = []
-    for i, e in enumerate(entries):
+    for i, e in enumerate(rows):
         if chat and e.get("chat") and e["chat"] != chat:
             continue
-        rest = entries[i:]
-        out.append(dict(e, undo_count=len(rest),
+        extra = {}
+        if e.get("tree"):
+            # 下一個檢查點是**全部裡面**的下一個，不是這則對話的下一個：
+            # 兩個檢查點之間改的就是那一輪改的，跟誰問的無關
+            nxt = rows[i + 1]["tree"] if i + 1 < len(rows) else ""
+            try:
+                extra["files"] = ckpt_files(e["tree"], nxt)
+            except Exception:
+                extra["files"] = []
+        rest = rows[i:]
+        out.append(dict(e, **extra, undo_count=len(rest),
                         other_chats=sum(1 for x in rest
                                         if x.get("chat") and x.get("chat") != e.get("chat"))))
     return out
 
 
 # ── 每則提示一個檢查點 ──────────────────────────────────────────── #
-# 上面那套還原點是「一次改檔案記一筆」，而且**只有三支檔案工具會記**——
-# `run_shell` 改的、模型自己 sed 掉的、npm 裝進去的，一個字都沒進去。
-# 檢查點補的是另一半：每一則使用者提示開始之前，把整個工作區照一張相。
+# 上面那套還原點只有三支檔案工具會記，`run_shell` 改的一個字都沒進去。
+# 檢查點補這一段：每則提示送出前把整個工作區照一張相，一輪一個還原點。
 #
-# 做法是 git 的 shadow commit：用一份**臨時 index** 把工作區寫成一棵 tree，
-# `commit-tree` 成一個沒有 parent 的孤兒 commit，再用 refs/zackllmgui/ 底下的
-# ref 釘住不讓 gc 掃掉。HEAD、分支、使用者的暫存區三個都沒動 ——
-# 這是關鍵：同一件事用 `git stash` 或 `git checkout` 做會蓋掉人家暫存的東西。
+# 做法是 git 的 shadow commit —— 臨時 index 寫成 tree、commit-tree 成孤兒
+# commit、用 ref 釘住不讓 gc 掃掉。HEAD、分支、使用者的暫存區都沒動，
+# 這是前提：同一件事用 stash 或 checkout 做會蓋掉人家暫存的東西。
 #
-# ponytail: 不是 git repo 就不照相，介面直說。要在非 git 的資料夾也能用得
-#           每則提示複製一次整個工作區，那個成本比它值的錢貴。
-#           `.gitignore` 忽略的檔案也不在快照裡（.venv、node_modules 本來就
-#           不該進去），代價是模型寫進被忽略路徑的東西退不回來。
+# ponytail: 不是 git repo 就不照相，介面直說。.gitignore 忽略的也不在快照裡。
 CKPT_REF = "refs/zackllmgui/ckpt"
 CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR)
 
@@ -723,7 +726,7 @@ def ws_is_git() -> bool:
 
 @contextlib.contextmanager
 def tmp_index():
-    """在一份用完就丟的 index 上跑 git。使用者的 .git/index 完全不會被碰到。"""
+    """在一份用完就丟的 index 上跑 git，使用者的 .git/index 不會被碰到。"""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
 
@@ -737,11 +740,38 @@ def tmp_index():
         yield run
 
 
+def ckpt_msg(note: str, files: list) -> str:
+    """檢查點的 commit 訊息。`git log refs/zackllmgui/ckpt/*` 要讀得懂。"""
+    note = " ".join(str(note or "").split())
+    head = f"檢查點：{note[:60]}" if note else "檢查點"
+    body = [head, ""]
+    if note:
+        body += ["提示：" + note[:800], ""]
+    if files:
+        body += [f"上一輪改了 {len(files)} 個檔案："]
+        body += [f"  {f['st']} {f['path']}" for f in files[:40]]
+        if len(files) > 40:
+            body.append(f"  …還有 {len(files) - 40} 個")
+        body.append("")
+    body += [f"對話：{CURRENT_CHAT or '（未指定）'}", f"工作區：{ws_root()}"]
+    return "\n".join(body)
+
+
+def ckpt_files(tree: str, nxt: str = "") -> list:
+    """這個檢查點之後改了哪些檔案。nxt 留空就比到現在的工作區。"""
+    with tmp_index() as git:
+        if not nxt:
+            git("add", "-A", *CKPT_SKIP)
+            nxt = git("write-tree")
+        rows = git("diff", "--name-status", tree, nxt).splitlines()
+    return [{"st": r.split("\t")[0][:1], "path": r.split("\t")[-1]}
+            for r in rows if "\t" in r]
+
+
 def checkpoint(note: str = "") -> dict:
     """照一張相。回傳 {"id":…} 或 {"skipped": 原因}。
 
-    **拍不到不能擋住使用者送出訊息**，所以每一條出路都是「跳過並說原因」，
-    不是丟例外。
+    拍不到不能擋住使用者送出訊息，所以每條出路都是「跳過並說原因」，不丟例外。
     """
     if cur().ws is None:
         return {"skipped": "還沒設定工作區"}
@@ -753,12 +783,11 @@ def checkpoint(note: str = "") -> dict:
             tree = git("write-tree")
             prev = next((e for e in reversed(journal_read()) if e.get("tree")), None)
             if prev and prev["tree"] == tree:
-                # 連問兩句都沒改到檔案時不要一直長新的 —— 清單會被灌滿一模一樣的列
                 return {"skipped": "跟上一個檢查點一模一樣", "tree": tree}
-            sha = git("commit-tree", tree, "-m",
-                      "zackllmgui 檢查點：" + " ".join(str(note or "").split())[:100])
-            # 沒有 ref 釘著的 commit 會被 gc 當垃圾掃掉，檢查點就變成空指標
-            git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)
+            # 訊息裡帶上一輪改了什麼：這一相拍的就是那一輪的結果
+            done = ckpt_files(prev["tree"], tree) if prev else []
+            sha = git("commit-tree", tree, "-m", ckpt_msg(note, done))
+            git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)   # 沒 ref 釘著會被 gc 掃掉
     except Exception as e:
         return {"skipped": f"{type(e).__name__}: {e}"}
     return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
@@ -767,18 +796,17 @@ def checkpoint(note: str = "") -> dict:
 
 
 def restore_tree(tree: str) -> list:
-    """把工作區變回這棵 tree 的樣子。多出來的檔案會被刪掉。回傳變動的檔名。"""
+    """把工作區變回這棵 tree 的樣子，多出來的檔案一起刪掉。回傳變動的檔名。"""
     with tmp_index() as git:
         git("add", "-A", *CKPT_SKIP)
         now = git("write-tree")
         names = [ln.split("\t", 1)[-1]
                  for ln in git("diff", "--name-status", now, tree).splitlines() if ln.strip()]
-        # 兩棵樹的 read-tree -m 是二路合併，-u 把差異套到工作區 —— 包含**刪掉
-        # 多出來的檔案**，這是 `git checkout <tree> -- .` 做不到的那一半。
+        # 兩棵樹的 read-tree -m -u 會連多出來的檔案一起刪掉，
+        # 那是 `git checkout <tree> -- .` 做不到的那一半
         git("read-tree", "-m", "-u", now, tree)
-    # ponytail: 動的只有工作區，使用者的 index 沒跟著改 —— 所以他在這一輪裡
-    #           `git add` 過、而檢查點當時還不存在的檔案，會變成「暫存區裡有、
-    #           磁碟上沒有」。要一起收拾就得改寫人家的暫存區，那比這個小瑕疵糟。
+    # ponytail: 只動工作區不動 index，所以這輪 git add 過的新檔會變成
+    #           「暫存區有、磁碟沒有」。要收拾得改寫人家的暫存區，那更糟。
     return names
 
 
@@ -796,8 +824,7 @@ def rewind_to(entry_id: str) -> dict:
 
     undone, failed = [], []
     if entries[idx].get("tree"):
-        # 檢查點：整棵樹換回去。**只有這一條退得掉 run_shell 改的東西**——
-        # 下面那條一筆一筆退的路，只知道檔案工具記過的那幾個檔案。
+        # 檢查點：整棵樹換回去。只有這一條退得掉 run_shell 改的東西
         try:
             names = restore_tree(entries[idx]["tree"])
             undone = [f"還原到檢查點（{len(names)} 個檔案）"] + names[:50]
@@ -1946,10 +1973,8 @@ def repo_map() -> str:
             key = (st.st_mtime_ns, st.st_size)
         except OSError:
             continue
-        # 大小要一起當快取鍵：檔案系統的 mtime 有顆粒度，同一格裡改兩次
-        # （模型連著兩次 edit_file 就會發生）拿到的是**同一個 mtime**，
-        # 只看 mtime 的話第二次的改動不會進地圖。實測 ext4 上兩次連續寫入
-        # 連 st_mtime_ns 都一模一樣，所以換成 ns 也救不了。
+        # 大小要一起當鍵：mtime 有顆粒度，同一格裡改兩次（模型連著兩次
+        # edit_file）拿到同一個值，ext4 上連 st_mtime_ns 都一樣
         hit = _MAP_CACHE.get(f)
         if not hit or hit[0] != key:
             hit = (key, file_symbols(f))
@@ -3176,9 +3201,8 @@ def run_tool(name: str, args: dict) -> str:
         raise PermissionError("這個工具需要先設定工作區資料夾")
     if name in WRITE_TOOLS and not cur().write:
         raise PermissionError("檔案修改沒有開啟（介面：功能與工具 → 修改檔案）")
-    # 計畫模式跟工具白名單同一個道理：`tool_defs()` 那一層只是「不要讓它看到」，
-    # 送到 /tool 的是一個字串，模型幻覺出 write_file 就繞過去了。核准是使用者按的，
-    # 所以要在伺服器這一端認。
+    # 跟工具白名單同一個道理：tool_defs() 那層只是「不要讓它看到」，
+    # 模型幻覺出 write_file 送到 /tool 就繞過去了
     if name in WRITE_TOOLS and cur().plan["on"] and not cur().plan["approved"]:
         raise PermissionError("計畫模式：計畫還沒核准，先用 submit_plan 送出計畫")
     # deny 規則在伺服器這一端擋。只在瀏覽器擋的話，那不是邊界是提醒。
@@ -3777,11 +3801,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
 
     def _do_checkpoint(self) -> None:
-        """每一則使用者提示開始之前照一張相。網頁的 send() 會先叫這一支。
-
-        **一律回 200。** 拍不到快照（不是 git repo、git 出事）不能擋住使用者
-        送出訊息 —— 原因放在 skipped 裡讓介面說出來就好。
-        """
+        """每則提示送出前照一張相。一律回 200 —— 拍不到不能擋住送訊息，
+        原因放在 skipped 裡讓介面說。"""
         if not self._is_local():
             self._json({"error": "只允許本機呼叫"}, 403)
             return

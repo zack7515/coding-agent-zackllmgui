@@ -1144,8 +1144,18 @@ def test_checkpoint_catches_what_the_journal_misses():
         serve.run_tool("run_shell", {"command": "echo 'y = 2' >> pkg/calc.py"})
         serve.run_tool("write_file", {"path": "new.py", "content": "新檔\n"})
         assert "y = 2" in (ws / "pkg" / "calc.py").read_text()
-        # run_shell 改的東西**不會**有單筆還原點 —— 檢查點補的就是這一段
+        # run_shell 改的沒有單筆還原點 —— 檢查點補的就是這一段
         assert [e["tool"] for e in serve.journal_read()] == ["checkpoint", "write_file"]
+
+        # 一輪一列，這一輪動過的檔案掛在那一列底下（run_shell 改的也在）
+        rows = serve.journal_for(serve.CURRENT_CHAT)
+        assert len(rows) == 1, rows
+        assert sorted((f["st"], f["path"]) for f in rows[0]["files"]) == [
+            ("A", "new.py"), ("M", "pkg/calc.py")]
+
+        # commit 訊息要讀得懂：git log refs/zackllmgui/ckpt/* 是最後一條救命索
+        msg = git("log", "-1", "--format=%B", first["commit"]).stdout
+        assert "幫我改 calc.py" in msg and "工作區" in msg, msg
 
         out = serve.rewind_to(first["id"])
         assert not out["failed"], out["failed"]

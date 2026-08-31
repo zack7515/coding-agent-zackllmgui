@@ -1063,12 +1063,10 @@ function openHostHelp() {
 
 function openRewindHelp() {
   openHelp('還原檔案', [
-    ['兩種還原點', 'C（檢查點）＝送出每一則提示之前的完整快照，退回去是整個工作區；'
-      + 'M／A＝單獨一次改檔案，只退那一個檔案。'],
-    ['為什麼要有 C', '單筆還原點只有 write_file／edit_file／delete_file 會留。'
-      + '模型用 run_shell 下 sed、npm、>> 改的東西不在裡面 —— 檢查點補的就是這一段。'],
-    ['C 需要 git', '快照是 git 的 shadow commit（用臨時 index 做，你的 HEAD、分支、'
-      + '暫存區都不會被動到）。工作區不是 git repo 就只有單筆還原點。'],
+    ['一輪一個還原點', '每則提示送出前照一張相（C），那一輪動過的檔案列在底下。'
+      + '點 C 就把整個工作區退回那一輪之前 —— 包含 run_shell 改的東西。'],
+    ['要有 git', '快照是 git 的 shadow commit，用臨時 index 做，你的 HEAD、分支、'
+      + '暫存區都不會被動到。不是 git repo 就只有檔案工具改的那幾筆。'],
     ['不會動到什麼', '只動工作區裡的檔案。對話一個字都不會變，所以還原之後'
       + '模型仍然記得它做過什麼。'],
     ['紀錄放在哪', '工作區的 .zackllmgui-backup/journal.jsonl，跟備份放在一起。']

@@ -663,10 +663,8 @@ async function send() {
   finishTurn();
 }
 
-// 每一則提示先照一張相。一筆一筆的還原點只記得**檔案工具**改過的東西 ——
-// run_shell 改的、模型自己 sed 掉的、npm 裝進去的都不在裡面，而那些同樣是
-// 「我想退回去」的時候要退的。codex 與 claude code 的檢查點也是每輪一張。
-// 拍不到（不是 git repo、git 出事）就算了，絕對不能擋住送出訊息。
+// 每則提示先照一張相：一輪一個還原點，退得掉 run_shell 改的東西。
+// 拍不到就算了，不能擋住送出訊息。
 async function checkpoint(note) {
   if (!S.tools || !S.ws.path) return;
   try {
