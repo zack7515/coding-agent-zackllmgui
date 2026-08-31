@@ -303,13 +303,9 @@ function applyAgentState(info) {
 }
 
 // serve.py 的程式碼被改過就自己重開，然後重整頁面。
-//
-// 為什麼需要：網頁每次重整都是新的（build.py 每次重讀 frontend/），Python 卻凍在
-// 啟動那一刻。「頁面是新的、serve.py 是舊的」害過兩次 —— 一次是網頁送了新的開關
-// 而舊的 serve.py 靜靜忽略，一次是沙盒的 GPU 修好了、跑著的行程還是舊模組，
-// 症狀是「明明改好了卻還是不能用」，而且完全看不出原因。
-//
-// 跑到一半不重開：重啟會把正在跑的工具一起殺掉。等它閒下來再說。
+// 網頁每次重整都是新的（build.py 重讀 frontend/），Python 卻凍在啟動那一刻。
+// 「頁面新、serve.py 舊」害過兩次，症狀都是「明明改好了卻還是不能用」。
+// 跑到一半不重開 —— 重啟會把正在跑的工具一起殺掉。
 async function checkSourceChanged() {
   if (S.restarting || S.streaming) return;
   let data;

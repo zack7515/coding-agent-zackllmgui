@@ -169,24 +169,19 @@ const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
 // （沒有東西會來收），所以認的是這一句而不是「有沒有被 block」。
 const RUNNING_HINT = '跑到一半也可以打字，Enter 會排隊，這一輪跑完就送出';
 
-// `@資料夾/` 一次附整個目錄的上限。**一定要有上限**：一個 node_modules
-// 就足以把 context 灌爆，而且是在使用者按下 Enter 之後才發現。
-// 超過就停下來並且**講清楚少了哪幾個**，不要靜靜截斷。
-// 連不上就自動重試。Ollama 在載入大模型或正在服務別的請求時會拒絕連線，
-// 那種失敗過幾秒就好了 —— 原本是直接丟一張錯誤卡，人得自己重送一次。
-// 「連不上」的提示。**同時是「這種擋法可以被重試機制接手」的判斷依據** ——
-// 沒有這一條的話，Ollama 掛掉時連送都送不出去，重試永遠沒機會跑，
-// 而「連不上」正是最需要重試的情況（模型正在載入、服務剛重啟）。
-// 一輪跑完之後留在對話裡的那一行。**per-message 的統計看不出這個** ——
-// 那裡寫的是「這一次呼叫模型花了幾秒」，一輪十幾次呼叫加上工具執行時間，
-// 加起來是完全不同的數字。長任務要看的是這個。
+// 一輪跑完留在對話裡的那一行。per-message 的統計看不出這個 —— 那裡寫的是
+// 「這一次呼叫模型花了幾秒」，一輪十幾次呼叫加上工具時間是另一個數字。
 function turnLine(t) {
   if (!t) return '';
   return '這一輪 ' + fmtElapsed(t.ms) + ' · ' + t.rounds + ' 輪 · '
     + t.calls + ' 次工具 · ' + fmtTokens(t.tokens) + ' tokens';
 }
 
+// 同時是「這種擋法可以被重試接手」的判斷依據 —— 沒有這一條，Ollama 掛掉時
+// 連送都送不出去，而「連不上」正是最需要重試的情況（模型正在載入、剛重啟）。
 const CONN_HINT = '尚未連線，無法送出';
+// 連不上就自動重試：Ollama 載入大模型或正在服務別的請求時會拒絕連線，
+// 那種失敗過幾秒就好了。
 const RETRY_MAX = 4;
 const RETRY_BASE_MS = 2000;
 
@@ -283,17 +278,12 @@ function currentTodo(todos) {
   return t ? t.text : '';
 }
 
-// 「模型說做完了」的那一刻要攔一次的依據。
-// 對照商用 agent 的 Stop hook：它的回傳可以帶 additionalContext，
-// schema 原文寫「the conversation continues so the model can act on it」——
-// 也就是模型要停下來時還能被推回去繼續。這裡不做成可設定的 hook（那個拿掉了），
-// 條件寫死成一條：**寫了測試卻一次都沒跑過**。
+// 「模型說做完了」的那一刻要攔一次的依據，條件寫死成一條：寫了測試卻一次都沒跑過。
+// 刻意不做「改了程式就要跑測試」—— 那在沒有測試的專案上永遠是誤報，
+// 而誤報的自動提醒最後一定會被關掉。
 //
-// 刻意不做「改了程式就要跑測試」：那條在沒有測試的專案上永遠是誤報，
-// 而誤報的自動提醒最後一定會被關掉。寫了測試沒跑，沒有第二種解釋。
-// 這兩條不折行，而且不能以 \/ 收尾：tests/test_gui.js 的 grab() 只吃得下一行
-// 寫完的 const，而且會把 // 之後當成行尾註解砍掉 —— 原本結尾是 tests?\//i，
-// 那個 \// 會被當成註解起點，抓回去的正規表示式就少了收尾的斜線。
+// 這兩條不折行也不能以 \/ 收尾：tests/test_gui.js 的 grab() 只吃一行寫完的 const，
+// 而且會把 // 之後當成行尾註解砍掉。
 const TEST_FILE_RE = /(^|\/)tests?\/|(^|\/)(test_[^/]+\.py|[^/]+_test\.(py|go|rb)|[^/]+\.(test|spec)\.[jt]sx?)$/i;
 const TEST_CMD_RE = /\b(pytest|unittest|jest|vitest|mocha|ava|go test|cargo test|npm (run )?test|yarn test|pnpm test)\b/i;
 

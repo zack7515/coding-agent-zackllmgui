@@ -60,6 +60,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))          # tools/ 跟 serve.py 放在一起
 
 import sandbox
+from core import repomap, sysinfo
+from core.cmdrisk import RISKY_CMDS, canon, command_risk
+from core.extract import extract_text
 from tools import browser
 from tools.schemas import TOOL_SCHEMAS
 PAGE = HERE / "zackllmgui.html"
@@ -108,14 +111,11 @@ PROJECT_MD_LIMIT = 6000
 
 
 class Session:
-    """一個瀏覽器分頁的狀態。
+    """一個瀏覽器分頁的狀態（工作區、寫入權、自動模式、待辦、計畫）。
 
-    工作區、能不能改檔案、自動模式、待辦、計畫這五樣**不可以是全域的**——
-    兩個分頁各開一個專案時，全域一份會讓 A 分頁的 write_file 靜靜寫進 B 的
-    資料夾，連個徵兆都沒有。分頁每個請求都帶 X-Tab，這裡照它找回自己那一份。
-
-    其餘的（工具總開關、沙盒、連網、MCP、背景指令）仍然是整個行程一份：
-    那些是使用者對「這台 serve.py」授的權，不是某個分頁的工作內容。
+    這五樣不能是全域的：兩個分頁各開一個專案時，A 的 write_file 會靜靜寫進
+    B 的資料夾。分頁每個請求都帶 X-Tab，照它找回自己那一份。
+    工具開關、沙盒、連網、MCP、背景指令仍是行程一份 —— 那是對這台服務授的權。
     """
     __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "agents", "seen")
 
@@ -162,14 +162,13 @@ TRUST_REMOTE = False               # --trust-remote：非本機的瀏覽器也�
 # 那跟「讀本機檔案」是不同性質的權限，該由使用者自己按下去。
 ALLOW_BROWSER = False
 
-# 沙盒：把 run_shell / run_tests / setup_env 丟進容器跑。
-# run_shell 是唯一跑得出工作區的工具 —— 檔案工具有 ws_path() 擋著，它沒有。
-# 預設關的理由跟連網瀏覽一樣，但更硬：要先裝 docker 或 podman，
-# 而這個專案的賣點是零相依。開得起來才顯示得出來，開不起來會講原因。
-# 網頁那一端的自動模式（off／read／edit／full／ws）。後端**不用它決定放不放行**
-# —— 那一層在瀏覽器（autoApprove）與允許規則（rule_match）。這裡只用來決定
-# 系統提示怎麼寫：原本一律寫「每一次呼叫都會先讓使用者確認，所以一次只叫一個
-# 工具」，那句話在自動模式下是假的，而且直接讓讀三個檔變成三輪。
+# 沙盒：把 run_shell / run_tests / setup_env 關進跑不出工作區的地方。
+# run_shell 是唯一跑得出去的工具 —— 檔案工具有 ws_path() 擋著，它沒有。
+# 預設關：要先裝 bubblewrap／docker，而這個專案的賣點是零相依。
+
+# 自動模式（off／read／edit／full／ws）。後端**不用它決定放不放行** ——
+# 那一層在 autoApprove() 與 rule_match()。這裡只決定系統提示怎麼寫：
+# 「每一次呼叫都會先讓使用者確認」那句話在自動模式下是假的。
 AUTO_MODES = ("off", "read", "edit", "full", "ws")
 ALLOW_SANDBOX = False
 
@@ -184,14 +183,10 @@ MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_LINE_CHARS = 4000              # 單行上限。minified JS 或 base64 一行就好幾 MB
 
 # ── 背景指令 ──────────────────────────────────────────────────── #
-# run_shell 原本只有 30 秒：npm install、cargo build、docker build、
-# 一次資料庫遷移，沒有一個跑得完。而且它是同步的，跑的時候整個 agent 迴圈
-# 都卡在那裡。背景版把程序交給一條讀取執行緒，工具立刻回一個 id，
-# 模型可以先去做別的，之後用 check_job 收。
-#
-# 這推翻了 tech.md〈長指令為什麼沒做 job API〉的結論。那個結論的前提是
-# 「每次工具呼叫都要人確認，所以人一定在旁邊看著」—— 自動模式可以放到不問，
-# 前提就不成立了。
+# run_shell 只有 30 秒，npm install、cargo build 都跑不完，而且同步的時候
+# 整個 agent 迴圈卡在那裡。背景版交給一條讀取執行緒，立刻回一個 id。
+# 這推翻了 tech.md〈長指令為什麼沒做 job API〉—— 那個結論的前提是
+# 「人一定在旁邊看著」，自動模式讓前提不成立了。
 BG_TIMEOUT = 3600                  # 背景指令的上限，一小時
 BG_MAX = 8                         # 同時最多這麼多條，忘了收的不會無限累積
 # check_job 預設等一下再回話。實測過不等的版本：模型每兩秒問一次，
@@ -259,62 +254,6 @@ def normalize(host: str) -> str:
     if not host.startswith(("http://", "https://")):
         host = "http://" + host
     return host
-
-
-# ══════════════════════ 檔案解析 ══════════════════════ #
-
-def _pdf_text(data: bytes) -> str:
-    """PDF 轉文字。優先用系統的 pdftotext，沒有才退回 pypdf。
-
-    兩個都沒有就明講缺什麼，不要丟一個看不懂的例外。
-    """
-    exe = shutil.which("pdftotext")
-    if exe:
-        proc = subprocess.run([exe, "-layout", "-", "-"], input=data,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-        if proc.returncode == 0:
-            return proc.stdout.decode("utf-8", "replace")
-    try:
-        import pypdf
-    except ImportError:
-        raise RuntimeError(
-            "這台機器沒有 PDF 解析工具。二選一：\n"
-            "  sudo apt install poppler-utils   （Windows：choco install poppler）\n"
-            "  pip install pypdf") from None
-    reader = pypdf.PdfReader(io.BytesIO(data))
-    return "\n\n".join((page.extract_text() or "") for page in reader.pages)
-
-
-def _docx_text(data: bytes) -> str:
-    """.docx / .pptx / .odt 都是 zip 裡的 XML，標籤拔掉就是文字。
-
-    ponytail: 正規表示式拔標籤，不做樣式與表格；要完整版面就換 python-docx。
-    """
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        names = [n for n in z.namelist()
-                 if n in ("word/document.xml", "content.xml")
-                 or (n.startswith("ppt/slides/slide") and n.endswith(".xml"))]
-        if not names:
-            raise RuntimeError("這個 zip 裡沒有找到文件內容（不是 docx / odt / pptx？）")
-        parts = []
-        for name in sorted(names):
-            xml = z.read(name).decode("utf-8", "replace")
-            xml = re.sub(r"</w:p>|</text:p>|</a:p>", "\n", xml)
-            xml = re.sub(r"<[^>]+>", "", xml)
-            parts.append(xml)
-    text = "".join(parts)
-    text = (text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&quot;", '"').replace("&apos;", "'"))
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-def extract_text(filename: str, data: bytes) -> str:
-    ext = Path(filename or "").suffix.lower()
-    if ext == ".pdf":
-        return _pdf_text(data)
-    if ext in (".docx", ".odt", ".pptx"):
-        return _docx_text(data)
-    return data.decode("utf-8", "replace")
 
 
 # ══════════════════════ 工作區 ══════════════════════ #
@@ -398,10 +337,9 @@ def ws_walk():
 def detect_python() -> list:
     """找出這個專案該用哪個 python 跑測試。順序：.venv → venv → uv → poetry → 系統。
 
-    在子代理的 worktree 裡先找自己的，找不到就用**主 repo 的** —— worktree 是
-    `git worktree add` 開出來的乾淨 checkout，`.venv` 不在版控裡所以不會跟過去。
-    不接這一段的話，每個 work 子代理都要先花好幾輪 setup_env 重建一份一模一樣的
-    環境（而且每份都佔磁碟）。venv 的 site-packages 是絕對路徑，從哪個目錄跑都算數。
+    子代理的 worktree 裡先找自己的，找不到用**主 repo 的** —— `.venv` 不在版控裡，
+    不會跟著 worktree 過去，不接這一段每個子代理都要重建一份一樣的環境。
+    venv 的 site-packages 是絕對路徑，從哪個目錄跑都算數。
     """
     rec = getattr(_CUR, "agent", None)
     roots = [ws_root()]
@@ -708,14 +646,10 @@ def journal_for(chat: str) -> list:
 
 
 # ── 每則提示一個檢查點 ──────────────────────────────────────────── #
-# 上面那套還原點只有三支檔案工具會記，`run_shell` 改的一個字都沒進去。
-# 檢查點補這一段：每則提示送出前把整個工作區照一張相，一輪一個還原點。
-#
-# 做法是 git 的 shadow commit —— 臨時 index 寫成 tree、commit-tree 成孤兒
-# commit、用 ref 釘住不讓 gc 掃掉。HEAD、分支、使用者的暫存區都沒動，
-# 這是前提：同一件事用 stash 或 checkout 做會蓋掉人家暫存的東西。
-#
-# ponytail: 不是 git repo 就不照相，介面直說。.gitignore 忽略的也不在快照裡。
+# 上面那套只有三支檔案工具會記，run_shell 改的一個字都沒進去。這裡一輪照一張相。
+# 做法是 git 的 shadow commit：臨時 index 寫成 tree、commit-tree 成孤兒 commit、
+# 用 ref 釘住。HEAD、分支、使用者的暫存區都沒動 —— 用 stash 或 checkout 會蓋掉。
+# ponytail: 不是 git repo 就不照相，.gitignore 忽略的也不在快照裡。
 CKPT_REF = "refs/zackllmgui/ckpt"
 CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR)
 
@@ -892,16 +826,10 @@ def unified(old: str, new: str, name: str, labels=("現在", "改後")) -> str:
 # ══════════════════════ 工具（給模型呼叫） ══════════════════════ #
 
 # ── 檔案讀過沒有／讀完之後被改過沒有 ─────────────────────────── #
-# edit_file 的 old 對不上時，原本只會說「找不到要取代的內容」。模型看到這句
-# 的反應是「換個字串再試一次」，可是真正的原因常常是**檔案在它讀過之後被改了**
-# （使用者在編輯器裡動了、或它自己剛寫過）。它會一直換字串，然後撞上前端的
-# 連續失敗上限，白燒兩輪。
-#
-# 所以這裡記一份「讀的時候檔案長什麼樣」，錯誤訊息才分得出是哪一種失敗。
-# 有些 agent 是用同一份狀態直接**擋下**未讀先改；這裡不擋 —— old 要完全吻合
-# 本來就擋住了錯誤的修改，多擋一層只會讓猜對的情況也不能改。這裡只換訊息。
-# ponytail: 一個永遠不清的 dict，鍵是絕對路徑。上限是「讀過幾個檔案」，
-#           一次 session 幾百筆，不值得做淘汰。真的要淘汰再換 OrderedDict。
+# edit_file 的 old 對不上時只說「找不到要取代的內容」，模型的反應是換個字串再試，
+# 但真正的原因常常是檔案在它讀過之後被改了。這裡記一份「讀的時候長什麼樣」，
+# 讓錯誤訊息分得出是哪一種失敗。只換訊息不擋 —— old 要完全吻合本來就擋住了。
+# ponytail: 永遠不清的 dict，一次 session 幾百筆，不值得做淘汰。
 READ_STATE = {}          # 絕對路徑 -> (mtime_ns, size)
 
 
@@ -969,10 +897,9 @@ def glob_ok(f: Path, glob: str) -> bool:
 def rg_rows(pattern: str):
     """用 ripgrep 掃一遍，回傳 [(相對路徑, 行號, 內容)]。用不了就回 None。
 
-    只拿 rg 當**快速的候選清單產生器**，邊界還是原本那一支：每一筆都要再過
-    ws_path()，所以 .git／.venv／.env 不會因為換了掃描器就漏出去。
-    這是這個專案既有的「裝了就用」慣例（ruff / eslint 也是這樣）——
-    沒裝 rg 就走下面的純 Python 迴圈，不會變成必要相依。
+    只拿 rg 當候選清單產生器，邊界還是 ws_path()：每一筆都要再過一次，
+    .git／.venv／.env 不會因為換了掃描器就漏出去。
+    沒裝就走下面的純 Python 迴圈 —— 跟 ruff／eslint 一樣是「裝了就用」。
     """
     # PATH 上沒有的話還可以指過去：VSCode 與幾套 agent 擴充都自帶一份 rg，
     # 但那份不在 PATH 上（實測 `rg` 只是 shell function，subprocess 看不到）。
@@ -1002,10 +929,8 @@ def rg_rows(pattern: str):
 def _tool_search_files(pattern: str = "", glob: str = "") -> str:
     """在工作區裡找字串，只回命中的那幾行 —— 整檔讀進去會把 context 吃光。
 
-    **只給 glob 不給 pattern＝照檔名找檔案。** 在這之前沒有這個能力：
-    search_files 一定要給內容 regex、list_dir 一次只看一層，所以
-    「這個專案的測試檔在哪」要走三四輪 list_dir。而每一輪都要模型重新吃
-    一次整份 context —— 那是這個介面最貴的東西。
+    **只給 glob 不給 pattern＝照檔名找檔案。** 沒有這個的話「測試檔在哪」
+    要走三四輪 list_dir，而每一輪都要模型重吃一次整份 context。
     """
     if not pattern:
         if not glob:
@@ -1057,14 +982,10 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
 
 
 def _tool_delete_file(path: str) -> str:
-    """刪掉工作區裡的一個檔案。**先備份、記進 journal，所以倒得回來。**
+    """刪掉工作區裡的一個檔案。先備份、記進 journal，所以倒得回來。
 
-    為什麼要有這一支：在它之前，模型唯一的刪檔手段是 run_shell 的 rm ——
-    而那條路沒有備份、沒有 journal、還原點救不回來。也就是說**最該有還原點
-    的操作，剛好是唯一沒有的那一個**。順便讓「工作區內全自動」少一個存在的
-    理由：rm 那條風險路徑模型現在根本不必走。
-
-    只刪檔案不刪資料夾：整包刪掉沒辦法一份一份備份，那種事請自己在終端機做。
+    在它之前模型只能用 `rm`，而那條沒有備份 —— 最該有還原點的操作剛好是
+    唯一沒有的。只刪檔案不刪資料夾：整包刪沒辦法一份一份備份。
     """
     p = ws_path(path, must_exist=True)
     if p.is_dir():
@@ -1099,10 +1020,9 @@ def _indent(line: str) -> str:
 def loose_replace(text: str, old: str, new: str):
     """完全比對找不到時的退路：只忽略每行前後的空白再找一次。找不到就回 None。
 
-    本機小模型最常寫壞的就是縮排 —— 把片段貼齊到最左邊、行尾多一個空白。
-    原本這種情況直接報錯，模型的反應是換個字串再試，然後撞上連續失敗上限。
-    **只在唯一命中時才算數**：兩處以上寧可報錯，猜錯一個地方比多問一輪貴得多。
-    命中之後 new 會照檔案裡實際的縮排搬過去，不然貼進去的那段縮排是錯的。
+    本機小模型最常寫壞的就是縮排。原本直接報錯，而模型的反應是換個字串再試，
+    然後撞上連續失敗上限。**只在唯一命中時才算數** —— 猜錯一個地方比多問一輪貴。
+    命中之後 new 照檔案裡實際的縮排搬過去。
     """
     if "\r" in text:
         return None                      # CRLF 的檔案別猜，行尾會被弄成混排
@@ -1192,137 +1112,6 @@ def _tool_edit_file(path: str, old: str = "", new: str = "", replace_all: bool =
             + ("\n" + "\n".join(notes) if notes else "") + f"\n[backup]{mark}")
 
 
-# 一定要擋下來的：打錯一個字就回不去的那種。
-# 這裡列的是「無法用備份救回來」的操作，跟 rm 掉工作區裡的檔案不同層級。
-#
-# **block 的規則要精準，risky 的可以寬鬆。** 兩邊的代價不對稱：risky 錯殺只是多問
-# 一次，block 錯殺沒有任何按鈕救得回來 —— 使用者得離開這裡去開終端機。所以 rm
-# 那兩條綁在 SEG（一段指令的開頭），`git rm -r -f build` 不算：那是 git 在刪，
-# git 救得回來，而且它從來就不該落進「不可申訴」這一級。
-SEG = r"(?:^|[;&|(`]\s*)(?:sudo\s+)?"
-BLOCKED_CMDS = [
-    (SEG + r"rm\s+(-[a-zA-Z]*\s+)*(/|/\*|~|~/|\$HOME)(\s|$)", "rm 掉根目錄或家目錄"),
-    (SEG + r"rm\s+-[a-zA-Z]*(r[a-zA-Z]*f|f[a-zA-Z]*r)", "rm -rf（工作區裡的東西請改用 rm -r <路徑>，不要加 -f）"),
-    (r"\bmkfs(\.|\s)", "格式化磁碟"),
-    (r"\bdd\s+[^|]*of=/dev/", "dd 寫進裝置"),
-    (r">\s*/dev/(sd|nvme|hd)", "覆寫磁碟裝置"),
-    (r":\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:", "fork bomb"),
-    (r"\b(shutdown|reboot|halt|poweroff)\b", "關機或重開機"),
-    (r"\bchmod\s+-R\s+777\s+/(\s|$)", "把根目錄權限打開"),
-    (r"\b(userdel|groupdel|passwd)\b", "動到系統帳號"),
-    (r"\bgit\s+push\b[^|;]*--force(?!-with-lease)", "強制推送（會覆蓋遠端歷史）"),
-    (r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
-    (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
-]
-
-# 會改動環境但救得回來的：不擋，但確認卡要標紅，自動模式一定要問人。
-# 第三欄 True＝「動的是檔案」：路徑全部落在工作區裡的話，「工作區內全自動」
-# 那一檔可以不問（見 ws_scoped）。沒有第三欄的動的不是檔案，永遠要問。
-RISKY_CMDS = [
-    (r"\bsudo\b", "用 sudo 提權"),
-    (r"\brm\b", "刪除檔案", True),
-    (r"\bpip\s+(install|uninstall)|\bnpm\s+(i|install|uninstall)\b|\bconda\s+(install|remove)",
-     "安裝或移除套件"),
-    (r"\bapt(-get)?\s+(install|remove|purge)|\byum\s+(install|remove)", "動到系統套件"),
-    (r"\bgit\s+(push|reset\s+--hard|clean\s+-[a-zA-Z]*f|checkout\s+--\s)", "動到 git 歷史或工作區"),
-    (r"\bmv\b|\bchmod\b|\bchown\b", "搬動檔案或改權限", True),
-    (r">\s*/(etc|usr|bin|boot|lib)", "寫進系統目錄"),
-    (r"\bkill(all)?\b|\bpkill\b", "終止程序"),
-]
-
-
-# 長旗標 ↔ 短旗標：canon 兩種寫法都補上去，規則寫成哪一種都比對得到。
-# 只放認得的那幾組 —— 亂猜的話 `--one-file-system` 裡的 f 跟 r 會湊成假的 -rf。
-FLAG_PAIRS = [("--recursive", "r"), ("--force", "f")]
-# 這些指令後面第一個字是子指令（git push、pip install），不是要操作的東西。
-SUBCOMMAND = {"sudo", "env", "git", "npm", "pnpm", "yarn", "pip", "pip3", "apt",
-              "apt-get", "yum", "dnf", "conda", "docker", "cargo", "go"}
-SEPARATOR = {";", "|", "||", "&&", "&"}
-
-
-def canon(command: str) -> str:
-    """把一行指令重寫成固定的樣子：`指令 子指令 -併好的旗標 參數 --長旗標`。
-
-    為什麼要有：`rm -rf x`、`rm -r -f x`、`rm x -rf`、`rm --recursive --force x`
-    是同一件事，正規表示式看到的卻是四個樣子（實測 19 種寫法有 12 種掉一級）。
-    與其把每條規則寫成四份，不如先把寫法收斂成一種。順便脫掉引號 ——
-    `dd of="/dev/sda"` 以前就是靠那對引號躲過去的。
-
-    長旗標排在最後面是有原因的：`chmod -R 777 /` 那條規則要的是 `-R` 緊接著 777，
-    補出來的 `--recursive` 插在中間就對不上了。
-
-    ponytail: 上限是「一個 token 就是一個字」。`git -C /repo push` 不知道 `-C`
-    會吃掉一個參數、`a&&b` 沒空格拆不開 —— 這兩種 canon 會算歪，所以
-    command_risk **原字串與 canon 兩種都比對**：canon 只會多抓，不會少抓。
-    """
-    try:
-        toks = shlex.split(command)
-    except ValueError:
-        return command                   # 引號沒配對，交給原字串那一輪
-    out, seg = [], []
-
-    def flush():
-        if not seg:
-            return
-        head, rest = [seg[0]], seg[1:]
-        while head[-1].lower() in SUBCOMMAND:
-            nxt = next((t for t in rest if not t.startswith("-")), None)
-            if nxt is None:
-                break
-            rest.remove(nxt)
-            head.append(nxt)
-        short, longs, args = set(), [], []
-        for t in rest:
-            if re.fullmatch(r"-[a-zA-Z]+", t):
-                short |= set(t[1:])
-            elif t.startswith("--"):
-                longs.append(t)
-            else:
-                args.append(t)
-        for lg, sh in FLAG_PAIRS:
-            if lg in longs and sh not in short:
-                short.add(sh)
-            elif sh in short and lg not in longs:
-                longs.append(lg)
-        out.extend(head)
-        if short:
-            out.append("-" + "".join(sorted(short)))
-        out.extend(args + longs)
-        seg.clear()
-
-    for t in toks:
-        if t in SEPARATOR:
-            flush()
-            out.append(t)
-        else:
-            seg.append(t)
-    flush()
-    return " ".join(out)
-
-
-def command_risk(command: str) -> tuple:
-    """判斷一行指令的風險。回傳 ("block"|"risky"|"ok", 原因)。
-
-    這是後端的判斷，前端的確認卡直接顯示它的結論 ——
-    風險判斷寫兩份的話，總有一份會過期。
-
-    **這份清單擋的是打錯字與粗心，不是對手。** 決心要繞過正規表示式的人有的是
-    寫法（`$IFS`、變數展開、寫成腳本再跑），那一層要靠沙盒，不是靠這裡。
-
-    原字串與 canon() 兩種形式都比對，取比較嚴的那個結論 —— canon 認不出來的
-    寫法（見它的 ponytail 註解）還有原字串接著，兩邊都是只會多抓不會少抓。
-    """
-    cmd = " ".join(str(command or "").split())
-    forms = (cmd, canon(cmd))
-    for pattern, why in BLOCKED_CMDS:
-        if any(re.search(pattern, f, re.I) for f in forms):
-            return ("block", why)
-    for pattern, why, *_ in RISKY_CMDS:
-        if any(re.search(pattern, f, re.I) for f in forms):
-            return ("risky", why)
-    return ("ok", "")
-
-
 # 串接、管線、重導、命令替換：後面藏得住第二條指令，路徑掃描就不算數了。
 CHAINED = re.compile(r"[;&|`\n<>]|\$\(")
 
@@ -1381,11 +1170,9 @@ def _tool_run_shell(command: str, background: bool = False) -> str:
 def kill_tree(proc) -> None:
     """殺掉整棵程序樹，不是只殺最上面那一個。
 
-    `shell=True` 跑的是 `sh -c "…"`。指令一複雜，sh 就會 fork 而不是 exec，
-    真正在跑的東西是 sh 的**孫子** —— `proc.kill()` 只殺得到 sh，孫子繼續跑，
-    而且繼續握著 stdout 的寫入端，讀取執行緒就永遠等不到 EOF。
-    （實測：check_job 說「已終止」，jobs_state 卻永遠停在「還在跑」。）
-    Popen 用 start_new_session 讓它自己一個 process group，這裡整組送 SIGKILL。
+    `shell=True` 跑的是 `sh -c`，指令一複雜 sh 會 fork，真正在跑的是它的孫子。
+    `proc.kill()` 只殺得到 sh，孫子繼續握著 stdout，讀取執行緒永遠等不到 EOF。
+    Popen 開 start_new_session 自成一個 process group，這裡整組送 SIGKILL。
     """
     try:
         os.killpg(os.getpgid(proc.pid), 9)
@@ -1532,15 +1319,11 @@ def skill_commands(body: str) -> list:
 
 
 def auto_cmd_block(cmd: str) -> str:
-    """這一行為什麼不能在**沒有確認卡**的情況下跑。空字串＝可以跑。
+    """這一行為什麼不能在沒有確認卡的情況下跑。空字串＝可以跑。
 
-    兩條路共用：skill 正文裡的 !`指令`，以及收尾時的驗證指令。兩條都是
-    「沒有人在按執行」的執行入口，所以走的關卡要跟 run_shell 完全一樣。
-    少任何一道就是一個沒人看守的入口：`run_tool()` 的 deny 規則與 `agent_guard()`
-    都是**按工具名**比對的，而這兩條路走到 subprocess 時掛的名字不是 run_shell ——
-    使用者為 run_shell 寫的 deny 規則會整條錯過，宣告唯讀的子代理
-    （agents/explore.md）也照樣拿得到 subprocess。
-    風險那一級則是因為這兩條路的字都不是使用者當場打的。
+    skill 的 !`指令` 與收尾的驗證指令共用。兩條都是「沒有人在按執行」的入口，
+    所以關卡要跟 run_shell 一樣 —— deny 規則與 agent_guard 都是**按工具名**比對，
+    而這兩條走到 subprocess 時名字不叫 run_shell，少一道就整條錯過。
     """
     try:
         agent_guard("run_shell")
@@ -1556,15 +1339,9 @@ def auto_cmd_block(cmd: str) -> str:
 def skill_live(body: str, run: bool = True) -> str:
     """把 !`指令` 換成它現在的輸出。
 
-    為什麼要有：SKILL.md 是靜態文字，但流程需要現場狀態 —— `release-checklist`
-    要看 `git status`、`run-pytest` 要看有沒有 `.venv`。沒有這個就只能寫成
-    「請先執行 X 看看」，模型照著多跑一輪。
-
-    **這是一個新的執行入口**：讀一份檔案變成跑一段指令。所以每一道都走既有的，
-    見 `auto_cmd_block()`；跑的時候也走 `build_command()`，風險檢查與沙盒包裝
-    只有那一份。
-
-    `run=False` 是給模型改得到的 skill 用的，見 `_tool_load_skill`。
+    SKILL.md 是靜態文字，但流程需要現場狀態（`git status`、有沒有 `.venv`）。
+    這是一個新的執行入口，所以每一道關卡都走既有的：`auto_cmd_block()` 判能不能跑、
+    `build_command()` 做風險檢查與沙盒包裝。run=False 見 `_tool_load_skill`。
     """
     if not run:
         return SKILL_CMD.sub(
@@ -1609,16 +1386,11 @@ def skill_live(body: str, run: bool = True) -> str:
 
 
 def _tool_load_skill(name: str = "") -> str:
-    """把一份 skill 的正文交給模型。
+    """把一份 skill 的正文交給模型。按需載入：描述常駐 240 token，正文幾千。
 
-    設計上只有這一支是「按需載入」的：六份內建 skill 的描述加起來 240 token，
-    常駐得起；正文全部塞進系統提示會是幾千 token，而九成的對話用不到。
-
-    **模型改得到的 skill 不代跑 !`指令`。** 那個檔案模型自己寫得出來（`make-skill`
-    就是在做這件事），跑的話等於「寫一個檔案」變成「執行一行指令」——
-    自己給自己開一條繞過 run_shell 確認卡的路。同樣的道理也擋掉 clone 回來的
-    專案裡藏著的 skill。判斷寫在 `skill_trusted()`，問的是「在不在工作區裡」，
-    不是「在不在內建資料夾裡」—— 那兩個在預設設定下是同一個資料夾。
+    **模型改得到的 skill 不代跑 !`指令`。** 那檔案它自己寫得出來（`make-skill`
+    就在做這件事），跑的話等於「寫一個檔案」變成「執行一行指令」，自己繞過確認卡。
+    順便也擋掉 clone 回來的專案裡藏的 skill。判斷見 `skill_trusted()`。
     """
     folder, raw = skill_find(name)
     body = skill_live(raw, run=skill_trusted(folder))
@@ -1716,10 +1488,8 @@ def _tool_run_tests(target: str = "", k: str = "") -> str:
 def verify_detect() -> str:
     """猜一條「跑完就知道有沒有壞」的指令。**只是給介面預填，不會自己跑。**
 
-    真正會被執行的那一條是使用者在介面上確認過、存在瀏覽器那一端的字串。
-    **刻意不從專案裡讀設定檔**：那等於 clone 回來的專案可以指定一條會自動執行的
-    指令，跟 3.7 節那個 skill 的洞是同一條路（`write_file` 也擋不住它 ——
-    專案本來就可以附一個檔案）。
+    真正會跑的是使用者在介面上確認過的那個字串。**刻意不從專案裡讀設定檔** ——
+    那等於 clone 回來的專案可以指定一條會自動執行的指令，跟 skill 那個洞同一條路。
     """
     ws = cur().ws
     if ws is None:
@@ -1749,12 +1519,9 @@ def sandbox_state() -> dict:
 def sandbox_python() -> str:
     """沙盒裡該用哪個 python，回傳可以直接放進 shell 的一段字。
 
-    分兩種情況，因為後端分兩種：
-
-    - **核心層**（bwrap／seatbelt）：檔案系統就是宿主機的，所以 detect_python()
-      算出來的絕對路徑直接可用。這很重要 —— 這台有 python3 但沒有 python，
-      寫死 "python" 會變成 `sh: python: not found`（踩過）。
-    - **容器**：rootfs 是映像檔的，宿主機的路徑進去不存在，只能用相對路徑或裸的 python。
+    核心層（bwrap／seatbelt）的檔案系統就是宿主機的，用 detect_python() 的絕對路徑
+    —— 寫死 "python" 在只有 python3 的機器上會 not found（踩過）。
+    容器的 rootfs 是映像檔的，宿主機路徑進去不存在，只能用裸的 python。
     """
     if getattr(sandbox.pick(SANDBOX_BACKEND), "SAME_FS", False):
         return " ".join(shlex.quote(x) for x in detect_python())
@@ -1833,161 +1600,13 @@ def _tool_fetch_url(url: str) -> str:
 # 本來就在那裡。拿不到的欄位一律不回傳，前端就不畫那一格。
 # ponytail: Linux（/proc）＋ NVIDIA（nvidia-smi）。macOS／Windows／AMD 只會少幾格，
 #           不會壞掉。真的有人要再加 vm_stat / GlobalMemoryStatusEx / rocm-smi。
-CPU_LAST = {}
-SYS_CACHE = {"at": 0.0, "data": {}}
-SYS_TTL = 1.5                      # 開兩個分頁時不要變成一秒兩次 nvidia-smi
-
-
-def cpu_percent() -> float:
-    """/proc/stat 兩次取樣之間的忙碌比例。第一次沒有基準，回 -1。"""
-    try:
-        with open("/proc/stat", encoding="utf-8") as fh:
-            v = [float(x) for x in fh.readline().split()[1:]]
-    except Exception:
-        return -1.0
-    idle, total = v[3] + (v[4] if len(v) > 4 else 0), sum(v)
-    prev = CPU_LAST.get("v")
-    CPU_LAST["v"] = (total, idle)
-    if not prev or total <= prev[0]:
-        return -1.0
-    return round(100.0 * (1 - (idle - prev[1]) / (total - prev[0])), 1)
-
-
-def ram_info() -> dict:
-    """RAM 用量，單位 GB。用 MemAvailable 而不是 MemFree —— cache 是可以拿回來的，
-    算成「已用」會看起來永遠快滿了。"""
-    try:
-        got = {}
-        with open("/proc/meminfo", encoding="utf-8") as fh:
-            for line in fh:
-                k, _, val = line.partition(":")
-                if k in ("MemTotal", "MemAvailable"):
-                    got[k] = int(val.split()[0]) / 1048576.0
-        if len(got) == 2:
-            return {"used": round(got["MemTotal"] - got["MemAvailable"], 1),
-                    "total": round(got["MemTotal"], 1)}
-    except Exception:
-        pass
-    return {}
-
-
-def gpu_info() -> list:
-    """問一次 nvidia-smi。沒有卡、沒裝驅動、指令不在，都回空清單。"""
-    exe = shutil.which("nvidia-smi")
-    if not exe:
-        return []
-    try:
-        out = subprocess.run(
-            [exe, "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
-             "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3).stdout.decode(
-                "utf-8", "replace")
-    except Exception:
-        return []
-    cards = []
-    for line in out.strip().splitlines():
-        f = [x.strip() for x in line.split(",")]
-        if len(f) < 5:
-            continue
-        try:
-            cards.append({"name": f[0], "util": int(f[3]), "temp": int(f[4]),
-                          "vram": {"used": round(int(f[1]) / 1024.0, 1),
-                                   "total": round(int(f[2]) / 1024.0, 1)}})
-        except ValueError:
-            continue
-    return cards
-
-
 def sys_usage() -> dict:
-    """給 topbar 用的一包數字。這是 serve.py 這一台的數字 ——
-    Ollama 在別台的話，GPU 那幾格講的不是跑模型的那張卡（前端會標出來）。"""
-    now = time.time()
-    if now - SYS_CACHE["at"] < SYS_TTL and SYS_CACHE["data"]:
-        return SYS_CACHE["data"]
-    data = {"cpu": cpu_percent(), "ram": ram_info(), "gpu": gpu_info(),
-            "cores": os.cpu_count() or 0, "ollama_local": ollama_is_local()}
-    SYS_CACHE.update(at=now, data=data)
-    return data
-
-
-# ══════════════════════ 專案地圖 ══════════════════════ #
-# 模型每接到一個任務都要先摸清專案：list_dir、search_files、read_file 來回三五輪，
-# 而**每一輪的成本是重吃一次整份 context**（本機模型真正貴的地方）。那幾輪買到的
-# 東西其實是固定的：有哪些檔案、每個檔案裡有什麼。既然固定，就先算好放進系統提示。
-#
-# aider 的 repo map 是同一個想法。這裡刻意做得更小：只列頂層符號，不做呼叫關係
-# 排序（那要 tree-sitter，而且排錯了比沒有更糟）。
-#
-# **這段只能在對話最前面、而且中途不要變。** 動到前面的內容等於放棄 Ollama 那一端
-# 的 prefix cache，整段 context 重算 —— 所以更新時機跟 agent_rules() 綁在一起
-# （載入、切工作區、切工具開關），不隨檔案改動即時更新。
-#
-# ponytail: 只認得 Python（ast）與 JS/TS（一條正規表示式）。其他語言只列檔名 ——
-# 檔名本身就已經是九成的價值。要加語言就往 file_symbols() 加一個分支。
-
-MAP_LIMIT = 6000           # 字元上限。這段每一輪都要重送，跟 skill 清單一樣是固定成本
-MAP_FILES = 400            # 掃到這麼多檔就停
-MAP_SYMS = 30              # 一個檔案最多列幾個符號（真正的煞車是 MAP_LIMIT）
-MAP_BYTES = 400_000        # 比這個大的檔案不解析（解析成本不值得）
-_MAP_CACHE = {}            # 檔案 -> (mtime, 符號字串)。只有改過的檔案要重解析
-
-JS_SYM = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?"
-                    r"(?:function\s+(\w+)|class\s+(\w+)"
-                    r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?[(<])", re.M)
-
-
-def file_symbols(p: Path) -> str:
-    """一個檔案裡有哪些頂層符號。回傳空字串＝只列檔名就好。"""
-    try:
-        if p.stat().st_size > MAP_BYTES:
-            return ""
-        if p.suffix == ".py":
-            tree = ast.parse(p.read_text("utf-8", errors="replace"), str(p))
-            names = [n.name for n in tree.body
-                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-        elif p.suffix in (".js", ".mjs", ".ts", ".jsx", ".tsx"):
-            names = [m.group(1) or m.group(2) or m.group(3)
-                     for m in JS_SYM.finditer(p.read_text("utf-8", errors="replace"))]
-        else:
-            return ""
-    except (SyntaxError, ValueError, OSError, RecursionError):
-        return ""            # 解析不動就當作沒有符號，檔名照樣列得出來
-    if not names:
-        return ""
-    more = f"…（共 {len(names)} 個）" if len(names) > MAP_SYMS else ""
-    return ", ".join(names[:MAP_SYMS]) + more
+    """core.sysinfo 的數字，加上「Ollama 是不是也在這一台」。"""
+    return dict(sysinfo.sys_usage(), ollama_local=ollama_is_local())
 
 
 def repo_map() -> str:
-    """專案地圖：有哪些檔案、每個檔案裡有什麼。"""
-    if cur().ws is None:
-        return ""
-    lines, n, cut = [], 0, False
-    for f in ws_walk():
-        n += 1
-        if n > MAP_FILES:
-            cut = True
-            break
-        try:
-            st = f.stat()
-            key = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            continue
-        # 大小要一起當鍵：mtime 有顆粒度，同一格裡改兩次（模型連著兩次
-        # edit_file）拿到同一個值，ext4 上連 st_mtime_ns 都一樣
-        hit = _MAP_CACHE.get(f)
-        if not hit or hit[0] != key:
-            hit = (key, file_symbols(f))
-            _MAP_CACHE[f] = hit
-        lines.append(ws_rel(f) + ("：" + hit[1] if hit[1] else ""))
-    if not lines:
-        return ""
-    body = "\n".join(lines)
-    if len(body) > MAP_LIMIT:
-        body = body[:MAP_LIMIT].rsplit("\n", 1)[0]
-        cut = True
-    return ("專案地圖（冒號後面是那個檔案裡的頂層符號，要看內容還是要 read_file）：\n"
-            + body + ("\n…（只列出一部分，其餘用 search_files 找）" if cut else ""))
+    return repomap.repo_map(ws_walk(), ws_rel) if cur().ws is not None else ""
 
 
 def agent_rules() -> str:
@@ -2432,15 +2051,9 @@ def skills_list() -> list:
 def skills_usable() -> list:
     """現在這個狀態下真的用得動的 skill。
 
-    `tools:` 原本只是宣告（`tests/test_skills.py` 拿去驗那幾支工具存在），執行時
-    沒有任何作用。讓它生效的方式是**篩清單**，不是限制工具 —— 限制會害到自己：
-    skill 是流程說明不是沙盒，做到一半發現需要 `search_files` 卻被擋住，
-    比多給幾支工具糟。篩清單則是把 `agent_rules()` 一開始就寫下的規則
-    （沒開放的功能一個字都不要提）套到 skill 上：工作區唯讀時列一份要 `write_file`
-    的 skill，只會把模型帶進死路。
-
-    只管清單：`load_skill` 指名還是叫得到。認不得的工具名（例如 MCP 的）不算數，
-    那些會來會去，不能拿來判斷一份 skill 死了沒。
+    `tools:` 用來**篩清單**不是限制工具：skill 是流程說明不是沙盒，做到一半被擋住
+    比多給幾支工具糟。工作區唯讀時列一份要 write_file 的 skill 只會帶進死路。
+    只管清單，`load_skill` 指名還是叫得到；認不得的工具名（MCP 的）不算數。
     """
     have = {d["function"]["name"] for d in tool_defs()}
     known = {t["name"] for t in TOOL_SCHEMAS}
@@ -2472,13 +2085,9 @@ def skill_body(name: str) -> str:
 def skill_trusted(folder: Path) -> bool:
     """這份 skill 的檔案，模型自己改得到嗎？改得到就不准它跑指令。
 
-    原本問的是「在不在 HERE/skills 底下」，那個問法是錯的：預設工作區就是
-    `os.getcwd()`，README 也叫你在 checkout 裡跑 —— 那時候 `ws/skills` **就是**
-    `HERE/skills`，模型自己寫的每一份都會被算成內建的，等於這道關卡沒開。
-
-    現在問實際要問的那件事：`write_file` 碰得到的地方一律不跑。代價是把工作區
-    設在 checkout 上時，連內建那幾份也不跑 `!`指令`` 了 —— 這是對的，那個狀態下
-    模型確實改得動它們。要讓內建的跑就把工作區指到別的地方（`--workspace ~/專案`）。
+    問的是「在不在工作區裡」，不是「在不在內建資料夾裡」—— 預設工作區就是
+    `os.getcwd()`，那兩個會是同一個資料夾，用後者等於這道關卡沒開。
+    代價是工作區設在 checkout 上時內建那幾份也不跑，那是對的：模型確實改得動。
     """
     try:
         folder = folder.resolve()
@@ -2494,13 +2103,10 @@ def skill_trusted(folder: Path) -> bool:
 
 
 # ══════════════════════ 子代理型別 ══════════════════════ #
-# 照常見的 `agents/*.md` 慣例做：**一種子代理是一個檔案，不是一段程式碼**。
-# 加一種不必改 serve.py，寫一份 md 丟進 agents/ 就好。每一種自己宣告拿得到哪些工具 ——
-# 唯讀是靠工具清單擋的，不是靠提示詞求它別寫（Explore 那一支的做法也是這樣）。
-#
-# 跟它們不一樣的一點：這裡**一定要有深度上限**。它的煞車是提示詞（「不要隨便開子代理，
-# 那是這個方案上最貴的路徑」），因為有人在看著帳單；這裡的前提是放著跑三十分鐘沒人看，
-# 所以要機制。
+# 一種子代理是一個檔案，不是一段程式碼：加一種寫份 md 丟進 agents/ 就好。
+# 每一種自己宣告拿得到哪些工具 —— 唯讀靠工具清單擋，不是靠提示詞求它別寫。
+# 跟那些商用 agent 不一樣的一點：這裡**一定要有深度上限**。它們的煞車是提示詞，
+# 因為有人在看著帳單；這裡的前提是放著跑三十分鐘沒人看，所以要機制。
 
 
 def agents_roots() -> list:
@@ -2602,13 +2208,9 @@ def agent_open(type_name: str = "", parent: str = "", chat: str = "",
 def worktree_add() -> dict:
     """給子代理一份自己的 git worktree。
 
-    照那套商用 agent 的 `isolation: "worktree"` 做。兩個會改檔案的子代理平行跑時，
-    原本只有「不要平行」一條路（同時動同一個檔案，收拾比省下的時間貴）；
-    各給一份 checkout 之後，衝突變成 merge 問題，而 merge 有現成工具。
-
-    放在工作區底下的 .zackllmgui-worktrees/：ws_walk() 本來就跳過 . 開頭的資料夾，
-    ws_path() 檢查的是「相對於自己那個 root 的路徑」，所以子代理的邊界照舊由
-    ws_path() 一支擋 —— 不必為了這個功能再寫第二個路徑檢查。
+    兩個會改檔案的子代理平行跑時，原本只有「不要平行」一條路；各給一份 checkout
+    之後衝突變成 merge 問題，而 merge 有現成工具。邊界照舊由 ws_path() 一支擋
+    （root 換成 worktree），不必再寫第二個路徑檢查。
     """
     root = ws_root().resolve()
     if not (root / ".git").exists():
@@ -2668,11 +2270,9 @@ def agent_commit_msg(rec: dict) -> str:
 def worktree_orphans() -> list:
     """磁碟上有、但這個分頁的登記裡沒有的 worktree。
 
-    **不必另外存狀態**：分支名 `zackllmgui/<tag>` 就是登記，git 自己記得。
-    `Session.agents` 活在行程裡，`serve.py` 改過原始碼會自己重啟 —— 重啟之後
-    磁碟上那幾份就沒有人認得，列不出來也就收不掉。這一支把它們找回來。
-
-    只列不刪：分支上可能是子代理跑了十分鐘的成果，「沒有人認得」不等於「可以刪」。
+    不必另外存狀態，分支名 `zackllmgui/<tag>` 就是登記。Session.agents 活在行程裡，
+    serve.py 重啟之後那幾份就沒人認得、也就收不掉，這一支把它們找回來。
+    只列不刪：「沒有人認得」不等於「可以刪」。
     """
     root = ws_root().resolve()
     if not (root / ".git").exists():
@@ -2810,9 +2410,8 @@ def agent_close(aid: str, force: bool = False) -> dict:
     """收掉一個子代理（連同它底下沒收的後代）。
 
     **有改動就先 commit 到自己的分支，再收掉目錄。** 不 commit 的話那些改動只是
-    worktree 目錄裡的未追蹤檔案：分支上是空的、`git diff` 看不到、`git merge` 也沒
-    東西可合，而且目錄一旦沒人認得（serve.py 重啟）就只能整份留著。落到分支上之後，
-    「收掉目錄」與「留住成果」不再是二選一 —— 子代理跑了十分鐘的結果不會靜靜消失。
+    未追蹤檔案：分支是空的、`git merge` 沒東西可合，目錄一旦沒人認得就只能留著。
+    落到分支上之後，「收掉目錄」與「留住成果」不再是二選一。
     """
     s = cur()
     rec = s.agents.get(str(aid)) or orphan_rec(str(aid))
@@ -2940,15 +2539,12 @@ def agent_guard(name: str) -> None:
 
 
 # ══════════════════════ 允許規則 ══════════════════════ #
-# 自動模式是全有全無的三段，但人真正想要的從來不是那三個，而是
-# 「pytest 一律放行、git commit 要問我、secrets/ 永遠不准碰」。
-# 規則檔就是把這種判斷寫下來一次，不用每天重新點一遍。
+# 人真正想要的不是全有全無的三段，而是「pytest 一律放行、git commit 要問我、
+# secrets/ 永遠不准碰」。規則檔把這種判斷寫下來一次。
 #
 # 順序（第一個成立的說了算）：
 #   deny 規則 > 擋掉的危險指令 > 風險指令一律問 > allow 規則 > 自動模式
-#
-# allow **不能**蓋過風險指令：那條保證（「危險指令自動模式也一定會問你」）
-# 是寫在文件上的，不能被一個設定檔悄悄拿掉。
+# allow **不能**蓋過風險指令：那條保證寫在文件上，不能被一個設定檔拿掉。
 
 def rules_files() -> list:
     """[(範圍, 路徑)]。兩份都讀，專案的排在前面（第一條命中的說了算）。
@@ -3046,17 +2642,12 @@ def rule_match(name: str, args: dict) -> dict:
 
 
 # ── 改完自動檢查 ─────────────────────────────────────────────── #
-# aider 的 --auto-lint 就是這件事，而且它預設是開的：模型寫完檔案，linter 的錯誤
-# 直接接在工具結果後面，它下一輪自己就修掉。比寫進系統提示求它記得可靠得多。
-#
-# 三個刻意的限制：
-# 1. 只跑**唯讀**的檢查，不跑會改檔案的格式化（black、ruff format、prettier）。
-#    在模型背後改掉檔案，它手上的內容就過期了，下一次 edit_file 的 old 會對不上。
-# 2. 沒裝就安靜跳過。這是加分項，不該變成噪音，更不該害寫檔失敗。
-# 3. 不進沙盒：write_file 是直接 p.write_text() 寫在宿主機的工作區，沒有走
-#    sandbox.run。檔案在哪就在哪檢查 —— docker 後端的容器裡根本沒有這個檔案。
-# ponytail: 只認 ruff 與 eslint 兩支，判斷寫死。要加第三支就往這裡加一個分支；
-#           要 typecheck（mypy／tsc）得先解決「跑整包很慢」，那不是加一行的事。
+# 照 aider 的 --auto-lint：模型寫完檔案，linter 的錯誤接在工具結果後面，
+# 它下一輪自己修掉。比寫進系統提示求它記得可靠。三個刻意的限制：
+# 1. 只跑唯讀的檢查，不跑格式化 —— 在模型背後改檔案會讓它手上的內容過期。
+# 2. 沒裝就安靜跳過：加分項不該變成噪音，更不該害寫檔失敗。
+# 3. 不進沙盒：檔案寫在宿主機的工作區，容器裡根本沒有這個檔案。
+# ponytail: 只認 ruff 與 eslint，寫死。typecheck 要先解決「跑整包很慢」。
 LINT_TIMEOUT = 20
 
 
@@ -3233,13 +2824,6 @@ def run_tool(name: str, args: dict) -> str:
     return out
 
 
-# 只有瀏覽器會加 Origin，而且**跨來源的 POST 一定帶得上** —— 表單、no-cors fetch
-# 都算。名字寫成本機、實際指回 127.0.0.1 的網域（DNS rebinding）騙得過 Origin，
-# 但騙不過 Host。
-# 空字串＝沒帶 Host（HTTP/1.0、非瀏覽器的呼叫），跟沒帶 Origin 同一個理由放行。
-# 只有瀏覽器會加 Origin，而且**跨來源的 POST 一定帶得上** —— 表單、no-cors fetch
-# 都算。名字寫成本機、實際指回 127.0.0.1 的網域（DNS rebinding）騙得過 Origin，
-# 但騙不過 Host。
 # 空字串＝沒帶 Host（HTTP/1.0、非瀏覽器的呼叫），跟沒帶 Origin 同一個理由放行。
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
 # 這台機器自己的名字也算本機：手機用 http://macbook.local:5678 連進來要能用，
@@ -3251,23 +2835,11 @@ LOCAL_HOSTS |= {n.lower() for n in
 def same_site(host: str, origin: str, method: str = "POST") -> str:
     """這個請求是不是從自己的網頁發出來的。回傳擋掉的原因，空字串＝放行。
 
-    **沒有這一道，`_is_local()` 是擋不住瀏覽器的**：使用者開著這支服務的時候
-    逛到的任何一個網頁，都可以用一張 `enctype="text/plain"` 的表單 POST 到
-    `/tool` 執行指令 —— 那種請求不觸發預檢，送出去的來源 IP 是 127.0.0.1，
-    上面每一道關卡都在它後面。確認卡在網頁那一端，繞過網頁就等於繞過確認卡。
-
-    兩件事：
-    1. 有 Origin 就必須跟 Host 對得上。`null`（沙箱 iframe、file://）不算數 ——
-       那正好是攻擊會送出來的值。
-    2. Host 必須是本機的名字或 IP。攻擊者的網域指回 127.0.0.1 時 Origin 跟 Host
-       會一致，只有這一條看得出來。
-
-    **method 會影響第 2 條，這不是筆誤**：非 GET 的請求瀏覽器一定會帶 Origin
-    （同源也帶），所以沒帶 Origin 的 POST 只可能來自 curl 或本機其他程式 ——
-    那些本來就直接執行得了指令，攔它不會多擋到任何東西。GET 反過來，**同源時
-    不帶 Origin**，而 rebinding 之後那一頁就是同源，所以 GET 一定要看 Host。
-    少了這一段，`/ext`（會照著 X-Target 轉發）跟 `/upstream`（工作區絕對路徑、
-    工具清單、背景工作的指令列）就是可以被讀走的。
+    **沒有這一道 `_is_local()` 擋不住瀏覽器**：你逛到的任何網頁都能用一張
+    `enctype="text/plain"` 的表單 POST 到 /tool —— 不觸發預檢、來源 IP 是 127.0.0.1。
+    兩條：有 Origin 就要跟 Host 對得上（`null` 不算）；Host 必須是本機的名字或 IP
+    —— DNS rebinding 之後 Origin 跟 Host 會一致，只有後者看得出來。
+    method 影響第二條不是筆誤：GET 同源時**不帶** Origin，所以一定要看 Host。
     """
     if TRUST_REMOTE:
         # 放在最前面：反向代理預設會把 Host 改寫成後端位址（nginx 的 proxy_pass、
@@ -3361,12 +2933,9 @@ class Handler(BaseHTTPRequestHandler):
     def _drain_body(self) -> None:
         """把沒讀完的 request body 吃掉。
 
-        不吃的話，keep-alive 的下一個請求會從殘留的 body 開始解析，
-        症狀就是 `501 Unsupported method ('{}GET')` —— 前一個請求的 `{}`
-        黏在下一行請求前面。只要有**任何一條路徑**提早 return 就會發生：
-        403（非本機）、「還沒設定工作區」、例外……每一條都算。
-
-        所以不靠各個處理函式自己記得，統一在 do_POST 收尾時做。
+        不吃的話 keep-alive 的下一個請求會從殘留的 body 開始解析，症狀是
+        `501 Unsupported method (\'{}GET\')`。任何一條提早 return 的路徑都會踩到
+        （403、沒工作區、例外），所以統一在 do_POST 收尾做，不靠各支自己記得。
         """
         if self._body_read:
             return
@@ -3963,10 +3532,9 @@ class Handler(BaseHTTPRequestHandler):
     def _do_verify(self) -> None:
         """跑一次收尾用的驗證指令。
 
-        **這是第三條沒有確認卡的執行路徑**（另外兩條：skill 的 !`指令`、
-        自動模式放行的工具），所以兩件事寫死：指令只能來自使用者在介面上打的字
-        （`verify_detect()` 只負責預填，專案裡的檔案一個字都不讀），
-        而且照樣過 `auto_cmd_block()` —— 跟 skill 那條同一道關卡。
+        **第三條沒有確認卡的執行路徑**（另外兩條：skill 的 !`指令`、自動模式）。
+        所以兩件事寫死：指令只能來自使用者在介面上打的字（專案裡的檔案一個字都不讀），
+        而且照樣過 `auto_cmd_block()`。
         """
         if not ALLOW_TOOLS or not self._is_local():
             self._json({"error": "工具未啟用"}, 403)

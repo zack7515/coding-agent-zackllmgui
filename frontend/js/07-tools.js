@@ -1066,15 +1066,10 @@ async function toggleWrite() {
   renderFeatBtn();
 }
 
-// 重開之後把 serve.py 那一端的狀態接回來。
-//
-// 為什麼需要這個：工作區與四個開關都是 serve.py 的**行程全域**，重啟 serve.py
-// 就回到預設；自動模式與其他偏好卻存在瀏覽器的 localStorage 裡。兩邊不對齊的
-// 症狀是「自動模式已經放到最開，但模型改不動檔案」—— 看起來像壞掉，其實是
-// 伺服器那邊的「修改檔案」根本沒開。
-//
-// 順序有意義：**工作區一定要先設**，因為 serve.py 的 ALLOW_WRITE 有
-// `and WORKSPACE is not None`，沒有工作區的時候 write:true 會被靜靜吃掉。
+// 重開之後把 serve.py 那一端的狀態接回來。工作區與四個開關是行程全域、
+// 重啟就回預設，自動模式卻存在 localStorage —— 兩邊不對齊的症狀是
+// 「自動模式放到最開但模型改不動檔案」，看起來像壞掉。
+// **工作區一定要先設**：沒有工作區的時候 write:true 會被靜靜吃掉。
 async function restoreServerState(conf) {
   const done = [];
   const want = (current() || {}).ws || conf.wsPath || '';

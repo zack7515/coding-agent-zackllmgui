@@ -651,10 +651,10 @@ def test_repo_map_tells_the_model_where_things_are():
 def test_repo_map_has_a_ceiling():
     """這段每一輪都要重送，是固定成本 —— 跟 skill 清單同一個道理，要有上限。"""
     with Workspace() as ws:
-        for i in range(serve.MAP_FILES + 50):
+        for i in range(serve.repomap.MAP_FILES + 50):
             (ws / f"f{i:04d}.py").write_text(f"def g{i}():\n    pass\n", encoding="utf-8")
         m = serve.repo_map()
-        assert len(m) <= serve.MAP_LIMIT + 200, len(m)
+        assert len(m) <= serve.repomap.MAP_LIMIT + 200, len(m)
         assert "只列出一部分" in m, m
 
 
