@@ -4,8 +4,14 @@
 對外只有 command_risk()；canon() 是它的前處理，攤開來測比較好抓。
 """
 
+import os
 import re
 import shlex
+
+# 兩套規則各自獨立，照這台實際會用到的 shell 挑一套。混在一起會互相誤殺 ——
+# `python3 -c "del cache[k]"` 在 Linux 上被 Windows 的 del 規則判成 risky。
+# 獨立成常數是為了測得到：測試要能在 Linux 上假裝自己是 Windows。
+WINDOWS = os.name == "nt"
 
 
 # 一定要擋下來的：備份救不回來的那種。
@@ -25,8 +31,12 @@ BLOCKED_CMDS = [
     (r"\bgit\s+push\b[^|;]*--force(?!-with-lease)", "強制推送（會覆蓋遠端歷史）"),
     (r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
     (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
-    # Windows：沙盒沒開時 run_shell 走 cmd，上面那幾條一條都打不到。
-    # 尺度跟 rm 那條一樣 —— 遞迴不擋，遞迴又不問才擋。
+]
+
+# Windows 專屬：沙盒沒開時 run_shell 走 cmd，上面那幾條一條都打不到。
+# 尺度跟 rm 那條一樣 —— 遞迴不擋，遞迴又不問才擋。
+# POSIX 那幾條在 Windows 上不關掉：git-bash 與 WSL 裡 rm -rf 照樣有效。
+WIN_BLOCKED = [
     (r"\b(rmdir|rd)\s+(/[a-z]+\s+)*/(s\s+(/[a-z]+\s+)*/q|q\s+(/[a-z]+\s+)*/s)\b",
      "rmdir /s /q（工作區裡的東西請改用 rmdir /s <路徑>，不要加 /q）"),
     (r"\bdel\s+(/[a-z]+\s+)*/s\b", "del /s（遞迴刪除，沒有備份救得回來）"),
@@ -43,9 +53,6 @@ BLOCKED_CMDS = [
 RISKY_CMDS = [
     (r"\bsudo\b", "用 sudo 提權"),
     (r"\brm\b", "刪除檔案", True),
-    # del/erase/rmdir 在 Linux 上不是指令，錯殺頂多多問一次；
-    # rd 太像一般英文字，只在後面接旗標時才算。
-    (r"\b(del|erase|rmdir)\s+\S|\brd\s+/|\bRemove-Item\b", "刪除檔案（Windows）", True),
     (r"\bpip\s+(install|uninstall)|\bnpm\s+(i|install|uninstall)\b|\bconda\s+(install|remove)",
      "安裝或移除套件"),
     (r"\bapt(-get)?\s+(install|remove|purge)|\byum\s+(install|remove)", "動到系統套件"),
@@ -53,6 +60,11 @@ RISKY_CMDS = [
     (r"\bmv\b|\bchmod\b|\bchown\b", "搬動檔案或改權限", True),
     (r">\s*/(etc|usr|bin|boot|lib)", "寫進系統目錄"),
     (r"\bkill(all)?\b|\bpkill\b", "終止程序"),
+]
+
+# rd 太像一般英文字，只在後面接旗標時才算
+WIN_RISKY = [
+    (r"\b(del|erase|rmdir)\s+\S|\brd\s+/|\bRemove-Item\b", "刪除檔案（Windows）", True),
 ]
 
 
@@ -132,10 +144,10 @@ def command_risk(command: str) -> tuple:
     """
     cmd = " ".join(str(command or "").split())
     forms = (cmd, canon(cmd))
-    for pattern, why in BLOCKED_CMDS:
+    for pattern, why in BLOCKED_CMDS + (WIN_BLOCKED if WINDOWS else []):
         if any(re.search(pattern, f, re.I) for f in forms):
             return ("block", why)
-    for pattern, why, *_ in RISKY_CMDS:
+    for pattern, why, *_ in RISKY_CMDS + (WIN_RISKY if WINDOWS else []):
         if any(re.search(pattern, f, re.I) for f in forms):
             return ("risky", why)
     return ("ok", "")

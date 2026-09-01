@@ -502,16 +502,21 @@ Python 與 C 混合。
 
 | 等級 | 例子 | 行為 |
 |---|---|---|
-| ⛔ 擋下 | `rm -rf`、`mkfs`、`dd of=/dev/…`、`shutdown`、`git push --force`、`curl … \| sh`、fork bomb、`rmdir /s /q`、`del /s`、`format c:`、`diskpart` | **直接拒絕執行**，要跑請自己去終端機 |
-| ⚠ 風險 | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill`、`del`／`rmdir`／`Remove-Item` | 確認卡標紅講明原因，**自動模式一定會問你**（唯一例外：「工作區內全自動」＋動的檔案全在工作區裡，或沙盒開著）|
+| ⛔ 擋下 | `rm -rf`、`mkfs`、`dd of=/dev/…`、`shutdown`、`git push --force`、`curl … \| sh`、fork bomb | **直接拒絕執行**，要跑請自己去終端機 |
+| ⚠ 風險 | `sudo`、`rm`、`pip/npm/apt install`、`git reset --hard`、`mv`、`chmod`、`kill` | 確認卡標紅講明原因，**自動模式一定會問你**（唯一例外：「工作區內全自動」＋動的檔案全在工作區裡，或沙盒開著）|
 | 一般 | `pytest`、`ls`、`git status`、`grep` | 照一般流程 |
 
 判斷寫在 `serve.py` 的 `command_risk()`，確認卡顯示的是它的結論（不是前端自己猜）。
-後面那幾條是 Windows 的寫法：**沙盒沒開的話 `run_shell` 走的是 `cmd`**，
-POSIX 那幾條一條都打不到，而 `rmdir /s /q` 跟 `rm -rf` 是同一件事。
-尺度也一樣 —— 遞迴不擋（照樣要你點），**遞迴又不問**才擋。
-（規則的回歸測試會確認不誤殺 `make test`、`cmake --build`、`"{}".format(x)`；
-Windows 11 也已驗過 `cmd` 的啟動、UTF-8／主控台編碼輸出與整棵程序樹中斷。）
+
+**Windows 上另外多一套**，因為沙盒沒開時 `run_shell` 走的是 `cmd`，上面那些
+POSIX 的寫法一條都打不到：`rmdir /s /q`、`rd /s /q`、`del /s`、
+`Remove-Item -Recurse -Force`、`format c:`、`diskpart` 擋下，
+`del`／`rmdir`／`erase`／`Remove-Item` 標風險。尺度跟 `rm` 那條一樣 ——
+遞迴不擋（照樣要你點），**遞迴又不問**才擋。
+
+**兩套規則各自獨立**：Linux／macOS 上不套用 Windows 那套（不然
+`python3 -c "del cache[k]"` 會被判成 risky），Windows 上 POSIX 那套照樣套用
+（git-bash 與 WSL 裡 `rm -rf` 一樣有效）。回歸測試兩個方向都驗。
 
 **找檔案不必一層一層點。** `search_files` 只給 `glob` 不給 `pattern` 就是
 「照檔名找檔案」（`test_*.py`、`pkg/*.py`），回的是路徑清單。兩個都給就是

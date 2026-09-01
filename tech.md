@@ -689,6 +689,12 @@ Windows 上「裝了 Docker Desktop 但沒開」是最常見的狀況，`shutil.
 在 Windows 上 `pick()` 只挑得到容器所以會過，在 Linux 上 bwrap 排在前面就掛了。
 測試指定後端才驗得到它想驗的東西。
 
+**共同的教訓是同一句：平台差異要用「挑一套」處理，不是「兩套疊在一起」。**
+`process_group_kwargs()`、`kill_tree()`、`cpu_percent()` 一開始就是分支寫的，
+所以一個問題都沒有；出事的是那些「順手改成兩邊都能用」的地方 ——
+`bufsize` 是兩邊共用一個錯的值，`command_risk` 是兩套規則疊著跑，
+`ckpt_msg` 是把一個平台無關的隱私考量套到了不需要的那一層。
+
 ### 順便發現的：規則裡寫著一支送不出去的工具
 
 `agent_rules()` 的開場白就寫著「沒開放的功能一個字都不要提」，然後底下兩句話違反它：
@@ -727,10 +733,31 @@ Windows 上「裝了 Docker Desktop 但沒開」是最常見的狀況，`shutil.
 `command_risk()` 的十二條規則全是 POSIX 的。而沙盒**預設是關的**，關著的時候
 `run_shell` 走的是本機 shell —— Windows 上那是 `cmd`，於是那十二條一條都打不到。
 
-補的四條照原本的尺度走：`rm -r` 放行（要點確認）、`rm -rf` 擋，
-所以 `rmdir /s` 放行、`rmdir /s /q` 擋。另外三條是 `del /s`、`format c:`、`diskpart`。
+補的幾條照原本的尺度走：`rm -r` 放行（要點確認）、`rm -rf` 擋，
+所以 `rmdir /s` 放行、`rmdir /s /q` 擋。另外幾條是 `del /s`、
+`Remove-Item -Recurse -Force`、`format c:`、`diskpart`。
 `\bformat\s+[a-z]:` 這種寫法是刻意的 —— `"{}".format(x)` 的 `format` 後面接的是
 括號不是空白，不會誤殺。
+
+**但兩套規則要各自獨立。** 一開始是直接接在同一份清單後面，兩邊都比對 ——
+結果 Linux 上這樣：
+
+```
+risky   python3 -c "del cache[k]"     ← 被 Windows 的 del 規則咬到
+```
+
+`del`、`erase`、`rmdir` 在 Linux 上不是指令，但它們是很常見的字。多一張紅色
+確認卡不會弄壞什麼，卻會讓人開始不看內容就按 —— 那才是真正的代價。
+現在照 `os.name` 挑一套：
+
+| | POSIX 那套 | Windows 那套 |
+|---|---|---|
+| Linux／macOS | ✅ | ❌ |
+| Windows | ✅ | ✅ |
+
+Windows 上不關掉 POSIX 那套，是因為 git-bash 與 WSL 裡 `rm -rf` 一樣有效。
+`WINDOWS` 是模組常數不是直接讀 `os.name`，測試才能在 Linux 上假裝自己是
+Windows 把兩個方向都驗過（跟 `CC_POSIX` 同一個手法）。
 
 ## 提示詞、工具描述、錯誤訊息，哪個有用
 

@@ -613,21 +613,37 @@ def test_command_risk():
     assert serve.canon("rm x -r -f") == "rm -fr x --recursive --force"
 
 
-def test_windows_delete_commands_are_gated_too():
-    """沙盒沒開時 Windows 走 cmd，上面那些 POSIX 規則一條都打不到。
+def test_windows_rules_only_apply_on_windows():
+    """兩套規則各自獨立，照這台實際會用的 shell 挑一套。
 
-    `rmdir /s /q` 跟 `rm -rf` 是同一件事，以前完全放行。尺度跟 rm 那條對齊。
+    沙盒沒開時 Windows 走 cmd，POSIX 那幾條一條都打不到，而 `rmdir /s /q` 跟
+    `rm -rf` 是同一件事。反過來也要成立：`python3 -c "del cache[k]"` 在 Linux 上
+    不該因為 Windows 的 del 規則被判成 risky。
     """
-    for cmd in ["rmdir /s /q build", "rmdir /Q /S build", "rd /s /q x",
-                "Remove-Item build -Recurse -Force", "Remove-Item -fo -r build",
-                "del /s /q *.obj", "format c:", "diskpart"]:
-        assert serve.command_risk(cmd)[0] == "block", cmd
+    from core import cmdrisk
 
-    for cmd in ["rmdir /s build", "rmdir build", "del build\\a.obj", "erase *.obj",
-                "Remove-Item -Recurse x"]:
-        assert serve.command_risk(cmd)[0] == "risky", cmd
+    keep = cmdrisk.WINDOWS
+    try:
+        cmdrisk.WINDOWS = True
+        for cmd in ["rmdir /s /q build", "rmdir /Q /S build", "rd /s /q x",
+                    "Remove-Item build -Recurse -Force", "Remove-Item -fo -r build",
+                    "del /s /q *.obj", "format c:", "diskpart"]:
+            assert serve.command_risk(cmd)[0] == "block", cmd
+        for cmd in ["rmdir /s build", "rmdir build", "del build\\a.obj", "erase *.obj",
+                    "Remove-Item -Recurse x"]:
+            assert serve.command_risk(cmd)[0] == "risky", cmd
+        # git-bash／WSL 的 rm -rf 在 Windows 上照樣有效，POSIX 那套不能關掉
+        assert serve.command_risk("rm -rf /")[0] == "block"
 
-    # 不能反過來咬到 Linux 上正常的東西
+        cmdrisk.WINDOWS = False
+        for cmd in ["rmdir /s /q build", "del /s /q *.obj", "erase *.obj",
+                    'python3 -c "del cache[k]"']:
+            assert serve.command_risk(cmd)[0] == "ok", (cmd, "Windows 的規則咬到 Linux 了")
+        assert serve.command_risk("rm -rf /")[0] == "block"
+    finally:
+        cmdrisk.WINDOWS = keep
+
+    # 哪一邊都不該咬到這些
     for cmd in ["make test", "cmake --build build", "ctest --test-dir build",
                 "python -c \"print('{}'.format(1))\"", "gcc -o a a.c"]:
         assert serve.command_risk(cmd)[0] == "ok", cmd
