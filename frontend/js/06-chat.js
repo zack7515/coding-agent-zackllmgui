@@ -432,6 +432,7 @@ function markTurnDone(c) {
     saveChats();
     const els = $('thread').querySelectorAll('.msg.assistant');
     if (els.length) paintTurn(els[els.length - 1], turn);
+    renderRunBar();                         // 這一輪結束，那一行換成累計
     return;
   }
 }
@@ -440,6 +441,7 @@ function renderThread() {
   const t = $('thread');
   t.innerHTML = '';
   const c = current();
+  renderRunBar();             // 累計那一行是跟著對話走的，換一則就要換一個數字
   if (!c || !c.messages.length) {
     t.innerHTML = '<div class="empty">開始新的對話<br>在下方輸入訊息，按 Enter 送出</div>';
     return;

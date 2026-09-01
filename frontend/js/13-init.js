@@ -166,6 +166,7 @@ async function init() {
   });
 
   $('wsPick').addEventListener('click', openBrowser);
+  $('wsMkdir').addEventListener('click', newFolder);
   $('treeReload').addEventListener('click', function () {
     if (!S.ws.path) { toast('還沒選工作區資料夾'); return; }
     showTreeView();

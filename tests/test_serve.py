@@ -862,6 +862,28 @@ def test_search_by_filename_only():
         assert ".git" not in serve.TOOLS["search_files"](glob="*")
 
 
+def test_new_folder_stays_inside_the_workspace():
+    """介面那顆「＋資料夾」。走的是檔案工具同一道邊界，不是另開一條路。"""
+    with Workspace() as ws:
+        assert serve.make_dir("src/utils") == "src/utils"
+        assert (ws / "src" / "utils").is_dir(), "a/b/c 要一次開好幾層"
+        assert [e["name"] for e in serve.list_entries("src")] == ["utils"]
+
+        for bad in ("", "   ", "..", "../外面", "~/家", ".git/x", ".zackllmgui-backup/x"):
+            try:
+                serve.make_dir(bad)
+                raise AssertionError(f"{bad!r} 竟然開得起來")
+            except (ValueError, PermissionError):
+                pass
+        assert not (ws.parent / "外面").exists(), "開到工作區外面去了"
+
+        try:
+            serve.make_dir("src/utils")
+            raise AssertionError("重複的名字竟然過了")
+        except FileExistsError:
+            pass
+
+
 def test_delete_file_is_undoable():
     """刪檔案要有還原點 —— 在這支之前，模型唯一的刪檔手段是 rm，而 rm 沒有備份。"""
     with Workspace() as ws:
@@ -1269,8 +1291,13 @@ def test_checkpoint_catches_what_the_journal_misses():
 
         first = serve.checkpoint("幫我改 calc.py", 4)
         assert first["commit"] and first["tree"], first
-        # 沒改到東西就不要一直長新的，不然清單會被一模一樣的列灌滿
-        assert "一模一樣" in serve.checkpoint("再問一次")["skipped"]
+        # 沒改到東西就不要一直長新的，不然清單會被一模一樣的列灌滿。
+        # 但那一列要**改名成這一則提示**：上一則既然一個字都沒改到，退回這裡
+        # 等於退掉這一則，列上留著舊的那句話會讓人在清單裡找不到自己要退的那輪。
+        again = serve.checkpoint("再問一次", 6)
+        assert "一模一樣" in again["skipped"] and again["retitled"], again
+        assert serve.journal_read()[-1]["path"] == "再問一次"
+        assert serve.journal_read()[-1]["msg"] == 6
 
         serve.run_tool("run_shell", {"command": "echo 'y = 2' >> pkg/calc.py"})
         serve.run_tool("write_file", {"path": "new.py", "content": "新檔\n"})
@@ -1283,11 +1310,11 @@ def test_checkpoint_catches_what_the_journal_misses():
         assert len(rows) == 1, rows
         # 訊息序號要留著：介面靠它把還原點指回使用者說的那句話。
         # 只存截短到 80 字的提示的話，長對話裡分不出是哪一輪。
-        assert rows[0]["msg"] == 4, rows[0]
+        assert rows[0]["msg"] == 6, rows[0]
         # 提示本身也要留著：那是還原點那一列顯示的標題，也是「序號指錯人」時
         # 的守門（壓縮之後同一個序號會指到別則）。journal 在 .zackllmgui-backup/
         # 底下、gitignore 掉了，所以留著它跟「不寫進 git 物件」不衝突。
-        assert rows[0]["path"] == "幫我改 calc.py", rows[0]
+        assert rows[0]["path"] == "再問一次", rows[0]
         assert "幫我改 calc.py" not in git("log", "--format=%B", "-1",
                                           first["commit"]).stdout, "提示不該進 git 物件"
         # 沒給序號時記 -1，介面看到就不指 —— 舊的檢查點走的就是這條

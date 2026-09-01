@@ -414,6 +414,21 @@ def list_entries(rel: str = "") -> list:
     return out
 
 
+def make_dir(rel: str) -> str:
+    """在工作區裡開一個資料夾，給介面的「新增資料夾」用。回傳它的相對路徑。
+
+    `a/b/c` 一次開三層。邊界跟檔案工具同一道 —— ws_path() 擋 ..、絕對路徑與外連。
+    """
+    raw = " ".join(str(rel or "").split())
+    if not raw:
+        raise ValueError("要給資料夾名稱")
+    target = ws_path(raw)
+    if target.exists():
+        raise FileExistsError(f"{ws_rel(target)} 已經在了")
+    target.mkdir(parents=True)
+    return ws_rel(target)
+
+
 def set_workspace(path: str) -> dict:
     if not str(path or "").strip():
         cur().ws = None
@@ -2137,6 +2152,11 @@ class Handler(BaseHTTPRequestHandler):
                     if len(files) >= AT_FILE_CAP:
                         break
                 self._json({"files": sorted(files), "capped": len(files) >= AT_FILE_CAP})
+                return
+            # 新增資料夾也走這一支：介面開完就要重讀同一層，一趟就夠
+            if isinstance(req, dict) and req.get("mkdir"):
+                made = make_dir(str(req["mkdir"]))
+                self._json({"made": made, "path": rel, "entries": list_entries(rel)})
                 return
             self._json({"path": rel, "entries": list_entries(rel)})
         except Exception as e:

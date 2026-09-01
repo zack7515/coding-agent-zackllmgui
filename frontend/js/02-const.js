@@ -177,6 +177,20 @@ function turnLine(t) {
     + t.calls + ' 次工具 · ' + fmtTokens(t.tokens) + ' tokens';
 }
 
+// 這則對話從頭到現在總共跑了多久。數字來自每則訊息的 turn，那些跟著對話一起
+// 進 IndexedDB —— 所以關掉瀏覽器再開，累計還在。
+function chatTotals(c) {
+  const t = { ms: 0, rounds: 0, calls: 0, tokens: 0 };
+  ((c || {}).messages || []).forEach(function (m) {
+    if (!m || !m.turn) return;
+    t.ms += m.turn.ms || 0;
+    t.rounds += m.turn.rounds || 0;
+    t.calls += m.turn.calls || 0;
+    t.tokens += m.turn.tokens || 0;
+  });
+  return t;
+}
+
 // 同時是「這種擋法可以被重試接手」的判斷依據 —— 沒有這一條，Ollama 掛掉時
 // 連送都送不出去，而「連不上」正是最需要重試的情況（模型正在載入、剛重啟）。
 const CONN_HINT = '尚未連線，無法送出';

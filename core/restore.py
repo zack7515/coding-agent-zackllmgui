@@ -82,6 +82,27 @@ def journal_read() -> list:
     return out
 
 
+def journal_retitle(entry_id: str, note: str, msg: int, chat: str) -> bool:
+    """把某一列的標題換成新的提示。跳過檢查點時用。
+
+    整份重寫。journal 是一則對話幾十列的東西，而這件事一輪最多發生一次。
+    """
+    rows = journal_read()
+    hit = False
+    for e in rows:
+        if e.get("id") == entry_id:
+            e["path"], e["msg"], e["chat"] = note, msg, chat
+            hit = True
+    if not hit:
+        return False
+    try:
+        journal_path().write_text(
+            "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in rows), "utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def journal_for(chat: str) -> list:
     """這則對話的還原點。有檢查點就一輪一列，沒有就退回「一次改檔案一列」。
 
@@ -172,7 +193,12 @@ def checkpoint(note: str = "", msg: int = -1) -> dict:
             tree = git("write-tree")
             prev = next((e for e in reversed(journal_read()) if e.get("tree")), None)
             if prev and prev["tree"] == tree:
-                return {"skipped": "跟上一個檢查點一模一樣", "tree": tree}
+                # 樹一樣就不再多一個 git 物件，但標題要換成**這一則**提示 ——
+                # 上一則既然沒改到任何東西，退回這裡等於退掉這一則，列上就該寫這一則。
+                journal_retitle(prev["id"], " ".join(str(note or "").split())[:80],
+                                msg, workspace.cur_chat())
+                return {"skipped": "跟上一個檢查點一模一樣", "tree": tree,
+                        "id": prev["id"], "retitled": True}
             # 訊息裡帶上一輪改了什麼：這一相拍的就是那一輪的結果
             done = ckpt_files(prev["tree"], tree) if prev else []
             sha = git("commit-tree", tree, "-m", ckpt_msg(note, done))

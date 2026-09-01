@@ -2073,6 +2073,101 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     console.log('ok   /upstream 沒回來之前不動狀態，問不到才清空');
   }
 
+  // 「這則對話總共跑了多久」要活過關掉瀏覽器。數字存在每則訊息的 turn 上，
+  // 跟著 IndexedDB 走 —— 不是靠記憶體裡的 S.run，那個一重整就沒了。
+  {
+    const box = new Function('log', `
+      const MAX_TOOL_ROUNDS = 40;
+      const bar = { hidden: true, textContent: '' };
+      const $ = () => bar;
+      const S = { run: { rounds: 0, calls: 0, tokens: 0 }, jobs: [], auto: 'off', todos: [] };
+      let chat = null;
+      const current = () => chat;
+      const stopRunTicker = () => log.push('stop');
+      const currentTodo = () => '';
+      const autoLabel = () => 'off';
+      ${grab('chatTotals')}
+      ${grab('fmtElapsed')}
+      ${grab('fmtTokens')}
+      ${grab('renderRunBar')}
+      return { bar: bar, S: S, use: (c) => { chat = c; }, draw: renderRunBar,
+               totals: chatTotals };`)([]);
+
+    assert.deepStrictEqual(box.totals(null), { ms: 0, rounds: 0, calls: 0, tokens: 0 },
+      '沒有對話時不能爆掉');
+
+    // 純聊天那幾則沒有 turn，不該算進去
+    const c = { messages: [{ role: 'user' }, { role: 'assistant' },
+      { role: 'assistant', turn: { ms: 65000, rounds: 3, calls: 7, tokens: 1200 } },
+      { role: 'assistant', turn: { ms: 55000, rounds: 2, calls: 5, tokens: 800 } }] };
+    assert.deepStrictEqual(box.totals(c), { ms: 120000, rounds: 5, calls: 12, tokens: 2000 });
+
+    // 重開瀏覽器之後：S.run 是空的，那一行還是要在
+    box.use(c);
+    box.draw();
+    assert.strictEqual(box.bar.hidden, false, '重整之後累計那一行不見了');
+    assert.ok(/累計 2 分 0 秒/.test(box.bar.textContent), box.bar.textContent);
+    assert.ok(/5 輪/.test(box.bar.textContent) && /12 次工具/.test(box.bar.textContent),
+      box.bar.textContent);
+
+    // 一次工具都沒跑過的對話不要留一條空的
+    box.use({ messages: [{ role: 'user' }] });
+    box.draw();
+    assert.strictEqual(box.bar.hidden, true, '什麼都沒跑過卻留了一行');
+
+    // 正在跑的時候顯示的是這一輪，不是累計
+    box.use(c);
+    box.S.run = { rounds: 2, calls: 4, tokens: 9, t0: performance.now() };
+    box.draw();
+    assert.ok(/第 2\/40 輪/.test(box.bar.textContent), box.bar.textContent);
+    assert.ok(!/累計 2 分/.test(box.bar.textContent), '跑到一半不該蓋成累計');
+    console.log('ok   運行總時長存在訊息上，重開瀏覽器還在');
+  }
+
+  // ＋資料夾：按取消什麼都不做，開不了要講出來，開好了要重讀那棵樹
+  {
+    const AF = Object.getPrototypeOf(async function () {}).constructor;
+    const run = function (wsPath, answer, res) {
+      const log = [];
+      return new AF('wsPath', 'answer', 'res', 'log', `
+        const S = { ws: { path: wsPath } };
+        const prompt = () => answer;
+        const toast = (t) => log.push(['toast', String(t)]);
+        const showTreeView = () => log.push(['tree']);
+        const redrawTree = () => log.push(['redraw']);
+        const apiUrl = (p) => p;
+        const fetch = async (u, init) => { log.push(['post', JSON.parse(init.body)]); return res; };
+        ` + grab('newFolder') + `
+        await newFolder();
+        return log;`)(wsPath, answer, res, log);
+    };
+    const okRes = { ok: true, json: async () => ({ made: 'src/utils' }) };
+    const badRes = { ok: false, status: 400, json: async () => ({ error: '已經在了' }) };
+    const kinds = (l) => l.map(function (x) { return x[0]; });
+    const said = (l) => l.filter(function (x) { return x[0] === 'toast'; })
+      .map(function (x) { return x[1]; }).join('|');
+
+    let log = await run('/w', 'src/utils', okRes);
+    assert.deepStrictEqual(log[0], ['post', { mkdir: 'src/utils' }], JSON.stringify(log));
+    assert.ok(kinds(log).indexOf('redraw') >= 0, '開好了沒有重讀樹：' + JSON.stringify(log));
+    assert.ok(/src\/utils/.test(said(log)), '沒說開在哪：' + JSON.stringify(log));
+
+    log = await run('/w', null, okRes);
+    assert.strictEqual(kinds(log).indexOf('post'), -1, '按取消還是送出去了');
+    log = await run('/w', '   ', okRes);
+    assert.strictEqual(kinds(log).indexOf('post'), -1, '只打空白還是送出去了');
+
+    log = await run('', 'x', okRes);
+    assert.strictEqual(kinds(log).indexOf('post'), -1, '沒工作區還是送出去了');
+    assert.ok(/工作區/.test(said(log)), said(log));
+
+    log = await run('/w', 'pkg', badRes);
+    assert.ok(/開不了.*已經在了/.test(said(log)),
+      '失敗要把原因講出來：' + JSON.stringify(log));
+    assert.strictEqual(kinds(log).indexOf('redraw'), -1, '失敗了還去重讀樹');
+    console.log('ok   ＋資料夾（取消不動、失敗要說、成功重讀樹）');
+  }
+
 console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });
 

@@ -344,15 +344,26 @@ function renderTodos() {
 function renderRunBar() {
   const bar = $('runBar');
   const r = S.run;
-  bar.hidden = !r.rounds;
-  if (!r.rounds) { stopRunTicker(); return; }
+  // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
+  const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
+  // t0 在 markTurnDone 歸零，所以「這一輪還在跑」看的是它而不是 rounds
+  if (!r.rounds || !r.t0) {
+    stopRunTicker();
+    const t = chatTotals(current());
+    const idle = t.rounds
+      ? ['這則對話累計 ' + fmtElapsed(t.ms), t.rounds + ' 輪',
+         t.calls + ' 次工具', fmtTokens(t.tokens) + ' tokens'] : [];
+    if (bg.length) idle.push('背景 ' + bg.length + ' 條在跑');
+    bar.hidden = !idle.length;
+    bar.textContent = idle.join(' · ');
+    return;
+  }
+  bar.hidden = false;
   const bits = ['第 ' + r.rounds + '/' + MAX_TOOL_ROUNDS + ' 輪',
                 r.calls + ' 次工具',
                 '累計 ' + fmtTokens(r.tokens) + ' tokens'];
   if (r.now) bits.push('執行中 ' + r.now);
-  if (r.t0) bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
-  // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
-  const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
+  bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
   if (bg.length) bits.push('背景 ' + bg.length + ' 條在跑');
   if (r.squeezed) bits.push('已省略 ' + r.squeezed + ' 段較早的工具輸出');
   if (S.auto !== 'off') bits.push('自動模式：' + autoLabel());

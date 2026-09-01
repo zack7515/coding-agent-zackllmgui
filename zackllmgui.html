@@ -1016,6 +1016,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
       <div class="f-head ws-head">
         <span class="p" id="wsName">（未選資料夾）</span>
         <button class="mini" id="wsPick" title="選一個資料夾當工作區">選資料夾…</button>
+        <button class="mini" id="wsMkdir" title="在工作區裡新增資料夾">＋資料夾</button>
         <button class="mini" id="treeReload" title="重新讀取檔案樹（工具動過檔案會自己重讀）">↻</button>
         <button class="help-btn" id="wsHelp" title="工作區是什麼、限制有哪些">!</button>
       </div>
@@ -1442,6 +1443,20 @@ function turnLine(t) {
   if (!t) return '';
   return '這一輪 ' + fmtElapsed(t.ms) + ' · ' + t.rounds + ' 輪 · '
     + t.calls + ' 次工具 · ' + fmtTokens(t.tokens) + ' tokens';
+}
+
+// 這則對話從頭到現在總共跑了多久。數字來自每則訊息的 turn，那些跟著對話一起
+// 進 IndexedDB —— 所以關掉瀏覽器再開，累計還在。
+function chatTotals(c) {
+  const t = { ms: 0, rounds: 0, calls: 0, tokens: 0 };
+  ((c || {}).messages || []).forEach(function (m) {
+    if (!m || !m.turn) return;
+    t.ms += m.turn.ms || 0;
+    t.rounds += m.turn.rounds || 0;
+    t.calls += m.turn.calls || 0;
+    t.tokens += m.turn.tokens || 0;
+  });
+  return t;
 }
 
 // 同時是「這種擋法可以被重試接手」的判斷依據 —— 沒有這一條，Ollama 掛掉時
@@ -3146,6 +3161,7 @@ function markTurnDone(c) {
     saveChats();
     const els = $('thread').querySelectorAll('.msg.assistant');
     if (els.length) paintTurn(els[els.length - 1], turn);
+    renderRunBar();                         // 這一輪結束，那一行換成累計
     return;
   }
 }
@@ -3154,6 +3170,7 @@ function renderThread() {
   const t = $('thread');
   t.innerHTML = '';
   const c = current();
+  renderRunBar();             // 累計那一行是跟著對話走的，換一則就要換一個數字
   if (!c || !c.messages.length) {
     t.innerHTML = '<div class="empty">開始新的對話<br>在下方輸入訊息，按 Enter 送出</div>';
     return;
@@ -4319,15 +4336,26 @@ function renderTodos() {
 function renderRunBar() {
   const bar = $('runBar');
   const r = S.run;
-  bar.hidden = !r.rounds;
-  if (!r.rounds) { stopRunTicker(); return; }
+  // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
+  const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
+  // t0 在 markTurnDone 歸零，所以「這一輪還在跑」看的是它而不是 rounds
+  if (!r.rounds || !r.t0) {
+    stopRunTicker();
+    const t = chatTotals(current());
+    const idle = t.rounds
+      ? ['這則對話累計 ' + fmtElapsed(t.ms), t.rounds + ' 輪',
+         t.calls + ' 次工具', fmtTokens(t.tokens) + ' tokens'] : [];
+    if (bg.length) idle.push('背景 ' + bg.length + ' 條在跑');
+    bar.hidden = !idle.length;
+    bar.textContent = idle.join(' · ');
+    return;
+  }
+  bar.hidden = false;
   const bits = ['第 ' + r.rounds + '/' + MAX_TOOL_ROUNDS + ' 輪',
                 r.calls + ' 次工具',
                 '累計 ' + fmtTokens(r.tokens) + ' tokens'];
   if (r.now) bits.push('執行中 ' + r.now);
-  if (r.t0) bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
-  // 背景指令活在 serve.py 那個行程裡，關掉分頁它還在跑 —— 所以要一直看得到
-  const bg = (S.jobs || []).filter(function (j) { return j.code === null; });
+  bits.push('已跑 ' + fmtElapsed(performance.now() - r.t0));
   if (bg.length) bits.push('背景 ' + bg.length + ' 條在跑');
   if (r.squeezed) bits.push('已省略 ' + r.squeezed + ' 段較早的工具輸出');
   if (S.auto !== 'off') bits.push('自動模式：' + autoLabel());
@@ -5183,6 +5211,27 @@ function touchTree() {
   // 一輪常常連改五六個檔，每一個都重畫一次是白做工。收斂成最後一次。
   clearTimeout(treeTimer);
   treeTimer = setTimeout(function () { S.treeReady = true; redrawTree(); }, 400);
+}
+
+// 新增資料夾。模型的 write_file 會自己補父層，但人在整理專案時常常是先開好
+// 資料夾再決定放什麼 —— 為了這一步跳去終端機很煩。
+async function newFolder() {
+  if (!S.ws.path) { toast('要先選一個工作區資料夾'); return; }
+  const name = (prompt('新資料夾的名稱（可以打 src/utils 一次開好幾層）', '') || '').trim();
+  if (!name) return;
+  try {
+    const res = await fetch(apiUrl('/ls'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mkdir: name })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    toast('開好了：' + data.made);
+    showTreeView();
+    redrawTree();
+  } catch (e) {
+    toast('開不了：' + e.message);
+  }
 }
 
 function showTreeView() {
@@ -7283,6 +7332,7 @@ async function init() {
   });
 
   $('wsPick').addEventListener('click', openBrowser);
+  $('wsMkdir').addEventListener('click', newFolder);
   $('treeReload').addEventListener('click', function () {
     if (!S.ws.path) { toast('還沒選工作區資料夾'); return; }
     showTreeView();

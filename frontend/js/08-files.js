@@ -356,6 +356,27 @@ function touchTree() {
   treeTimer = setTimeout(function () { S.treeReady = true; redrawTree(); }, 400);
 }
 
+// 新增資料夾。模型的 write_file 會自己補父層，但人在整理專案時常常是先開好
+// 資料夾再決定放什麼 —— 為了這一步跳去終端機很煩。
+async function newFolder() {
+  if (!S.ws.path) { toast('要先選一個工作區資料夾'); return; }
+  const name = (prompt('新資料夾的名稱（可以打 src/utils 一次開好幾層）', '') || '').trim();
+  if (!name) return;
+  try {
+    const res = await fetch(apiUrl('/ls'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mkdir: name })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    toast('開好了：' + data.made);
+    showTreeView();
+    redrawTree();
+  } catch (e) {
+    toast('開不了：' + e.message);
+  }
+}
+
 function showTreeView() {
   $('treeWrap').hidden = false;
   $('viewWrap').hidden = true;
