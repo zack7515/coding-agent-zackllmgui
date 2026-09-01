@@ -6,13 +6,13 @@
 | 檔案 | 內容 | 視窗 |
 |---|---|---|
 | `main.png` | 主畫面：模型能力膠囊、思考模式五段、取樣與進階參數 | 1600×1000 |
-| `agent-run.png` | 一輪全自動跑完：12 次工具、`5 passed`、答案 380 片 | 1600×1340 |
-| `files.png` | 檔案分頁：工作區的檔案樹，點開直接看內容 | 1600×1000 |
+| `agent-run.png` | 一輪全自動跑完：`write_file` → `run_shell`（`exit 0`）、答案 380 片，底下是「這則對話累計」 | 1600×1340 |
+| `files.png` | 檔案分頁：工作區、「＋資料夾」，點開的檔案直接顯示內容 | 1600×1000 |
 | `tools.png` | 功能與工具：本機工具、連網、沙盒（bwrap）、計畫模式、自動模式、驗證指令、子代理模型 | 1600×1000 |
 
-`main.png` 與 `tools.png` 是 2026-08-28 重截的 —— 功能選單從六列變七列（多了驗證指令、
-子代理模型，允許規則改成有規則才出現），頂上也多了 VRAM 用量。
-`agent-run.png` 與 `files.png` 還是第一次那一輪的，要重截得先讓模型真的再跑一次，見下面。
+**2026-09-01 四張全部重截。** 這一輪改到畫面的有兩處：檔案分頁多了「＋資料夾」，
+輸入框上方那一條在沒東西跑的時候改顯示「這則對話累計 N 秒 · N 輪 · N 次工具」。
+驅動腳本這次踩到三個坑，都寫在下面的「怎麼重截」裡。
 
 
 ## 路徑一律換成假的
@@ -22,7 +22,7 @@
 再按快門。改的是畫面不是資料，`serve.py` 那邊完全沒動。
 
 示範資料本身是**產生出來的**：`wafer_001.json` … `wafer_012.json`，12 個 labelme 檔、
-合計 380 個 `shapes`。第一版用的是實際產線的檔案，重截時沒有留著，就照同樣的格式與總數重做一份 ——
+合計 380 個 `shapes`（固定亂數種子，重跑生得出同一份）。第一版用的是實際產線的檔案，重截時沒有留著，就照同樣的格式與總數重做一份 ——
 模型看到的東西一模一樣，而檔名不再帶任何產線資訊。
 
 截完記得確認一次：`document.body.textContent.indexOf('<你的使用者名稱>')` 要回 `-1`。
@@ -39,6 +39,41 @@ python serve.py --no-browser --port 8899 --workspace <工作區> --sandbox
 
 `agent-run.png` 那張：視窗拉到 1340 高（不然聊天區只剩 574px），把工具卡片全部收折、
 只留 `run_tests` 攤開，再把 `#scroll` 捲到底 —— 一張圖要同時看得到「跑了什麼」跟「結果」。
+
+### 注入的 JS 看不到頁面的 `const`
+
+Firefox 的 WebDriver 用 Xray wrapper 執行 `execute/sync`，那層只看得到 window 上的
+**標準屬性**。頁面頂層的 `const S`／`function showTab` 住在 global lexical scope，
+`window.__app` 是 expando —— 三者在注入的腳本裡全都是 `undefined`。
+症狀是 `ReferenceError: S is not defined`，很容易誤判成「頁面沒載好」。
+
+所以驅動一律走 DOM：`document.getElementById('tabFile').click()`、
+選單項目用 `[...document.querySelectorAll('.menu button')].find(b => …)` 撈。
+
+**別想抄捷徑寫 `localStorage` 再 reload。** `localStorage` 本身寫得進去（WebIDL
+屬性，不受 Xray 影響），但頁面掛了 `beforeunload → saveConfig()` ——
+reload 的時候舊頁面**先**把記憶體裡的設定存一次，剛寫進去的模型名就被蓋回去了。
+症狀是狀態列顯示的仍然是原本那個模型，而且完全沒有錯誤訊息。
+模型與自動模式照樣點選單：`#modelBtn` 一層，`#featBtn` →「自動模式」→ 檔位兩層。
+自動模式選到「改檔案自動」以上時，選單那支 handler 會順手把寫入權一起打開。
+
+### 「跑完了沒」要問 Ollama，不要問瀏覽器
+
+第一版是每 10 秒 `execute/sync` 讀一次執行列的文字，看它從「第 N 輪」變成
+「這則對話累計…」。結果整支卡死在那個請求上 —— 頁面在串流、markdown 一直重解，
+`execute/sync` 就一直等不到空檔。**卡住跟「還在跑」在外面看起來一模一樣**，
+只能靠 GPU 使用率 0% 才分得出來。
+
+改成問 Ollama：`/api/ps` 的 `expires_at` 是 `keep_alive` 推出來的，每呼叫一次
+就往後移一次。那個時間戳連續一分鐘沒動，就是這一輪結束了。整段等待完全不碰
+瀏覽器，最後才進去按快門。
+
+### snap 版的 geckodriver 殺不掉就換 port
+
+`/snap/bin/geckodriver` 跑起來的行程，同一個使用者也可能 `kill` 到
+`Permission denied`（snap 的 confinement）。上一輪留下來的會一直佔著 4444，
+下一次開 session 收到的是 `session not created: Session is already started`。
+不必跟它纏鬥 —— `geckodriver --port 4456` 換一個就好。
 
 ### 模型要挑塞得進 VRAM 的
 
