@@ -1124,6 +1124,29 @@ def test_run_output_caps():
         server.server_close()
 
 
+def test_streaming_is_not_unbuffered():
+    """串流的 Popen 不能用 bufsize=0。
+
+    二進位模式下那個的 readline 是一個 byte 一次系統呼叫 —— 實測 20 萬行
+    3.14 秒，改回預設的區塊緩衝是 0.02 秒，而且兩者的即時性一模一樣
+    （先 echo 再 sleep 2，兩邊都是第 0 秒就看到第一行）。
+    """
+    import core.jobs as jobs
+
+    seen = []
+    real = subprocess.Popen
+
+    def spy(*a, **kw):
+        seen.append(kw.get("bufsize", -1))
+        return real(*a, **kw)
+
+    with Workspace():
+        with mock.patch.object(jobs.subprocess, "Popen", spy):
+            serve.run_tool("run_shell", {"command": shell_python("print(1)"),
+                                         "background": True})
+    assert seen and 0 not in seen, f"串流用了 bufsize=0：{seen}"
+
+
 def test_ollama_is_local():
     """num_thread 的上限只有 Ollama 跟這支服務同機時才算得準。"""
     original = serve.Handler.ollama
@@ -1245,6 +1268,12 @@ def test_checkpoint_catches_what_the_journal_misses():
         # 訊息序號要留著：介面靠它把還原點指回使用者說的那句話。
         # 只存截短到 80 字的提示的話，長對話裡分不出是哪一輪。
         assert rows[0]["msg"] == 4, rows[0]
+        # 提示本身也要留著：那是還原點那一列顯示的標題，也是「序號指錯人」時
+        # 的守門（壓縮之後同一個序號會指到別則）。journal 在 .zackllmgui-backup/
+        # 底下、gitignore 掉了，所以留著它跟「不寫進 git 物件」不衝突。
+        assert rows[0]["path"] == "幫我改 calc.py", rows[0]
+        assert "幫我改 calc.py" not in git("log", "--format=%B", "-1",
+                                          first["commit"]).stdout, "提示不該進 git 物件"
         # 沒給序號時記 -1，介面看到就不指 —— 舊的檢查點走的就是這條
         serve.checkpoint("沒給序號")
         assert serve.journal_read()[-1]["msg"] == -1, serve.journal_read()[-1]
@@ -1494,10 +1523,15 @@ def test_sandbox_wrap_and_gate(_available, _runtime):
             assert str(ws) in joined, "工作區沒有掛進去"
             assert cmd[-1] == "ls" and cmd[-2] == "-lc", cmd
             assert head == "$ ls", "確認卡上要顯示原本那行指令，不是一長串 docker run"
-            serve.SANDBOX_GPU = True
-            gpu_cmd, _, _, _ = serve.build_command("run_shell", {"command": "nvidia-smi"})
-            assert "--gpus" in gpu_cmd and "all" in gpu_cmd, gpu_cmd
-            serve.SANDBOX_GPU = False
+            # --sandbox-gpu 只對容器有意義（核心層是自動接 /dev 節點），所以這一段
+            # 要指定後端 —— 不指定的話 Linux 上 bwrap 排在前面，永遠測不到這條。
+            keep = serve.SANDBOX_BACKEND
+            serve.SANDBOX_BACKEND, serve.SANDBOX_GPU = "container", True
+            try:
+                gpu_cmd, _, _, _ = serve.build_command("run_shell", {"command": "nvidia-smi"})
+                assert "--gpus" in gpu_cmd and "all" in gpu_cmd, gpu_cmd
+            finally:
+                serve.SANDBOX_BACKEND, serve.SANDBOX_GPU = keep, False
 
             # 擋下來的指令走沙盒也一樣擋 —— 風險判斷不能因為包了容器就跳過
             try:
@@ -1784,6 +1818,35 @@ def test_agent_rules_never_names_a_tool_it_did_not_send():
                 assert "沒有網路" in rules
         finally:
             serve.ALLOW_SANDBOX, serve.SANDBOX_BACKEND = on, backend
+
+
+def test_container_health_check_is_cached():
+    """`docker info` 不能每次 detect() 都跑一遍。
+
+    available() 現在會問 daemon 在不在（Docker Desktop 裝了沒開是最常見的狀況），
+    但那是一次 subprocess：Linux 上 33 ms，Windows 上更久，而 sandbox_state()
+    掛在 /tools 上。好的時候快取久一點，壞的時候短一點 —— 使用者正在開 daemon。
+    """
+    import sandbox as sb
+
+    calls = []
+    real = sb.container.subprocess.run
+
+    def spy(argv, **kw):
+        calls.append(argv)
+        return real(argv, **kw)
+
+    keep = dict(sb.container._HEALTH)
+    try:
+        sb.container._HEALTH.update(at=0.0, runtime="", ok=False)
+        with mock.patch.object(sb.container.subprocess, "run", spy):
+            if not sb.container.runtime():
+                return                       # 這台沒有 docker／podman，沒得測
+            for _ in range(5):
+                sb.container.available()
+        assert len(calls) == 1, f"每次都問了一遍：{len(calls)} 次"
+    finally:
+        sb.container._HEALTH.update(keep)
 
 
 @mock.patch("sandbox.bwrap.available", return_value="bwrap")

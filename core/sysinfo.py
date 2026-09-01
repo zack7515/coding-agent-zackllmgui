@@ -75,7 +75,8 @@ def ram_info() -> dict:
                 return {"used": round((status.total_phys - status.avail_phys) / gib, 1),
                         "total": round(status.total_phys / gib, 1)}
         except Exception:
-            return {}
+            pass
+        return {}                  # 失敗就回空的，不要掉進底下的 /proc/meminfo
     try:
         got = {}
         with open("/proc/meminfo", encoding="utf-8") as fh:

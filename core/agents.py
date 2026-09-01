@@ -183,11 +183,6 @@ def branch_unique(root: Path, branch: str) -> int:
         return 1                 # 問不出來就當它有東西：不刪比刪錯好
 
 
-def agent_commit_msg(rec: dict) -> str:
-    """成果會進正式歷史；不要留下提示、代理名稱或共同作者標記。"""
-    return "更新專案檔案"
-
-
 def worktree_orphans() -> list:
     """磁碟上有、但這個分頁的登記裡沒有的 worktree。
 
@@ -365,7 +360,8 @@ def agent_close(aid: str, force: bool = False) -> dict:
             # 掃進去的話合併過來會把我們的內部檔案倒進使用者的專案
             git_at(rec["ws"], "add", "-A", "--", ".",
                    *[f":(exclude){d}" for d in WORKTREE_SKIP])
-            git_at(rec["ws"], "commit", "-q", "-m", agent_commit_msg(rec))
+            # 成果會進正式歷史，訊息裡不留提示、代理名稱或共同作者標記
+            git_at(rec["ws"], "commit", "-q", "-m", "更新專案檔案")
             out["committed"] = True
             out["merge"] = f"git merge {rec['branch']}"
         except Exception as e:

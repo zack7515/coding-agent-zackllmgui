@@ -2035,8 +2035,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
 
+        # 二進位模式用預設的區塊緩衝，不要 bufsize=0（見 core/jobs.py 的說明）
         proc = subprocess.Popen(cmd, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, bufsize=0, **process_group_kwargs())
+                                stderr=subprocess.STDOUT, **process_group_kwargs())
         limit = TEST_TIMEOUT if name == "run_tests" else SHELL_TIMEOUT
         watchdog = threading.Timer(limit, kill_tree, args=(proc,))
         watchdog.start()

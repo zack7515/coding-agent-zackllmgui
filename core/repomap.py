@@ -90,7 +90,8 @@ def repo_map(files, rel) -> str:
         # 放在這裡而不是 ws_walk：那個 stat 本來就要做，等於不用錢。
         if not f.suffix:
             try:
-                magic = f.open("rb").read(4)
+                with f.open("rb") as fh:
+                    magic = fh.read(4)
             except OSError:
                 magic = b""
             if st.st_mode & 0o111 or magic.startswith((b"\x7fELF", b"MZ")):

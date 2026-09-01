@@ -42,8 +42,10 @@ def available() -> str:
     rt = runtime()
     if not rt:
         return ""
+    # 好的時候問久一點（daemon 不會每兩秒關一次），壞的時候問密一點 ——
+    # 那通常是使用者正在開 Docker Desktop，等太久按鈕不會亮。
     now = time.monotonic()
-    if _HEALTH["runtime"] != rt or now - _HEALTH["at"] > 2:
+    if _HEALTH["runtime"] != rt or now - _HEALTH["at"] > (30 if _HEALTH["ok"] else 3):
         try:
             proc = subprocess.run([rt, "info", "--format", "{{.ServerVersion}}"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

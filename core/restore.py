@@ -179,8 +179,10 @@ def checkpoint(note: str = "", msg: int = -1) -> dict:
             git("update-ref", f"{CKPT_REF}/{sha[:12]}", sha)   # 沒 ref 釘著會被 gc 掃掉
     except Exception as e:
         return {"skipped": f"{type(e).__name__}: {e}"}
-    return {"id": journal_add("checkpoint", "", "", False,
-                               tree=tree, commit=sha, msg=msg),
+    # 提示留在 journal 裡（那份在 .zackllmgui-backup/，gitignore 掉了），
+    # 但不進 commit message —— 介面靠它顯示標題並確認序號沒指錯人。
+    return {"id": journal_add("checkpoint", " ".join(str(note or "").split())[:80],
+                              "", False, tree=tree, commit=sha, msg=msg),
             "commit": sha, "tree": tree}
 
 
