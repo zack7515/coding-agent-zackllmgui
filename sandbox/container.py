@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 NAME = "container"
@@ -26,6 +28,7 @@ IMAGE = "python:3.13-slim"
 LIMITS = ["--memory", "4g", "--pids-limit", "512", "--cpus", "4"]
 RUNTIMES = ("podman", "docker")     # podman 在前：不需要 daemon、預設 rootless
 WORKDIR = "/work"                   # 容器裡工作區的位置
+_HEALTH = {"at": 0.0, "runtime": "", "ok": False}
 
 
 def runtime() -> str:
@@ -36,21 +39,35 @@ def runtime() -> str:
 
 
 def available() -> str:
-    return shutil.which(runtime()) if runtime() else ""
+    rt = runtime()
+    if not rt:
+        return ""
+    now = time.monotonic()
+    if _HEALTH["runtime"] != rt or now - _HEALTH["at"] > 2:
+        try:
+            proc = subprocess.run([rt, "info", "--format", "{{.ServerVersion}}"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=4)
+            ok = proc.returncode == 0
+        except Exception:
+            ok = False
+        _HEALTH.update(at=now, runtime=rt, ok=ok)
+    return shutil.which(rt) if _HEALTH["ok"] else ""
 
 
 def why() -> str:
     if available():
         return ""
     hint = ("Docker Desktop" if sys.platform == "win32" else "／".join(RUNTIMES))
-    return f"沒有裝 {hint}"
+    return (f"{hint} 已安裝，但容器服務沒有啟動或無法連線"
+            if runtime() else f"沒有裝 {hint}")
 
 
 def wrap(command: str, workspace, net: bool = False, gpu: bool = False,
          image: str = "", **_) -> list:
     """把一行指令包成「在容器裡跑」的 argv。"""
     rt = runtime()
-    if not rt:
+    if not rt or not available():
         raise RuntimeError(why())
     ws = str(Path(workspace).resolve())
     argv = [rt, "run", "--rm", "-i",
@@ -77,5 +94,5 @@ def describe() -> dict:
                       "記憶體 4g／程序數 512／CPU 4", "以你的 uid 執行（非 Windows）"],
         "notes": ["映像檔裡沒有的東西就是沒有（pytest、node、gcc 都要自己裝）",
                   "GPU 要 NVIDIA Container Toolkit 加上 CUDA 映像檔",
-                  "冷啟動約 170 ms"],
+                  "冷啟動依平台而異（實測 Linux 約 176 ms、Windows 約 600 ms）"],
     }

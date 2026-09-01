@@ -13,13 +13,13 @@
 | Windows | `container`（Docker Desktop） | Docker Desktop |
 | 都可以 | `container`（docker / podman） | docker 或 podman |
 
-**只有 Linux 實測過**（bwrap 與 container 兩個後端都是在 Linux 上驗的）。
-macOS 的 seatbelt 與 Windows 上的 Docker Desktop 沒有機器可以跑 ——
-在那兩個平台上先跑 `python -m sandbox` 逐項驗過再開。
+Linux 的 bwrap／container 與 Windows 的 Docker Desktop 都已實測；macOS 的
+seatbelt 還沒有實機。在新機器上仍建議先跑 `python -m sandbox` 逐項驗過再開。
 
 挑選順序是「核心層優先、容器墊底」：核心層的沙盒不換掉檔案系統，
 所以 pytest、node、gcc、CUDA 都還在原地，而且快一個數量級
-（這台實測 bwrap 7 ms、docker 176 ms）。容器要嘛映像檔裡有、要嘛就是沒有。
+（實測 bwrap 7 ms；docker 在 Linux 約 176 ms、Windows 約 600 ms）。
+容器要嘛映像檔裡有、要嘛就是沒有。
 
 對外只有四個東西：`detect()` 看這台有什麼、`wrap()` 包一行指令、
 `run()` 直接跑、`pick()` 指定後端。全部只用標準函式庫。
@@ -74,7 +74,7 @@ def _advice() -> str:
     if sys.platform == "darwin":
         return "這台 macOS 找不到 sandbox-exec，也沒有 docker／podman"
     if sys.platform == "win32":
-        return "Windows 上需要 Docker Desktop —— 系統內建的 Windows Sandbox 是完整桌面環境，接不上這裡"
+        return container.why() + "。系統內建的 Windows Sandbox 是完整桌面環境，接不上這裡"
     return f"{sys.platform} 上沒有已知的沙盒做法"
 
 

@@ -25,7 +25,7 @@ CHECKS = [
      "掛載有生效，不然工具進去等於空的"),
     ("寫得回工作區", "echo WROTE > out.txt && cat out.txt", lambda o: "WROTE" in o,
      "產出要留得下來，不然跑測試沒有意義"),
-    ("工作區以外寫不動", "touch /etc/zack-probe 2>&1 | head -1",
+    ("工作區以外寫不動", "touch /etc/local-agent-probe 2>&1 | head -1",
      lambda o: ("Read-only" in o or "Permission denied" in o
                 or "denied" in o.lower() or "not permitted" in o.lower()),
      "這是 run_shell 最大的洞：不擋的話它跟你在終端機打一樣有力"),
@@ -45,10 +45,17 @@ def probe(backend: str = "", **opts) -> list:
     """回傳 [(名稱, 通過, 輸出, 說明)]。opts 往下傳給 run()（目前只有 image）。"""
     mod = pick(backend)
     out = []
-    with tempfile.TemporaryDirectory(prefix="zack-sandbox-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="local-agent-sandbox-") as tmp:
         ws = Path(tmp)
         (ws / "marker.txt").write_text("HELLO\n", encoding="utf-8")
         for name, cmd, ok, why in CHECKS:
+            if name == "工作區以外寫不動" and not mod.SAME_FS:
+                # 容器的 rootfs 本來就能寫；安全邊界是宿主機只掛 /work，而且 --rm 後
+                # 這些寫入會消失。拿核心層的「唯讀 /」標準判它，會把正確隔離報成失敗。
+                name = "容器 rootfs 是一次性的"
+                cmd = "touch /etc/local-agent-probe && echo EPHEMERAL"
+                ok = lambda o: "EPHEMERAL" in o
+                why = "容器內可寫，但宿主機只掛工作區且結束後用 --rm 丟棄"
             try:
                 _, text = run(cmd, ws, net=False, timeout=90, backend=mod.NAME,
                               **opts)
@@ -97,11 +104,11 @@ def bench(backend: str = "", rounds: int = 5, **opts) -> dict:
     """量開銷：同一行指令，進沙盒 vs 直接跑。"""
     mod = pick(backend)
     result = {}
-    with tempfile.TemporaryDirectory(prefix="zack-bench-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="local-agent-bench-") as tmp:
         ws = Path(tmp)
         for label, cmd in (("短指令 echo", "echo hi"),
-                           ("列目錄 ls -la", "ls -la"),
-                           ("起 python", "python3 -c 'print(1)'")):
+                           ("列目錄", "python -c \"import os;print(len(os.listdir('.')))\""),
+                           ("起 python", "python -c \"print(1)\"")):
             for mode in (False, True):
                 times = []
                 for _ in range(rounds):

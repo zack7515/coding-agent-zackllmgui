@@ -17,10 +17,10 @@ Ollama 與 OpenAI 相容 API 的網頁前端。單一 HTML 檔，不需要建置
 兩種方式的介面一樣。差別除了 CORS，還有兩件只有啟動器做得到的事：
 **解析 PDF / Word**（瀏覽器讀不動二進位檔）與 **本機工具**（要有人在本機執行指令）。
 
-> **目前只確定 Linux 可以。** 開發與實測都在 Ubuntu 24.04 / Python 3.13 上，
-> **macOS 與 Windows 一次都沒有在實機上跑過**。會踩到平台差異的全在本機工具那一塊：
-> 沙盒挑哪個後端、`run_shell` 走哪個 shell、編譯器怎麼呼叫、危險指令怎麼寫。
-> 純聊天（不開工作區、不開工具）跑得動 Python 就行。
+> **Linux 與 Windows 11 已實機驗證；macOS 尚未實測。** Windows 已跑過服務啟動、
+> 本機檔案與 shell 工具、背景程序中斷、系統資訊、Docker Desktop 沙盒與 NVIDIA GPU。
+> MSVC／MinGW 的完整 C/C++ 流程仍未實測。純聊天（不開工作區、不開工具）只要能跑
+> Python 就行。
 
 ### A. 用 serve.py 啟動（不會有 CORS 問題）
 
@@ -42,6 +42,7 @@ python serve.py --allow-write                      # 啟動時就允許改檔案
 python serve.py --sandbox                          # 開機就把 run_shell 關進沙盒（自己挑後端）
 python serve.py --sandbox container                # 指定後端：bwrap / seatbelt / container
 python serve.py --sandbox-image gcc:14             # 換容器映像檔（預設那個沒有編譯器）
+python serve.py --sandbox container --sandbox-gpu  # 容器接 NVIDIA GPU（需 Container Toolkit）
 python serve.py --no-tools                         # 關掉本機工具（預設是開著的）
 python serve.py --trust-remote                     # 非本機的瀏覽器也能開工具（見下方警告）
 ```
@@ -334,8 +335,10 @@ C/C++ 專案裡：
 `compile_commands.json` 在根目錄（`bear`／`compiledb`）、什麼建置系統都沒有、
 Python 與 C 混合。
 
-> **Windows／macOS 的路寫好了，但沒有機器可以驗。** 下面這幾條是程式碼裡確實
-> 這樣寫的，等有機器再測 —— 現在請當成「應該會這樣」而不是「實測如此」：
+> **Windows 11 的一般工具與沙盒流程已實測；macOS 尚未實測。** Windows 測試環境是
+> Python 3.12.7、Docker 28.1.1 與 NVIDIA RTX 3080；`python -m sandbox` 的工作區掛載、
+> 回寫、一次性 rootfs、憑證隔離、斷網與 GPU 探測全部通過。以下 C/C++ 工具鏈細節仍是
+> 實作保證，因為這次沒有安裝 MSVC／MinGW 做完整編譯測試：
 >
 > - 沒開沙盒的話 `run_shell` 就是你本機的 shell，MSVC 也好 MinGW 也好都照跑。
 > - **開了沙盒**的話 Windows 上唯一的後端是容器，而預設映像檔 `python:3.13-slim`
@@ -358,7 +361,7 @@ Python 與 C 混合。
   （附選項就變成按鈕），答案回灌給模型。
 - **計畫模式**：打開之後，模型得先 `submit_plan` 送出計畫、你按「核准」，
   修改檔案的工具才會出現。
-- **專案說明**：工作區根目錄有 `AGENTS.md`／`CLAUDE.md`／`GROK.md`／`.cursorrules`
+- **專案說明**：工作區根目錄有 `AGENTS.md`／`GROK.md`／`.cursorrules`
   時會自動讀進系統提示，優先於內建通則。工作區對話框會顯示讀到了哪一份。
 - **連網瀏覽**（功能與工具 → 連網瀏覽，預設關）：`run_browser` 讓模型
   **不知道網址時也查得到東西** —— `action="search"` 用關鍵字搜，
@@ -424,15 +427,15 @@ Python 與 C 混合。
   |---|---|---|---|
   | Linux | bubblewrap | `sudo apt install bubblewrap` | ✅ 實測 |
   | macOS | 內建的 `sandbox-exec` | 不用裝 | 🛠️ 寫好了沒驗 |
-  | Windows | Docker Desktop | Docker Desktop | 🛠️ 寫好了沒驗 |
+  | Windows | Docker Desktop | Docker Desktop | ✅ Windows 11 / Docker 28.1.1 實測 |
 
-  **只有 Linux 實測過**（容器後端也是在 Linux 上驗的）。開之前先在你那台跑一次
+  Linux bubblewrap 與 Windows 11 Docker Desktop 都已實測。換到新機器仍建議先跑一次
   `python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。
 
   挑不出來的話按鈕會直接告訴你這個平台該裝什麼。核心層的做法（bubblewrap／sandbox-exec）
   排在容器前面，因為它**不換掉檔案系統** —— pytest、node、gcc、CUDA 都還在原地，
   而容器裡「映像檔沒裝的就是沒有」。預設映像檔是 `python:3.13-slim`，
-  裡面**沒有編譯器也沒有 cmake**；要跑 C/C++ 就換一個：`--sandbox-image gcc:14`。這台實測 bubblewrap 每次多花 7 ms，docker 是 176 ms。
+  裡面**沒有編譯器也沒有 cmake**；要跑 C/C++ 就換一個：`--sandbox-image gcc:14`。Linux 實測 bubblewrap 每次多花 7 ms、docker 約 176 ms；Windows Docker Desktop 約 600 ms。
   三支工具裡只有 `setup_env` 開網路 —— pip 一定要連得出去，開放範圍就縮在那一步。
   細節與「加一個後端要寫什麼」在 [sandbox/README.md](sandbox/README.md)。
 
@@ -507,8 +510,8 @@ Python 與 C 混合。
 後面那幾條是 Windows 的寫法：**沙盒沒開的話 `run_shell` 走的是 `cmd`**，
 POSIX 那幾條一條都打不到，而 `rmdir /s /q` 跟 `rm -rf` 是同一件事。
 尺度也一樣 —— 遞迴不擋（照樣要你點），**遞迴又不問**才擋。
-（規則本身在 Linux 上測過不會誤殺 `make test`、`cmake --build`、
-`"{}".format(x)` 這些；但沒有 Windows 機器可以驗真的在 `cmd` 底下跑起來的樣子。）
+（規則的回歸測試會確認不誤殺 `make test`、`cmake --build`、`"{}".format(x)`；
+Windows 11 也已驗過 `cmd` 的啟動、UTF-8／主控台編碼輸出與整棵程序樹中斷。）
 
 **找檔案不必一層一層點。** `search_files` 只給 `glob` 不給 `pattern` 就是
 「照檔名找檔案」（`test_*.py`、`pkg/*.py`），回的是路徑清單。兩個都給就是
@@ -1067,6 +1070,7 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
   每則提示送出前照一張相（`C`），那一輪動過的檔案列在它底下 —— 一起改的東西
   本來就有關連，要退就整輪退。包含 `run_shell` 改的。**只動檔案，不動對話。**
   快照是 git 的 shadow commit，工作區不是 git repo 就退回「一次改檔案一列」。
+  commit 訊息只記變更檔案數，不寫提示、對話 id 或本機絕對路徑。
   **點一列會先跳到你當時說的那句話並閃一下**，確認框裡放的也是那句原文 ——
   列表上只放得下八十個字，長對話裡分不出是哪一輪。
 - **分支**：在任一則回覆按樹枝圖示，複製到該則為止的歷史開一個新對話，
@@ -1171,9 +1175,10 @@ ollamaGUI/
 │       ├── 12-ui.js          分支、選單、側欄拖寬、主題、系統用量
 │       └── 13-init.js        接線與啟動
 │
-├── tests/                全部的自我檢查，都不需要安裝東西
-│   ├── test_serve.py       後端 85 項： python tests/test_serve.py
-│   ├── test_gui.js         網頁 67 項： node tests/test_gui.js
+├── tests/                自我檢查（Python 兩支無額外相依；網頁測試需要 Node.js）
+│   ├── test_serve.py       後端 103 項： python tests/test_serve.py
+│   ├── test_core.py        核心模組 11 項： python tests/test_core.py
+│   ├── test_gui.js         網頁 70 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │

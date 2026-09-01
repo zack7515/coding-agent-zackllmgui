@@ -137,7 +137,7 @@ def ws_path(rel: str, must_exist: bool = False) -> Path:
 
 def ws_rel(p: Path) -> str:
     root = ws_root().resolve()
-    return "." if p == root else str(p.relative_to(root))
+    return "." if p == root else p.relative_to(root).as_posix()
 
 
 def ws_langs() -> set:

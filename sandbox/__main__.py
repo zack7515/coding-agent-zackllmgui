@@ -11,6 +11,8 @@ from .probe import bench, probe
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     as_json = "--json" in sys.argv
     want = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--backend=")), "")
     # 裸的後端名字也接受。以前 `python -m sandbox container` 會安靜地
@@ -20,9 +22,22 @@ def main() -> int:
     opts = {"image": image} if image else {}
     info = detect()
 
-    if as_json and not info["ok"]:
-        print(json.dumps(info, ensure_ascii=False, indent=2))
-        return 1
+    if as_json:
+        if not info["ok"]:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+            return 1
+        try:
+            mod = pick(want)
+            rows = [] if "--bench" in sys.argv else probe(mod.NAME, **opts)
+            timings = bench(mod.NAME, 3 if rows else 5, **opts)
+            print(json.dumps({"detect": info, "backend": mod.NAME,
+                              "checks": [{"name": n, "ok": o, "output": t}
+                                         for n, o, t, _ in rows],
+                              "bench": timings}, ensure_ascii=False, indent=2))
+            return 0 if all(ok for _, ok, _, _ in rows) else 1
+        except RuntimeError as e:
+            print(json.dumps({"detect": info, "error": str(e)}, ensure_ascii=False, indent=2))
+            return 1
     h = info["host"]
     print(f"這台機器    {h['system']} {h['release']}（{h['machine']}）")
     for b in info["backends"]:
@@ -54,11 +69,6 @@ def main() -> int:
             direct = b.get(k.replace("沙盒", "直接"))
             if direct:
                 print(f"  → {k.split('／')[0]} 多花 {(v - direct) * 1000:.0f} ms")
-
-    if as_json:
-        print(json.dumps({"detect": info, "backend": mod.NAME,
-                          "checks": [{"name": n, "ok": o, "output": t} for n, o, t, _ in rows],
-                          "bench": b}, ensure_ascii=False, indent=2))
 
     bad = [n for n, ok, _, _ in rows if not ok]
     print("\n" + ("全部通過。" if not bad else "沒過：" + "、".join(bad)))

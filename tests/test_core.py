@@ -13,11 +13,14 @@ repo_map(files, rel)、skills_usable(have)、skill_live(body, run, allowed, buil
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import cmdrisk, repomap, skills, workspace   # noqa: E402
+from core import cmdrisk, repomap, skills, sysinfo, workspace   # noqa: E402
+from sandbox import container   # noqa: E402
 
 
 # ── repo_map：拆出去之後改成收 (files, rel) ────────────────────────── #
@@ -201,7 +204,7 @@ def test_skill_live_runs_commands_through_the_callbacks_it_is_handed():
 
     def build(name, args):
         ran.append(args["command"])
-        return (["printf", "MARKER-OUT"], None, False, "")
+        return ([sys.executable, "-c", "print('MARKER-OUT')"], None, False, "")
 
     with tempfile.TemporaryDirectory() as tmp:
         workspace.SESSIONS[""].ws = Path(tmp)
@@ -230,6 +233,29 @@ def test_command_risk_is_pure():
     assert cmdrisk.command_risk("rm -rf /")[0] == "block"
     assert cmdrisk.command_risk("ls && rm -rf ~")[0] == "block", "分隔符後面也要看"
     assert cmdrisk.canon("  git   status  ") == "git status"
+
+
+def test_local_system_usage_has_real_host_values():
+    """Windows 不可退回 /proc 的空資料；第一次 CPU 沒基準，第二次必須有值。"""
+    sysinfo.CPU_LAST.clear()
+    sysinfo.cpu_percent()
+    time.sleep(0.05)
+    cpu = sysinfo.cpu_percent()
+    if os.name == "nt" or sys.platform.startswith("linux"):
+        assert 0 <= cpu <= 100, cpu
+        ram = sysinfo.ram_info()
+        assert 0 < ram["used"] <= ram["total"], ram
+
+
+def test_container_needs_a_live_engine_not_only_a_cli():
+    """Docker 命令存在但 Desktop 沒啟動時，不可把沙盒誤報成可用。"""
+    failed = type("Result", (), {"returncode": 1})()
+    with mock.patch.object(container, "runtime", return_value="docker"), \
+            mock.patch.object(container.shutil, "which", return_value="docker"), \
+            mock.patch.object(container.subprocess, "run", return_value=failed):
+        container._HEALTH.update(at=0.0, runtime="", ok=False)
+        assert container.available() == ""
+        assert "已安裝" in container.why()
 
 
 # ── workspace：安全邊界 ─────────────────────────────────────────── #

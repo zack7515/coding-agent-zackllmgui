@@ -20,10 +20,16 @@ python -m sandbox --json
 |---|---|---|---|
 | Linux | `bwrap`（bubblewrap） | `sudo apt install bubblewrap` | ✅ 這台全部通過 |
 | macOS | `seatbelt`（內建 `sandbox-exec`） | 不用裝 | ⚠️ 沒有機器，未實測 |
-| Windows | `container`（Docker Desktop） | Docker Desktop | ⚠️ 沒有機器，未實測 |
+| Windows | `container`（Docker Desktop） | Docker Desktop | ✅ Windows 11 / Docker 28.1.1 實測 |
 | 跨平台 | `container`（docker / podman） | docker 或 podman | ✅ 這台全部通過 |
 
 挑選順序寫在 `__init__.py` 的 `BACKENDS`：**核心層優先、容器墊底**。
+
+Windows 11 的實測環境是 Python 3.12.7、Docker 28.1.1、NVIDIA RTX 3080。
+`python -m sandbox` 的 8 項探測全部通過：容器啟動、工作區讀寫、一次性 rootfs、
+憑證隔離、斷網、C/C++ 工具鏈紀錄與 GPU 可見性；三種短指令量到約 0.5–0.6 秒容器開銷。
+預設 `python:3.13-slim` 沒有 C/C++ 工具鏈，所以該項通過代表「能正確回報沒有」，
+不是映像檔內含編譯器。
 
 ## 為什麼核心層排在容器前面
 
@@ -40,9 +46,9 @@ bwrap 與 seatbelt 是核心層的限制：程序還是跑在你的機器上，�
 
 | | bwrap | docker |
 |---|---|---|
-| 冷啟動 | **7 ms** | 176 ms |
+| 冷啟動 | **7 ms** | Linux 約 176 ms；Windows 約 600 ms |
 | pytest / node / gcc | 宿主機有就有 | 映像檔沒有就沒有（預設 `python:3.13-slim` **三個都沒有**）|
-| GPU | **自動接進去**，不用開關（見下） | 要 NVIDIA Container Toolkit + CUDA 映像檔，而且要 `gpu=True` —— **目前 serve.py 不會傳**，所以容器後端沒有 GPU |
+| GPU | **自動接進去**，不用開關（見下） | 加 `--sandbox-gpu`，並準備 NVIDIA Container Toolkit + 工作負載需要的 CUDA 映像檔 |
 | 記憶體／CPU 上限 | ❌ 沒有（要 cgroup） | ✅ 4g／4 cpu／512 pids |
 
 所以容器不是「比較差」，是**換到的東西不同**：它多給資源上限與乾淨的環境，
@@ -121,7 +127,7 @@ def describe() -> dict       # name / kind / isolation / notes
 - **macOS** —— 走 `sandbox-exec`，那是**完全不同的機制**（沒有 `/dev` bind 這回事），
   Metal／MPS 目前沒有處理。
 - **容器後端（Windows 或手動指定）** —— `--gpus all` 需要 NVIDIA Container Toolkit，
-  沒裝的話 docker 會直接失敗，所以**不無條件加**，目前容器裡沒有 GPU。
+  沒裝的話 docker 會直接失敗，所以不無條件加；啟動時用 `--sandbox-gpu` 明確開啟。
 
 **要自己補一條的話**：在 `GPU_NODES` 加 glob 就好，其他都不用動 ——
 非字元裝置（例如 `/dev/dri/by-path` 那種符號連結目錄）會自動跳過。

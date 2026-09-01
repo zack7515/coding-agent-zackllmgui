@@ -588,12 +588,11 @@ calc_test.c：main
 
 不擋 `read_file`：真的想看那個檔還是看得到，只是不主動列出來。
 
-### Windows：四個地方都是「在 Linux 上看不見」的那種壞
+### Windows 11：實機驗證後補齊的平台路徑
 
-> **這一節寫的是「預想會成功的做法」，沒有實機驗過。** 沒有 Windows 機器可以跑，
-> 下面是讀程式碼與讀各家文件推出來的。之所以先寫：這三個地方在 Linux 上也不會
-> 變好，而且**失敗的方向是安全的** —— 認不出來的一律跳過，退回「少一條回饋」而
-> 不是「一排誤報」。等有機器的時候跑一次 `python -m sandbox` 加一個 C/C++ 專案就驗完了。
+> Windows 11 已用 Python 3.12.7、Docker 28.1.1 與 RTX 3080 實測。服務、本機工具、
+> 系統資訊、背景程序中斷、Docker Desktop 沙盒與容器 GPU 都通過；MSVC／MinGW 的
+> 完整 C/C++ 編譯流程因這台沒有對應工具鏈，仍只有參數解析與回歸測試。macOS 也尚未實測。
 
 C/C++ 這四條線在 Linux 上實測過就收工了。回頭照 Windows 走一遍，壞的地方
 有一個共同點：**在 Linux 上跑測試永遠不會紅**。
@@ -634,6 +633,22 @@ $ docker run --rm python:3.13-slim sh -lc 'command -v gcc cmake make'
 `cmake-build-debug`／`release`／`relwithdebinfo`，Visual Studio 的開啟資料夾模式用
 `out/build/<設定>/`。改成 glob 之後這幾種都涵蓋了，而且 `Path.glob()` 對字面路徑
 也照樣有效，所以不用分兩套寫法。
+
+實機跑起來後又抓到四個不會在 Linux 測試冒出的問題：
+
+- **系統用量原本只讀 `/proc`。** Windows 改用 `GetSystemTimes` 與
+  `GlobalMemoryStatusEx`，GPU 繼續走跨平台的 `nvidia-smi`；`/sys` 已驗到 CPU、RAM、
+  GPU 與 VRAM 都有真值。
+- **背景工作只會殺 POSIX process group。** Windows 用新的 process group 啟動，
+  中斷或逾時時交給 `taskkill /T /F` 收整棵程序樹；啟動失敗也會先清掉工作登記，
+  不留下永遠顯示「執行中」的殭屍項目。
+- **`cmd` 輸出與路徑格式不同。** 外部工具先按 UTF-8 解碼，Windows 內建指令失敗時
+  退回 OEM code page；送給網頁與模型的工作區相對路徑統一成 `/`，避免反斜線進 JSON、
+  glob 與連結後各自再補判斷。Git 子程序也固定用 UTF-8 讀輸出。
+- **有 `docker.exe` 不代表 Docker Desktop 已啟動。** 可用性改成短暫快取的
+  `docker info` 健康檢查，錯誤訊息能分出「沒安裝」與「服務沒啟動」。容器 GPU 不猜環境，
+  由 `--sandbox-gpu` 明確加 `--gpus all`；`python -m sandbox` 的 8 項探測已全部通過，
+  三種短指令的額外開銷約 0.5–0.6 秒。
 
 剩下一格是補不起來的：語法檢查跑在**宿主機**上，容器裡 configure 出來的資料庫記的
 是容器內路徑（`/work/…`），對不起來。不做路徑對映 —— 會用容器後端的機器通常宿主機
@@ -1367,6 +1382,10 @@ bug**，只是要壓的時機剛好比較少落在那裡。
 閃一下，再問要不要退。確認框裡放的也是**對話裡的原文**而不是 journal 那份
 截短的 —— 有了序號就拿得到完整的。
 
+這裡刻意只存**訊息序號**：journal 不寫提示內容，shadow commit 的訊息也只有
+「工作區檢查點（N 個檔案變更）」，不含對話 id、本機絕對路徑或交辦內容。
+就算備份 `.git` 或推送額外 refs，也不會把這些內容一起帶走。
+
 沒有序號的情況（舊的檢查點、壓縮之後那一則已經不在畫面上）一律回 `null`，
 流程照舊。**指不回去不該變成退不了。**
 
@@ -1489,7 +1508,7 @@ const FEATURES = [{
 | `todo_write` | 十幾輪之後模型會忘記目標。清單攤在輸入框上方，人跟模型都看得到 | `_tool_todo_write()` / `renderTodos()` |
 | `ask_user_question` | 讓它問，不要猜。**這支不在伺服器執行** —— 伺服器沒有人可以答 | `askUser()`（前端）；`run_tool()` 會直接拒絕 |
 | `submit_plan` + 計畫模式 | 先講計畫、人核准，寫入工具才出現在 `tool_defs()` 裡 | `Session.plan`（`on` / `approved` / `text`） |
-| `AGENTS.md` 自動讀入 | 不同 agent 各有慣例（CLAUDE.md／AGENTS.md／GROK.md），講的是同一件事 | `project_md()`，接在 `agent_rules()` 最後 |
+| `AGENTS.md` 自動讀入 | 支援 AGENTS.md／GROK.md／.cursorrules | `project_md()`，接在 `agent_rules()` 最後 |
 
 計畫模式的閘門做在**兩層**：`tool_defs()` 那一層沒核准之前寫入工具
 根本不會出現在送給模型的清單裡（跟其他分層一樣的理由 —— 看不到才不會一直嘗試），
@@ -1792,7 +1811,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **`READ_STATE` 永遠不清** | 一次 session 幾百筆，記憶體無所謂 | 真要淘汰換 `OrderedDict` 加上限 |
 | **原始碼指紋比 mtime 不比內容**（[serve.py](serve.py) `source_stamp`） | `touch` 與 `git checkout` 會誤觸 | 誤判的代價只是多重啟一次。真的嫌吵再換成讀檔算 sha1 |
 | **GPU 節點是寫死的 glob 清單**（[sandbox/bwrap.py](sandbox/bwrap.py) `GPU_NODES`） | 只有 NVIDIA 驗過，其餘照文件寫 | 在沙盒裡 `ls /dev` 看少了什麼，往清單補一條。細節見 [sandbox/README.md](sandbox/README.md) |
-| **容器後端不接 GPU** | docker／podman 裡沒有顯示卡 | `--gpus all` 需要 NVIDIA Container Toolkit，沒裝會讓 docker 直接失敗，所以不無條件加。要做就得先偵測 |
+| **容器 GPU 要明確開啟** | 預設不接顯示卡 | `--sandbox-gpu` 會加 `--gpus all`；需要 NVIDIA Container Toolkit，所以不無條件開啟 |
 | **重複失敗只比「工具名＋參數完全一樣」**（[07-tools.js](frontend/js/07-tools.js) `REPEAT_LIMIT`） | 差一個空白就繞過去 | 模型重試時通常原封不動送同一份。真的漏掉再做參數正規化 |
 | **檔位可以自己打開寫入權限**（[02-const.js](frontend/js/02-const.js) `autoWrites`） | 選了「改檔案自動」等於同意模型改檔案，沒有第二次確認 | 那個檔位的名字就是同意本身。反過來（兩邊各存各的）的症狀是畫面顯示全自動、那支筆卻是灰的，而使用者看不出為什麼。打開時一定跳提示 |
 | **Word／PPT 用正規表示式拔標籤**（[serve.py](serve.py) `_docx_text`） | 沒有樣式與表格結構 | 要完整版面就換 `python-docx`，但那是一個相依套件 |
@@ -1801,7 +1820,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **孤兒 worktree 只列不自動刪**（[serve.py](serve.py) `worktree_orphans`） | 重啟之後要人自己去 `/agents` 按一下才收得掉 | 「沒有人認得」不等於「可以刪」，分支上可能有成果。自動刪要先決定「什麼叫確定沒用了」，那是設計題不是工程題 |
 | **`/agents` 只看得到自己這個分頁的子代理** | 從別的分頁拿到 id 就追不到 | `Session` 之間刻意不互通（那正是多分頁隔離的意思）。要跨分頁查就得再開一支不分 Session 的端點，那會把隔離開一個洞 |
 | **worktree 的改動要人自己 merge** | 主代理拿到的是 diffstat 加一句 `git merge zackllmgui/xxxx`，最後那一下要人下 | 自動合撞到衝突會把工作區弄成一半合完的狀態，比「你自己 merge」更難收拾。見 [plan-agent.md](plan-agent.md) 2.13 |
-| **子代理的 commit 訊息是機器寫的**（`agent_commit_msg`） | 分支上那一筆長成「子代理 a123（work）：<交辦的話>」 | 那是給人辨認用的，不是給 changelog 用的。要漂亮的訊息就 merge 之後自己 `--amend` |
+| **子代理的 commit 訊息固定為「更新專案檔案」**（`agent_commit_msg`） | 分支歷史不會帶出代理 id、型別或交辦內容，但單看訊息分不出任務 | 任務摘要留在介面；正式歷史只保留中性訊息。需要更具體時由使用者在 merge 前自行改名 |
 | **自動壓縮的門檻寫死 85%**（[06-chat.js](frontend/js/06-chat.js) `AUTO_COMPACT_AT`） | 沒得調 | 太早壓會丟掉還用得到的細節，太晚壓會來不及。85% 留得下一次壓縮呼叫本身的空間，而 `preCompact` 在 75% 就先算好了 |
 | **子代理滿了是「收工具」不是壓縮**（[09-agents.js](frontend/js/09-agents.js) `SUB_CTX_AT`） | 一份長調查只會拿到「查到一半」的結論 | 幫子代理也做一套壓縮＝多一條會壞的路。收工具是三行，而且結論一定拿得到。真的常撞到再說 |
 | **`check_job` 要有背景指令才送**（[serve.py](serve.py) `tool_defs`） | 模型看不到它，除非真的丟了背景指令 | 一支工具的定義每輪約 110 token（量過），而多數對話從頭到尾沒有背景指令。用既有的 `needs` 閘門，不是另做一套延後載入 —— 那一套量過之後不值得，見 [plan-agent.md](plan-agent.md) 第 1 節 |
@@ -1878,10 +1897,9 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 100 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 103 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、產出同步
-python tests/test_core.py    # 8 項：core/ 拆出去時新長出來的那些參數（repo_map(files, rel)、
-                             #       skills_usable(have)、skill_live 的兩個 callback）
+python tests/test_core.py    # 11 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
 node tests/test_gui.js       # 70 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過

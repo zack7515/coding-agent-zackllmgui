@@ -69,7 +69,8 @@ def git_at(root: Path, *args) -> str:
     這一支要能指到 worktree 或主 repo 兩邊。"""
     # quotepath=false：不然中文檔名會變成 "\345\255..." 一路送到畫面上
     p = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(root)] + list(args),
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=120)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip()[:400] or "git 失敗")
     return p.stdout
@@ -183,7 +184,8 @@ def branch_unique(root: Path, branch: str) -> int:
 
 
 def agent_commit_msg(rec: dict) -> str:
-    return f"子代理 {rec['id']}（{rec['type']}）：{rec.get('task') or '沒有說明'}"
+    """成果會進正式歷史；不要留下提示、代理名稱或共同作者標記。"""
+    return "更新專案檔案"
 
 
 def worktree_orphans() -> list:

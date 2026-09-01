@@ -2,14 +2,14 @@
 """macOS：內建的 sandbox-exec（Seatbelt）。
 
 跟 bwrap 同一個路數 —— 核心層的限制，不換檔案系統，所以工具鏈與 GPU 都還在。
-macOS 每一台都有，不用裝東西。Codex CLI 在 macOS 上走的也是這條路。
+macOS 每一台都有，不用另外安裝。
 
 Apple 把 `sandbox-exec` 標成 deprecated 很多年了，但它一直都在，
 而且是 macOS 上唯一不必安裝任何東西就能用的做法。真的哪天被拿掉，
 `available()` 會回空字串，介面就會顯示「這台沒有可用的沙盒」。
 
 **沒有在 macOS 上實測過**（手邊沒有機器）。profile 的寫法照 Apple 的
-sandbox profile 語法與 Chromium／Codex 的公開用法寫的。
+sandbox profile 語法依公開的系統與瀏覽器實作撰寫。
 """
 
 from __future__ import annotations
