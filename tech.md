@@ -114,7 +114,7 @@ tools/browser.py    連網瀏覽（不 import serve，可以單獨跑）
 ```
 
 選它的理由是**相依性**：schema 是純資料，搬出去零風險；
-`_tool_*` 那一整段勾著 `WORKSPACE`、`ALLOW_WRITE`、`ws_path()` 一堆模組層級的狀態，
+`_tool_*` 那一整段勾著工作區、寫入權、`ws_path()` 一堆共用狀態（當時還是模組層全域），
 搬出去就要處理循環 import，那是另一件事。
 
 實際好處也不只是行數：schema 是整個專案裡**最需要逐字推敲**的一份東西
@@ -678,8 +678,6 @@ calc_test.c：main
 | 真的跑一次 `dotnet test` | 收尾驗證接得起來（`TEST_CMD_RE` 認得 `dotnet test`、不認 `dotnet build`） |
 | 一份真實的 `.cs` 專案 | 地圖的符號沒有誤報 —— 多一個不存在的名字比漏一個糟 |
 
-（截圖不用重拍：這幾輪加的東西都不影響現有畫面。）
-
 ### Windows 11：實機驗證後補齊的平台路徑
 
 > Windows 11 已用 Python 3.12.7、Docker 28.1.1 與 RTX 3080 實測。服務、本機工具、
@@ -906,7 +904,7 @@ Windows 把兩個方向都驗過（跟 `CC_POSIX` 同一個手法）。
 
 其他限制：`run_shell` 有 30 秒逾時、`run_tests` 15 分鐘；所有工具輸出截斷到
 8000 字元後才回給模型（不截斷的話一個 `ls -R /` 就能把 context 塞爆）；
-工具連續呼叫超過 `MAX_TOOL_ROUNDS`（25）輪就停手，避免模型自問自答無限循環。
+工具連續呼叫超過 `MAX_TOOL_ROUNDS`（200）輪就停手，避免模型自問自答無限循環。
 
 ### 長指令：先砍掉 job API，後來又加回來
 
@@ -1358,7 +1356,7 @@ function isSrvPath(path) {
 
 ### 輪數與用量
 
-工具跑起來之後輸入框上方顯示「第 N/25 輪 · X 次工具 · 累計 Y tokens ·
+工具跑起來之後輸入框上方顯示「第 N/200 輪 · X 次工具 · 累計 Y tokens ·
 已跑 M 分 · 背景 K 條在跑」，tokens 從每輪的 `prompt_eval_count + eval_count` 累加。
 這一行是為了「沒人在按確認」的那幾檔做的：沒有確認卡一張張跳出來的時候，
 它是唯一看得出「還在做事」的東西。
@@ -1375,7 +1373,7 @@ function isSrvPath(path) {
 
 #### 模型要知道自己還剩幾輪
 
-`MAX_TOOL_ROUNDS = 25` 到了就停，而模型不知道，所以不會安排優先順序：
+`MAX_TOOL_ROUNDS = 200` 到了就停，而模型不知道，所以不會安排優先順序：
 它可能把 20 輪花在到處讀檔，剩 5 輪才開始動手，然後停在一半。
 
 `roundsNote(depth)` 在剩 `ROUNDS_WARN`（5）輪以內時附一句「工具還剩 N 輪」，
@@ -2028,9 +2026,8 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 
 | 簡化了什麼 | 天花板在哪 | 不夠的時候 |
 |---|---|---|
-| **自動 lint 只認 `ruff` 與 `eslint`**，判斷寫死（[serve.py](serve.py) `LINT_TIMEOUT` 上方） | 其他語言沒有檢查 | 加一個分支就好。typecheck（mypy／tsc）要先解決「跑整包很慢」，那不是加一行的事 |
+| **自動 lint 認 `ruff`、`eslint` 與 C/C++ 的單檔語法檢查**，判斷寫死（[serve.py](serve.py) `LINT_TIMEOUT` 上方） | 其他語言沒有檢查；C# 沒有（`dotnet build` 是整包編譯，每寫一個檔跑一次撐不住） | 加一個分支就好。typecheck（mypy／tsc）要先解決「跑整包很慢」，那不是加一行的事 |
 | **收工前檢查只有一條規則**（寫了測試沒跑），一輪只攔一次（[02-const.js](frontend/js/02-const.js) `finishCheck`） | 其他「沒做完就說做完」的樣子攔不到 | 改成一串 check 依序跑。但先想清楚誤報的代價 —— 會誤報的自動提醒最後一定會被關掉。**要量不要猜的那條已經有了**：驗證指令 |
-| **專案地圖只認得 Python 與 JS/TS**（[serve.py](serve.py) `file_symbols`） | 其他語言只列得出檔名 | 往 `file_symbols()` 加一個分支。檔名本身已經是九成的價值，所以這條不急 |
 | **驗證指令存在瀏覽器、依工作區記**（[07-tools.js](frontend/js/07-tools.js) `verifyCmd`） | 換一台電腦要重設一次；同一個專案兩個人各設各的 | 存進專案就會變成「clone 回來的專案可以指定自動執行的指令」，那是刻意不做的。真要共用就讓使用者自己 commit 一份說明 |
 | **`edit_file` 的讀取狀態只換訊息、不擋操作**（[serve.py](serve.py) `READ_STATE`） | 未讀先改仍然做得到 | 有些 agent 是直接擋的。這裡不擋是因為 `old` 要完全吻合本來就擋住了錯誤的修改 |
 | **`READ_STATE` 永遠不清** | 一次 session 幾百筆，記憶體無所謂 | 真要淘汰換 `OrderedDict` 加上限 |
@@ -2061,6 +2058,8 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **focus chain 靠 mtime 判斷「誰改的」**（[serve.py](serve.py) `Session.todo_mtime`） | 同一秒內連改兩次可能漏掉一次 | 人手動編輯不會有這種頻率。真的要準就存內容的 hash |
 | **外部 API 的預算是寫死的常數**（[02-const.js](frontend/js/02-const.js) `OA_TOKEN_BUDGET`） | 使用者改不了，而且是 token 數不是金額 | 撞到只是停下來給一顆「繼續」，不是失敗。要換算成錢得維護一張各家價目表，那個會過期得比程式碼快 |
 | **背景先算的摘要一次只留一份**（`S.pre`） | 切對話就作廢 | 多留幾份要處理「哪一份對得上現在的訊息」，那個判斷比省下來的時間貴 |
+| **「＋資料夾」只會建，不會改名或刪除**（[serve.py](serve.py) `make_dir`） | 整理專案還是得回終端機 | 建資料夾是唯一「非做不可、而模型的 `write_file` 補不上」的那一個（它只補得出檔案的父層）。改名與刪除有還原點的問題要先想清楚 |
+| **「這則對話累計」只算跑過工具的那幾輪**（[02-const.js](frontend/js/02-const.js) `chatTotals`） | 純聊天的時間不計入 | 數字來自訊息上的 `turn`，而 `markTurnDone()` 只在有工具輪數時才記。要連純聊天一起算就得每一則都存一筆，那一行的意義也會變成別的東西 |
 
 **三張表，三種東西，不要混在一起看：**
 
@@ -2122,11 +2121,11 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 103 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
-                             #        多分頁隔離、子代理白名單與連根中斷、產出同步
-python tests/test_core.py    # 11 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
-node tests/test_gui.js       # 70 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
-                             #        對話存取、子代理型別與 worktree
+python tests/test_serve.py   # 107 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+                             #        多分頁隔離、子代理白名單與連根中斷、還原點改名、＋資料夾
+python tests/test_core.py    # 13 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
+node tests/test_gui.js       # 74 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+                             #        對話存取、子代理型別與 worktree、serve.py 的路由全都帶 X-Tab
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
                              #   --no-rules 拿掉系統提示、--tools=a,b 只送幾支工具，都是量用的
 python tests/test_skills.py  # 驗 skills/ 的格式，順便回答「這個 skill 要的工具有沒有」
@@ -2138,8 +2137,14 @@ python tests/test_skills.py  # 驗 skills/ 的格式，順便回答「這個 ski
 同一份 `tool_defs()`、同一段 `agent_rules()`、同一支 `/tool` 與 `/run`，
 差別只有確認卡在那裡是自動答應的。
 
+`test_gui.js` 裡有一支是**跨檔案**的：它從 `serve.py` 撈出全部路由，逐條斷言
+`apiUrl()` 指回本機、`isSrvUrl()` 會掛 `X-Tab`。新加端點忘了同步時，紅的是測試
+而不是使用者 —— 那個 bug 沒有任何錯誤訊息（見〈白名單漏了四支〉）。
+
 前兩支不需要安裝任何東西，也不需要 Ollama 在跑；後兩支是另一種用途 ——
 `test_agent.py` 是**量測工具**不是回歸測試（提示詞值多少、工具定義值多少，
 見 [plan-agent.md](plan-agent.md) 4.3 與第 1 節），`test_skills.py` 是寫 skill 時的檢查。UI 互動（串流、工具確認卡、
 比較面板）沒有自動化測試 —— 那需要瀏覽器驅動，成本超過它能擋下的錯誤。
 `test_gui.js` 的 `$(id)` 檢查就是在補這一塊最常見的破法：接線打錯字。
+（`docs/shots/` 底下確實有一套 geckodriver 腳本，但那是**截圖用的**：
+它只驗「真實路徑有沒有外洩」，不驗行為。）

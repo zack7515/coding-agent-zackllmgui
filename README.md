@@ -256,6 +256,8 @@ calc.c:2:37: error: expected ';' before '}' token
 | [safety/README.md](safety/README.md) | 安全邊界：擋得住什麼、擋不住什麼 |
 | [sandbox/README.md](sandbox/README.md) | 各平台的沙盒支援到什麼程度，以及 GPU 哪些驗過哪些沒有 |
 | [skills/README.md](skills/README.md) | 內建 skills，以及怎麼寫自己的 |
+| [agents/README.md](agents/README.md) | 子代理型別怎麼寫，哪幾支工具永遠不給 |
+| [docs/shots/README.md](docs/shots/README.md) | 上面那幾張截圖怎麼來的、要重截的話怎麼跑 |
 | [plan-agent.md](plan-agent.md) | 還沒做的，與為什麼是這個順序 |
 
 **「這裡為什麼不能做某件事」有三個答案，分別在三個地方** —— 它們的下一步不一樣，
@@ -301,9 +303,9 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 103 項
-python tests/test_core.py     # core/ 各模組的介面 11 項
-node   tests/test_gui.js      # 網頁 70 項
+python tests/test_serve.py    # 後端 107 項
+python tests/test_core.py     # core/ 各模組的介面 13 項
+node   tests/test_gui.js      # 網頁 74 項
 ```
 
 兩支 Python 測試只用專案本身與標準函式庫，三支都不需要 Ollama 在跑；網頁測試需要 Node.js。
