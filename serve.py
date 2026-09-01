@@ -86,7 +86,7 @@ from core.workspace import (BACKUP_DIR, DENY_DIRS, DENY_FILES, MAX_FILE_BYTES,
                             WORKTREE_DIR, WORKTREE_LINK, WORKTREE_MAX, WORKTREE_SKIP,
                             _CUR, cur, session_for, ws_langs, ws_missing_tools,
                             ws_path, ws_rel, ws_root, ws_walk)
-from core.cmdrisk import RISKY_CMDS, canon, command_risk
+from core.cmdrisk import canon, command_risk, risky_rules
 from core.extract import extract_text
 from tools import browser
 from tools.schemas import TOOL_SCHEMAS
@@ -761,7 +761,7 @@ def ws_scoped(command: str) -> bool:
         return True
     if cur().ws is None or CHAINED.search(cmd):
         return False
-    for pattern, why, *rest in RISKY_CMDS:
+    for pattern, why, *rest in risky_rules():
         if re.search(pattern, cmd, re.I):
             # sudo、裝套件、git push、kill 動的不是檔案，路徑落在哪裡都不算工作區內
             if not (rest and rest[0]):
@@ -992,7 +992,8 @@ def verify_detect() -> str:
                 return f"make {target}"
     # 沒裝 .NET 就不要預填 dotnet —— 跟 ctest 那條同一個理由，跑不動的指令比留白糟
     if shutil.which("dotnet") and (list(ws.glob("*.sln")) or list(ws.glob("*.csproj"))
-                                   or list(ws.glob("*/*.csproj"))):
+                                   or list(ws.glob("*/*.csproj"))
+                                   or list(ws.glob("*/*/*.csproj"))):
         return "dotnet test"
     if (ws / "tests").is_dir() or list(ws.glob("test_*.py")):
         return " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
@@ -1161,7 +1162,7 @@ def agent_rules() -> str:
                  "寫檔後沒有語法檢查（dotnet build 是整包編譯，每寫一個檔跑一次撐不住），"
                  "所以改完要自己 build 一次。")
     # 缺工具鏈：講清楚缺什麼，而且**不要叫它自己去裝** —— 裝 SDK 是使用者的決定
-    for miss in ws_missing_tools():
+    for miss in ws_missing_tools(langs):
         r.append(f"- 這台沒有裝 {miss['what']}（找不到 {miss['tool']}），"
                  f"所以編譯與測試都跑不動。撞到就直接告訴使用者要裝什麼，"
                  f"不要自己下載或安裝。")
@@ -1949,9 +1950,9 @@ class Handler(BaseHTTPRequestHandler):
                         "ollama_local": ollama_is_local(),
                         "client": self.client_address[0], "trust_remote": TRUST_REMOTE})
         elif self.path == "/sys":
-            # topbar 的用量。輕到可以每幾秒問一次（nvidia-smi 有 1.5 秒的快取）。
-            # 只回給本機：這台機器有幾張卡、多少記憶體不是給同網段的人看的。
-            self._json(sys_usage() if self._is_local() else {})
+            # topbar 的用量，外加背景指令的狀態（執行條靠它知道跑完了沒有）。
+            # 輕到可以每幾秒問一次，只回本機：幾張卡、多少記憶體不給同網段的人看。
+            self._json(dict(sys_usage(), jobs=jobs_state()) if self._is_local() else {})
         elif self.path == "/alive":
             # 很輕的一支，網頁每 30 秒問一次。只回「程式碼有沒有被改過」
             self._json({"src_changed": source_stamp() != SRC_STAMP,
@@ -2153,10 +2154,9 @@ class Handler(BaseHTTPRequestHandler):
                         break
                 self._json({"files": sorted(files), "capped": len(files) >= AT_FILE_CAP})
                 return
-            # 新增資料夾也走這一支：介面開完就要重讀同一層，一趟就夠
+            # 新增資料夾也走這一支。只回開好的相對路徑 —— 介面接著會自己重畫那一層
             if isinstance(req, dict) and req.get("mkdir"):
-                made = make_dir(str(req["mkdir"]))
-                self._json({"made": made, "path": rel, "entries": list_entries(rel)})
+                self._json({"made": make_dir(str(req["mkdir"]))})
                 return
             self._json({"path": rel, "entries": list_entries(rel)})
         except Exception as e:

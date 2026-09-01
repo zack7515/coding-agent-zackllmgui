@@ -8,9 +8,8 @@ import os
 import re
 import shlex
 
-# 兩套規則各自獨立，照這台實際會用到的 shell 挑一套。混在一起會互相誤殺 ——
-# `python3 -c "del cache[k]"` 在 Linux 上被 Windows 的 del 規則判成 risky。
-# 獨立成常數是為了測得到：測試要能在 Linux 上假裝自己是 Windows。
+# cmd.exe 專屬的規則另外一組，只在 Windows 上併進來 —— 混在一起會誤殺
+# `python3 -c "del cache[k]"`。獨立成常數是為了測試能在 Linux 上假裝成 Windows。
 WINDOWS = os.name == "nt"
 
 
@@ -31,6 +30,10 @@ BLOCKED_CMDS = [
     (r"\bgit\s+push\b[^|;]*--force(?!-with-lease)", "強制推送（會覆蓋遠端歷史）"),
     (r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
     (r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba)?sh", "把網路上的東西直接餵給 shell"),
+    # PowerShell Core 在 Linux／macOS 也跑得動，而 Remove-Item 不會跟任何
+    # POSIX 指令或英文字撞名 —— 所以它不放 Windows 那一組，兩邊都要擋。
+    (r"\bRemove-Item\b(?=[^;&|]*\s-(?:Recurse|r)\b)(?=[^;&|]*\s-(?:Force|fo)\b)",
+     "Remove-Item -Recurse -Force（工作區裡請拿掉 -Force）"),
 ]
 
 # Windows 專屬：沙盒沒開時 run_shell 走 cmd，上面那幾條一條都打不到。
@@ -40,9 +43,6 @@ WIN_BLOCKED = [
     (r"\b(rmdir|rd)\s+(/[a-z]+\s+)*/(s\s+(/[a-z]+\s+)*/q|q\s+(/[a-z]+\s+)*/s)\b",
      "rmdir /s /q（工作區裡的東西請改用 rmdir /s <路徑>，不要加 /q）"),
     (r"\bdel\s+(/[a-z]+\s+)*/s\b", "del /s（遞迴刪除，沒有備份救得回來）"),
-    (r"\bRemove-Item\b(?=[^;&|]*\s-(?:Recurse|r)\b)"
-     r"(?=[^;&|]*\s-(?:Force|fo)\b)",
-     "Remove-Item -Recurse -Force（工作區裡請拿掉 -Force）"),
     (r"\bformat\s+[a-z]:", "格式化磁碟"),
     (r"\bdiskpart\b", "磁碟分割工具"),
 ]
@@ -60,11 +60,12 @@ RISKY_CMDS = [
     (r"\bmv\b|\bchmod\b|\bchown\b", "搬動檔案或改權限", True),
     (r">\s*/(etc|usr|bin|boot|lib)", "寫進系統目錄"),
     (r"\bkill(all)?\b|\bpkill\b", "終止程序"),
+    (r"\bRemove-Item\b", "刪除檔案（PowerShell）", True),
 ]
 
 # rd 太像一般英文字，只在後面接旗標時才算
 WIN_RISKY = [
-    (r"\b(del|erase|rmdir)\s+\S|\brd\s+/|\bRemove-Item\b", "刪除檔案（Windows）", True),
+    (r"\b(del|erase|rmdir)\s+\S|\brd\s+/", "刪除檔案（Windows）", True),
 ]
 
 
@@ -75,6 +76,11 @@ FLAG_PAIRS = [("--recursive", "r"), ("--force", "f")]
 SUBCOMMAND = {"sudo", "env", "git", "npm", "pnpm", "yarn", "pip", "pip3", "apt",
               "apt-get", "yum", "dnf", "conda", "docker", "cargo", "go"}
 SEPARATOR = {";", "|", "||", "&&", "&"}
+
+
+def risky_rules() -> list:
+    """這台 shell 認得的風險規則。ws_scoped 要跟 command_risk 讀同一份。"""
+    return RISKY_CMDS + (WIN_RISKY if WINDOWS else [])
 
 
 def canon(command: str) -> str:
@@ -147,7 +153,7 @@ def command_risk(command: str) -> tuple:
     for pattern, why in BLOCKED_CMDS + (WIN_BLOCKED if WINDOWS else []):
         if any(re.search(pattern, f, re.I) for f in forms):
             return ("block", why)
-    for pattern, why, *_ in RISKY_CMDS + (WIN_RISKY if WINDOWS else []):
+    for pattern, why, *_ in risky_rules():
         if any(re.search(pattern, f, re.I) for f in forms):
             return ("risky", why)
     return ("ok", "")

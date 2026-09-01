@@ -191,12 +191,17 @@ def checkpoint(note: str = "", msg: int = -1) -> dict:
         with tmp_index() as git:
             git("add", "-A", *CKPT_SKIP)
             tree = git("write-tree")
-            prev = next((e for e in reversed(journal_read()) if e.get("tree")), None)
+            # 只認**這則對話**的上一個檢查點。journal 是全域一份，跨對話去重的話
+            # 下面那句改名會把別則對話的還原點搬過來，那則的紀錄就整列消失了。
+            # 條件跟 journal_for 一樣寬：沒記 chat 的舊資料兩邊都算數。
+            chat = workspace.cur_chat()
+            prev = next((e for e in reversed(journal_read()) if e.get("tree")
+                         and not (chat and e.get("chat") and e["chat"] != chat)), None)
             if prev and prev["tree"] == tree:
                 # 樹一樣就不再多一個 git 物件，但標題要換成**這一則**提示 ——
                 # 上一則既然沒改到任何東西，退回這裡等於退掉這一則，列上就該寫這一則。
                 journal_retitle(prev["id"], " ".join(str(note or "").split())[:80],
-                                msg, workspace.cur_chat())
+                                msg, chat)
                 return {"skipped": "跟上一個檢查點一模一樣", "tree": tree,
                         "id": prev["id"], "retitled": True}
             # 訊息裡帶上一輪改了什麼：這一相拍的就是那一輪的結果

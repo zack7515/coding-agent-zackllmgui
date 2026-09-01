@@ -52,14 +52,15 @@ LANG_EXT = {".py": "python",
             ".cs": "csharp"}
 LANG_SCAN = 400                    # 掃到這麼多檔就夠判斷了，跟專案地圖同一個上限
 
-# 這個語言要有哪支指令才算「這台裝好了」，沒有的話該裝什麼。
-# 只列**真的可能沒有**的：python 跑得起來 serve.py 就有，js 的 eslint 本來就是選配。
-# 這裡只負責回報，**絕不代裝** —— 裝 SDK 是使用者的決定，而且沙盒裡也沒有網路。
+# 這個語言要有哪支指令才算「這台裝好了」，沒有就照 how 那欄告訴使用者去裝。
+# **只回報不代裝** —— 裝 SDK 是使用者的決定，沙盒裡也沒有網路。
+# 第一欄是一串候選：cc 只有 POSIX 才有，MSVC 是 cl、MinGW 是 gcc，
+# 只認 cc 的話會對著裝好 Visual Studio 的機器喊「沒裝編譯器」。
 LANG_TOOL = {
-    "c": ("cc", "C/C++ 編譯器",
+    "c": (("cc", "gcc", "clang", "cl"), "C/C++ 編譯器",
           "Linux：sudo apt install build-essential cmake｜"
           "Windows：Visual Studio 的「C++ 桌面開發」工作負載，或 MSYS2 的 mingw-w64"),
-    "csharp": ("dotnet", ".NET SDK",
+    "csharp": (("dotnet",), ".NET SDK",
                "https://dotnet.microsoft.com/download 下載安裝，"
                "裝完把終端機重開一次讓 PATH 生效"),
 }
@@ -172,13 +173,17 @@ def ws_langs() -> set:
     return got
 
 
-def ws_missing_tools() -> list:
-    """工作區用得到、但這台沒裝的工具鏈。回 [{"lang","tool","what","how"}]。"""
+def ws_missing_tools(langs=None) -> list:
+    """工作區用得到、但這台沒裝的工具鏈。回 [{"lang","tool","what","how"}]。
+
+    langs 算過的話傳進來 —— ws_langs() 每叫一次就走一次工作區。
+    """
     out = []
-    for lang in sorted(ws_langs()):
+    for lang in sorted(ws_langs() if langs is None else langs):
         hit = LANG_TOOL.get(lang)
-        if hit and not shutil.which(hit[0]):
-            out.append({"lang": lang, "tool": hit[0], "what": hit[1], "how": hit[2]})
+        if hit and not any(shutil.which(n) for n in hit[0]):
+            out.append({"lang": lang, "tool": "／".join(hit[0]),
+                        "what": hit[1], "how": hit[2]})
     return out
 
 

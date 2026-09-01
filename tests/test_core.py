@@ -232,6 +232,18 @@ def test_missing_toolchain_is_reported_not_installed():
         # 只列真的可能沒有的：python 跑得起來 serve.py 就有，不必問
         assert "python" not in workspace.LANG_TOOL
 
+        # C/C++ 的編譯器不是只有一個名字：MSVC 是 cl、MinGW 是 gcc，
+        # 只認 POSIX 的 cc 會對著裝好 Visual Studio 的機器喊「沒裝編譯器」
+        (root / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+        try:
+            for got, missing in [("cl", False), ("gcc", False), ("clang", False),
+                                 ("dotnet", True)]:
+                workspace.shutil.which = lambda n, has=got: ("/x/" + n) if n == has else None
+                langs = [m["lang"] for m in workspace.ws_missing_tools()]
+                assert ("c" in langs) is missing, (got, langs)
+        finally:
+            workspace.shutil.which = real
+
 
 def test_ws_langs_decides_which_tools_to_send():
     """工作區是哪種語言。C++ 專案不該看到 run_tests 與 setup_env。"""

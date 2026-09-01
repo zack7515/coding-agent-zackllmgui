@@ -348,7 +348,8 @@ C# 專案裡：
 
 ### 工具鏈不在的時候
 
-工作區是 C# 但這台沒有 `dotnet`（或 C/C++ 專案沒有 `cc`），會有三件事同時發生：
+工作區是 C# 但這台沒有 `dotnet`（或 C/C++ 專案 `cc`／`gcc`／`clang`／`cl`
+一個都找不到），會有三件事同時發生：
 
 | | |
 |---|---|
@@ -543,10 +544,13 @@ Python 與 C 混合。
 判斷寫在 `serve.py` 的 `command_risk()`，確認卡顯示的是它的結論（不是前端自己猜）。
 
 **Windows 上另外多一套**，因為沙盒沒開時 `run_shell` 走的是 `cmd`，上面那些
-POSIX 的寫法一條都打不到：`rmdir /s /q`、`rd /s /q`、`del /s`、
-`Remove-Item -Recurse -Force`、`format c:`、`diskpart` 擋下，
-`del`／`rmdir`／`erase`／`Remove-Item` 標風險。尺度跟 `rm` 那條一樣 ——
+POSIX 的寫法一條都打不到：`rmdir /s /q`、`rd /s /q`、`del /s`、`format c:`、
+`diskpart` 擋下，`del`／`rmdir`／`erase`／`rd` 標風險。尺度跟 `rm` 那條一樣 ——
 遞迴不擋（照樣要你點），**遞迴又不問**才擋。
+
+**`Remove-Item` 不在那一套裡，兩個平台都擋。** PowerShell Core 在 Linux／macOS
+上一樣跑得動，而這個名字不會跟任何 POSIX 指令或英文字撞名 —— 沒有理由只在
+Windows 上認得它。
 
 **兩套規則各自獨立**：Linux／macOS 上不套用 Windows 那套（不然
 `python3 -c "del cache[k]"` 會被判成 risky），Windows 上 POSIX 那套照樣套用
@@ -660,7 +664,7 @@ Ollama 在載入大模型或正在服務別的請求時會拒絕連線，那種�
 
 **秒數自己會走**，不是等工具回來才更新 —— 一支跑三分鐘的指令中間如果完全沒有動靜，
 看起來就像當掉了。第二行是**第一個還沒完成的待辦**，也就是它現在在做的事。
-「背景 N 條在跑」只在真的有背景指令時出現。
+「背景 N 條在跑」只在真的有背景指令時出現，跑完會自己消失（最多晚 3 秒）。
 
 ### 跑很久的指令：丟背景
 
@@ -1241,7 +1245,7 @@ ollamaGUI/
 │       └── 13-init.js        接線與啟動
 │
 ├── tests/                自我檢查（Python 兩支無額外相依；網頁測試需要 Node.js）
-│   ├── test_serve.py       後端 107 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 108 項： python tests/test_serve.py
 │   ├── test_core.py        核心模組 13 項： python tests/test_core.py
 │   ├── test_gui.js         網頁 74 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）

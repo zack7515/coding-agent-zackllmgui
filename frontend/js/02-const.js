@@ -304,10 +304,16 @@ function currentTodo(todos) {
 //
 // 這兩條不折行也不能以 \/ 收尾：tests/test_gui.js 的 grab() 只吃一行寫完的 const，
 // 而且會把 // 之後當成行尾註解砍掉。
-const TEST_FILE_RE = /(^|\/)tests?\/|(^|\/)(test_[^/]+\.(py|c|cc|cpp|cxx)|[^/]+_(test|unittest)\.(py|go|rb|c|cc|cpp|cxx)|[^/]*Tests?\.cs|[^/]+\.(test|spec)\.[jt]sx?)$/i;
+const TEST_FILE_RE = /(^|\/)tests?\/|(^|\/)(test_[^/]+\.(py|c|cc|cpp|cxx)|[^/]+_(test|unittest)\.(py|go|rb|c|cc|cpp|cxx)|[^/]+\.(test|spec)\.[jt]sx?)$/i;
+// C# 靠大小寫分辨：CalculatorTests.cs 是測試，Latest.cs 不是。
+// 併不進上面那條 —— 它掛著 /i，latest、contest、attest 會整批被當成測試檔。
+const TEST_CS_RE = /(^|\/)([A-Za-z0-9_.]*[a-z0-9_.])?Tests?\d*\.cs$/;
 const TEST_CMD_RE = /\b(pytest|unittest|jest|vitest|mocha|ava|go test|cargo test|ctest|ninja test|make (test|check)|dotnet test|vstest|xunit|nunit|npm (run )?test|yarn test|pnpm test)\b/i;
 
-function looksLikeTestFile(path) { return TEST_FILE_RE.test(String(path || '')); }
+function looksLikeTestFile(path) {
+  const p = String(path || '');
+  return TEST_FILE_RE.test(p) || TEST_CS_RE.test(p);
+}
 function looksLikeTestRun(name, args) {
   if (name === 'run_tests') return true;
   return name === 'run_shell' && TEST_CMD_RE.test(String((args || {}).command || ''));

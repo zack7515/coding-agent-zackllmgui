@@ -605,8 +605,14 @@ C# 帶出一個前面沒遇過的狀況：**Python 與 C/C++ 的工具鏈幾乎�
 （跑得起來 `serve.py` 就有 Python；Linux 開發機大多有 `cc`），但 .NET SDK
 不裝就是沒有。而「沒有」跟「有」要走的路完全不同。
 
-做成一份 `LANG_TOOL` 對照表（語言 → 探測用的指令、缺什麼、怎麼裝），
-`ws_missing_tools()` 用 `shutil.which` 問一次（33 ns，不用快取）。三個出口：
+做成一份 `LANG_TOOL` 對照表（語言 → 一串候選指令、缺什麼、怎麼裝），
+`ws_missing_tools()` 用 `shutil.which` 逐個問（33 ns 一次，不用快取）。
+
+**候選要一串，不能只寫一個。** C/C++ 原本只探 `cc` —— 那是 POSIX 才有的名字，
+Windows 上一個工具鏈都不提供（MSVC 是 `cl`，MinGW 是 `gcc`／`g++`）。
+裝好 Visual Studio 的機器於是每次開頁面被 `confirm` 攔一次「這台沒裝 C/C++
+編譯器」，送給模型的規則裡還多一句「編譯與測試都跑不動」，而照著提示去裝
+永遠清不掉那句話。現在探 `cc`／`gcc`／`clang`／`cl`，中一個就算有。三個出口：
 
 | | 缺的時候 | 有的時候 |
 |---|---|---|
@@ -848,6 +854,19 @@ risky   python3 -c "del cache[k]"     ← 被 Windows 的 del 規則咬到
 Windows 上不關掉 POSIX 那套，是因為 git-bash 與 WSL 裡 `rm -rf` 一樣有效。
 `WINDOWS` 是模組常數不是直接讀 `os.name`，測試才能在 Linux 上假裝自己是
 Windows 把兩個方向都驗過（跟 `CC_POSIX` 同一個手法）。
+
+**`Remove-Item` 是這張表的例外，而例外的判準是「會不會誤殺」不是「哪個平台」。**
+一開始它跟 `del`／`rmdir` 一起放在 Windows 那組 —— 但 PowerShell Core 在
+Linux／macOS 上跑得動，`pwsh -c 'Remove-Item x -Recurse -Force'` 於是在 Linux
+上判成 `ok`，開著「工作區內全自動」就是一句話都不問直接刪。而當初分兩套的理由
+（`del cache[k]` 這種字撞名）對它完全不成立：`Remove-Item` 不是任何 POSIX
+指令，也不是英文字。所以它搬回共用的那兩份清單，兩個平台都擋。
+
+還有一個同源的洞：`ws_scoped()`（決定「工作區內全自動」要不要放行）自己
+又跑了一次 `RISKY_CMDS`，沒有跟著加 `WIN_RISKY`。結果 Windows 上
+`del pkg\calc.py` 被 `command_risk` 判成 risky，卻在 `ws_scoped` 裡因為
+「不是風險指令」掉出去 —— 路徑明明全在工作區裡，每次還是要點確認。
+兩個地方讀同一份 `risky_rules()` 之後就不會再分岔了。
 
 ## 提示詞、工具描述、錯誤訊息，哪個有用
 
@@ -1371,6 +1390,12 @@ function isSrvPath(path) {
 不是 `run.rounds`：`markTurnDone()` 收尾時把 `t0` 歸零，而 `rounds` 要留到下一次
 送出才重置。
 
+閒置的那一行也帶著「背景 N 條在跑」，而這一句差點變成謊話：秒數的 ticker
+在閒置時就停了，`S.jobs` 又只有 `/upstream` 與 `/tool` 的回應會更新 ——
+一輪結束後那條背景指令跑完，畫面會一直掛著「背景 1 條在跑」直到你送出下一句
+或重整。不為它多開一支輪詢：`/sys`（topbar 的用量）本來就每 3 秒問一次、
+分頁在背景時自己會停，`jobs_state()` 只是讀一個 dict，順風車搭下去就好。
+
 #### 模型要知道自己還剩幾輪
 
 `MAX_TOOL_ROUNDS = 200` 到了就停，而模型不知道，所以不會安排優先順序：
@@ -1631,6 +1656,14 @@ JS 的 `split(/\s+/)` 遇到開頭空白會多吐一個空字串。
 
 `journal_retitle()` 整份重寫 JSONL。一則對話幾十列的東西，而這件事一輪最多
 發生一次；換成「附加一列 tombstone」只會讓讀取端多一種狀態要處理。
+
+**但「上一個檢查點」要限定在同一則對話裡找。** journal 是全域一份，
+原本的 `prev` 從整份的最後一列往前抓 —— 於是在甲對話問完（沒改到東西）
+再切到乙對話問一句，樹一樣，改名就把甲那一列的標題與 `chat` 一起換成乙的。
+甲的紀錄分頁從此少一列，而那是甲唯一退得回去的地方。條件放得跟
+`journal_for()` 一樣寬（沒記 `chat` 的舊資料兩邊都算數），只有兩邊都有
+對話 id 而且不同時才分開；代價是兩則對話各留一個指向同一棵樹的 commit
+物件，那東西 41 bytes。
 
 # 模型能力與參數
 
@@ -2121,7 +2154,7 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 107 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 108 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、還原點改名、＋資料夾
 python tests/test_core.py    # 13 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
 node tests/test_gui.js       # 74 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、

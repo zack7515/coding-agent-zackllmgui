@@ -1177,7 +1177,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 // 永遠是誤報，而會誤報的自動提醒最後一定會被使用者關掉。
 (function () {
   const box = new Function(
-    grab('TEST_FILE_RE', 'const') + '\n' + grab('TEST_CMD_RE', 'const') + '\n'
+    grab('TEST_FILE_RE', 'const') + '\n' + grab('TEST_CS_RE', 'const') + '\n'
+    + grab('TEST_CMD_RE', 'const') + '\n'
     + grab('looksLikeTestFile') + '\n' + grab('looksLikeTestRun') + '\n'
     + grab('finishCheck') + `
     return { file: looksLikeTestFile, run: looksLikeTestRun, check: finishCheck };`)();
@@ -1186,13 +1187,16 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   ['test_wafer.py', 'src/test_a.py', 'wafer_test.py', 'main_test.go',
    'ui.test.js', 'ui.spec.tsx', 'tests/anything.py', 'test/foo.rb',
    'test_calc.c', 'calc_test.cc', 'solver_unittest.cpp', 'tests/geo.cpp',
-   'ShapeTests.cs', 'CalcTest.cs', 'Tests/Geo.cs'].forEach(function (p) {
+   'ShapeTests.cs', 'CalcTest.cs', 'Tests/Geo.cs',
+   'Calculator.Tests.cs', 'src/UnitTest1.cs'].forEach(function (p) {
     assert.ok(box.file(p), p + ' 應該算測試檔');
   });
   // 不能誤判成測試檔 —— 誤判會讓每次寫檔都被嘮叨一次
   ['wafer_counter.py', 'src/latest.py', 'contest.py', 'protest.js',
    'README.md', 'attestation.py', 'src/latest.cpp', 'main.cpp',
-   'Program.cs', 'Shape.cs'].forEach(function (p) {
+   'Program.cs', 'Shape.cs',
+   // .cs 那一條不能吃 /i：小寫的 test 藏在一般英文字裡（La-test、At-test）
+   'Latest.cs', 'Contest.cs', 'src/Attest.cs', 'Protest.cs'].forEach(function (p) {
     assert.ok(!box.file(p), p + ' 不該算測試檔');
   });
 

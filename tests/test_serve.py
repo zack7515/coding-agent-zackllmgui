@@ -640,6 +640,10 @@ def test_windows_rules_only_apply_on_windows():
                     'python3 -c "del cache[k]"']:
             assert serve.command_risk(cmd)[0] == "ok", (cmd, "Windows 的規則咬到 Linux 了")
         assert serve.command_risk("rm -rf /")[0] == "block"
+        # PowerShell Core 在 Linux／macOS 也跑得動，而 Remove-Item 不會跟任何
+        # 英文字或 POSIX 指令撞名 —— 沒有理由只在 Windows 上擋
+        assert serve.command_risk("pwsh -c 'Remove-Item x -Recurse -Force'")[0] == "block"
+        assert serve.command_risk("pwsh -c 'Remove-Item build -Recurse'")[0] == "risky"
     finally:
         cmdrisk.WINDOWS = keep
 
@@ -831,6 +835,18 @@ def test_ws_scoped():
         # ok 與 block 兩級都不歸這裡管
         assert serve.ws_scoped("ls -la") is False
         assert serve.ws_scoped("rm -rf pkg") is False
+
+        # 判 risky 的規則有兩套，這裡只讀一套的話 Windows 的 del 會被判成
+        # 「不是風險指令」而掉出全自動 —— 路徑明明全在工作區裡卻每次都問
+        from core import cmdrisk
+        keep = cmdrisk.WINDOWS
+        try:
+            cmdrisk.WINDOWS = True
+            assert serve.command_risk("del pkg\\calc.py")[0] == "risky"
+            assert serve.ws_scoped("del pkg/calc.py") is True
+            assert serve.ws_scoped("del /etc/passwd") is False
+        finally:
+            cmdrisk.WINDOWS = keep
 
 
 def test_search_by_filename_only():
@@ -1335,6 +1351,38 @@ def test_checkpoint_catches_what_the_journal_misses():
         assert git("log", "--oneline", "-1").stdout.strip() == head, "HEAD 不能被動到"
 
 
+def test_checkpoint_dedupe_stays_inside_one_chat():
+    """去重只認**這則對話**的上一個檢查點。
+
+    journal 是全域一份。跨對話比的話，乙的提示會把甲那一列改名兼認領，
+    甲的紀錄就整列消失 —— 而那是甲唯一退得回去的地方。
+    """
+    with Workspace() as ws:
+        def git(*a):
+            return subprocess.run(["git", "-C", str(ws)] + list(a),
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace")
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        serve.workspace.set_cur_chat("甲")
+        assert serve.checkpoint("甲問的", 2).get("commit")
+        serve.workspace.set_cur_chat("乙")
+        # 樹一模一樣，但這是別則對話：要自己長一列，不能改到甲那一列
+        assert serve.checkpoint("乙問的", 2).get("commit"), "跨對話被去重了"
+        assert [e["path"] for e in serve.journal_for("甲")] == ["甲問的"]
+        assert [e["path"] for e in serve.journal_for("乙")] == ["乙問的"]
+        # 同一則對話內照樣去重，而且標題換成最新的那句
+        assert serve.checkpoint("乙再問", 4)["retitled"]
+        assert [e["path"] for e in serve.journal_for("乙")] == ["乙再問"]
+        assert [e["path"] for e in serve.journal_for("甲")] == ["甲問的"]
+        serve.workspace.set_cur_chat("")
+
+
 def test_skills_endpoint():
     """/ 選單要看得到 skills，而且 name 只能當資料夾名用。"""
     names = [s["name"] for s in serve.skills_list()]
@@ -1808,6 +1856,12 @@ def test_csharp_waits_for_the_sdk_then_turns_on():
             assert [m["lang"] for m in miss] == ["csharp"], miss
 
         with mock.patch.object(serve.shutil, "which", side_effect=lambda n: "/x/" + n):
+            assert serve.verify_detect() == "dotnet test"
+            # `dotnet new sln` 之後專案落在 src/Foo/Foo.csproj —— 那是標準擺法，
+            # 只掃兩層的話這種 repo 會拿到一片空白
+            (ws / "App.csproj").unlink()
+            (ws / "src" / "Foo").mkdir(parents=True)
+            (ws / "src" / "Foo" / "Foo.csproj").write_text("<Project />\n", encoding="utf-8")
             assert serve.verify_detect() == "dotnet test"
             rules = serve.agent_rules()
             assert "dotnet build" in rules and "dotnet test" in rules, rules

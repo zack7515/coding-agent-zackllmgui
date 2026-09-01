@@ -449,6 +449,9 @@ async function refreshSys() {
     const res = await fetch(apiUrl('/sys'));
     S.sys = res.ok ? await res.json() : null;
   } catch (e) { S.sys = null; }
+  // 背景指令跑完沒有人會通知網頁，搭這一支的順風車補回來 ——
+  // 不然閒置時那一行會一直掛著「背景 1 條在跑」。
+  if (S.sys && S.sys.jobs) { S.jobs = S.sys.jobs; renderRunBar(); }
   renderSysBar();
   if (!$('sysOverlay').classList.contains('hidden')) renderSysFull();
 }
