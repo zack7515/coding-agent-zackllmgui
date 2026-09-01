@@ -646,6 +646,40 @@ calc_test.c：main
 
 不擋 `read_file`：真的想看那個檔還是看得到，只是不主動列出來。
 
+### 還沒驗過的：到那台機器上要跑哪幾條
+
+三塊路徑寫好了但沒有機器跑過。清單擺在這裡，有機器的人照著跑一遍就知道對不對 ——
+每一條都寫成「該看到什麼」，不是「跑跑看」。
+
+**macOS（完全沒跑過）**
+
+| 跑什麼 | 該看到什麼 |
+|---|---|
+| `python -m sandbox` | 挑到 `seatbelt`，八項逐項驗證全過 |
+| `python -m sandbox --backend=container` | 有 Docker 的話一樣全過 |
+| `/sys` 的回應 | CPU 與 RAM 兩格會是空的（沒有 `/proc`，也沒寫 `vm_stat` 分支）—— **少格是預期，壞掉不是** |
+| 開一個 C++ 專案 | 地圖有符號、`edit_file` 拿掉分號會回語法錯誤 |
+
+**Windows 的 C/C++ 實際編譯（參數解析驗過，真的餵給編譯器沒有）**
+
+| 跑什麼 | 該看到什麼 |
+|---|---|
+| `cmake -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S . -B build` | `build/compile_commands.json` 生得出來（Visual Studio 產生器不會生） |
+| `edit_file` 拿掉一個分號 | `[語法檢查] 這個檔案編不過` 加上 `cl` 或 `g++` 的原文錯誤 |
+| 同上，但改一個**沒有**語法錯的地方 | 空字串。**這一條最重要** —— `/Zs` 猜錯的話會變成每次寫檔都誤報 |
+| 建置目錄 | 不該多出 `.obj` 或 `.exe`（`/Fo`、`/Fd`、`/c` 應該都被清掉了） |
+
+**C#（沒有 .NET 的機器）**
+
+| 跑什麼 | 該看到什麼 |
+|---|---|
+| 沒裝 `dotnet` 時開一個 C# 專案 | 介面跳一次確認、`verify_hint` 是空的、規則裡出現「這台沒有裝 .NET SDK」而且**沒有** `dotnet build` 這幾個字 |
+| 裝好之後重新整理 | 不再跳確認、`verify_hint` 變成 `dotnet test`、規則換成 C# 那條 |
+| 真的跑一次 `dotnet test` | 收尾驗證接得起來（`TEST_CMD_RE` 認得 `dotnet test`、不認 `dotnet build`） |
+| 一份真實的 `.cs` 專案 | 地圖的符號沒有誤報 —— 多一個不存在的名字比漏一個糟 |
+
+（截圖不用重拍：這幾輪加的東西都不影響現有畫面。）
+
 ### Windows 11：實機驗證後補齊的平台路徑
 
 > Windows 11 已用 Python 3.12.7、Docker 28.1.1 與 RTX 3080 實測。服務、本機工具、

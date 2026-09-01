@@ -25,8 +25,9 @@ Linux 與 Windows 11 都已實機驗證；macOS 路徑已實作但尚未實機�
 | | 狀態 |
 |---|---|
 | **Linux** | ✅ 實測。工具、沙盒（bubblewrap）、C/C++ 那四條回饋線、`python -m sandbox` 全部跑過 |
-| **Windows 11** | ✅ 實測。本機工具、`cmd` 程序管理、CPU／RAM／NVIDIA GPU 資訊、Docker Desktop 沙盒與容器 GPU 全部跑過 |
+| **Windows 11** | ✅ 實測。本機工具、`cmd` 程序管理、CPU／RAM／NVIDIA GPU 資訊、Docker Desktop 沙盒與容器 GPU 全部跑過。**MSVC／MinGW 的實際編譯還沒跑過**（那台沒有 C++ 工具鏈） |
 | macOS | 🛠️ 寫好了沒驗。`seatbelt` 後端走系統內建的 `sandbox-exec` |
+| C# | 🛠️ 三條回饋線寫好了，但**沒有 .NET 的機器跑過**。符號抽取拿手寫的 `.cs` 驗過，`dotnet test` 那條是用假的 `dotnet` 驗的 |
 
 會踩到平台差異的是**本機工具**那一塊：沙盒挑哪個後端、`run_shell` 走哪個 shell、
 編譯器怎麼呼叫、危險指令怎麼寫。純聊天（不開工作區、不開工具）跑得動 Python 就行。
@@ -35,9 +36,11 @@ Linux 與 Windows 11 都已實機驗證；macOS 路徑已實作但尚未實機�
 `compile_commands.json` 怎麼拆，都是照這台的作業系統挑一套，不是兩套疊著跑 ——
 所以 Windows 的 `del /s` 規則不會在 Linux 上把 `python3 -c "del cache[k]"` 判成危險。
 
-尚未實測的 macOS 與 Windows C/C++ 工具鏈路徑刻意寫成**失敗就退回沒有**，不會退回亂報：認不出來的編譯器直接
-跳過語法檢查，挑不出沙盒後端就告訴你這台該裝什麼。到那台機器上先跑一次
-`python -m sandbox` —— 它會實際執行一遍逐項驗證，不是讀設定檔猜的。
+沒驗過的那幾條刻意寫成**失敗就退回沒有**，不會退回亂報：認不出來的編譯器直接
+跳過語法檢查，挑不出沙盒後端就告訴你這台該裝什麼，缺工具鏈就跳出來問你。
+到那台機器上先跑一次 `python -m sandbox` —— 它會實際執行一遍逐項驗證，
+不是讀設定檔猜的。要幫忙補驗的話，
+[tech.md 有一份逐條的清單](tech.md#還沒驗過的到那台機器上要跑哪幾條)。
 
 ## 功能一覽
 

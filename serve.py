@@ -1068,8 +1068,9 @@ def _tool_fetch_url(url: str) -> str:
 
 # 系統用量。刻意不吃 psutil：這支只用標準函式庫，而 /proc 跟 nvidia-smi
 # 本來就在那裡。拿不到的欄位一律不回傳，前端就不畫那一格。
-# ponytail: Linux（/proc）＋ NVIDIA（nvidia-smi）。macOS／Windows／AMD 只會少幾格，
-#           不會壞掉。真的有人要再加 vm_stat / GlobalMemoryStatusEx / rocm-smi。
+# ponytail: Linux（/proc）、Windows（GetSystemTimes／GlobalMemoryStatusEx）與
+#           NVIDIA（nvidia-smi）。macOS 與 AMD 只會少幾格，不會壞掉 ——
+#           真的有人要再加 vm_stat / rocm-smi。
 def sys_usage() -> dict:
     """core.sysinfo 的數字，加上「Ollama 是不是也在這一台」。"""
     return dict(sysinfo.sys_usage(), ollama_local=ollama_is_local())

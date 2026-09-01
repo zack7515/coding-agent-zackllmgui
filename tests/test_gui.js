@@ -127,8 +127,10 @@ function grab(name, kind) {
   // 靠「頂層區塊都在第一欄收尾」來切，不用括號配對——程式碼裡的正規表示式
   // 含有 { 與 [，配對法會被騙。
   const isConst = kind === 'const';
-  const start = script.indexOf((isConst ? 'const ' : 'function ') + name);
+  let start = script.indexOf((isConst ? 'const ' : 'function ') + name);
   assert.ok(start >= 0, '找不到 ' + name);
+  // async function 要把前面那個字一起帶走，不然函式體裡的 await 是語法錯誤
+  if (!isConst && script.slice(start - 6, start) === 'async ') start -= 6;
   let mark = '\n}';
   if (isConst) {
     const line = script.slice(start, script.indexOf('\n', start));
@@ -1080,10 +1082,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       const setServerTools = async (patch) => { log.push(['tools', patch]); };
       const toast = (t) => log.push(['toast', t]);
       const renderWriteBtn = () => {}, renderFeatBtn = () => {}, renderWorkspace = () => {};
-      // grab() 是從 function 這個字開始切的，async 前綴會被丟掉 —— 補回去，
-      // 不然抓回來的是同步函式，裡面的 await 直接 SyntaxError
       ` + grab('autoWrites') + `
-      ` + 'async ' + grab('restoreServerState') + `
+      ` + grab('restoreServerState') + `
       return restoreServerState(conf);`);
     return box(calls, conf, server).then(() => calls);
   }
@@ -1973,6 +1973,59 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     'finishStream 沒有整篇重畫，降頻會讓最後一段掉字');
   console.log('ok   長回覆的 markdown 重解會降頻');
 
+  // ── 工具鏈不在就先問人，而且只問一次 ──────────────────
+  // 這支會叫 confirm()（擋主執行緒）與 window.open()，兩個都不能真的發生，
+  // 所以整組注進去跑一次。new Function 只解析不執行，抓不到函式體裡的錯字。
+  {
+    const box = [grab('askedTools', 'const'), grab('warnMissingTools'),
+      'return warnMissingTools;'].join('\n');
+    const asked = [];
+    const opened = [];
+    let painted = 0;
+    let answer = true;
+    const S = { ws: { path: '/proj' } };
+    const warn = new Function('S', 'painted', 'confirm', 'window', box)(
+      S,
+      function () { painted += 1; return Promise.resolve(); },
+      function (msg) { asked.push(msg); return answer; },
+      { open: function (u) { opened.push(u); } });
+
+    const dotnet = { lang: 'csharp', tool: 'dotnet', what: '.NET SDK',
+                     how: 'https://dotnet.microsoft.com/download 下載安裝，裝完重開終端機' };
+    const cc = { lang: 'c', tool: 'cc', what: 'C/C++ 編譯器',
+                 how: 'Linux：sudo apt install build-essential cmake' };
+
+    await warn([dotnet]);
+    assert.strictEqual(asked.length, 1, '缺工具鏈卻沒有問');
+    assert.ok(asked[0].indexOf('.NET SDK') >= 0 && asked[0].indexOf('dotnet') >= 0,
+      '要講清楚缺什麼：' + asked[0]);
+    assert.ok(asked[0].indexOf(dotnet.how) >= 0, '要講怎麼裝：' + asked[0]);
+    assert.strictEqual(opened.length, 1, '答應了卻沒開下載頁');
+    assert.ok(painted > 0, 'confirm() 會擋住主執行緒，要先讓 toast 畫出來');
+
+    await warn([dotnet]);
+    assert.strictEqual(asked.length, 1, '同一個工作區問過就不該再問 —— 會變成每次都要按');
+
+    // 沒有網址的（C/C++ 是一句安裝說明）不要去 open(undefined)
+    answer = true;
+    await warn([cc]);
+    assert.strictEqual(asked.length, 2, '換一個語言要另外問');
+    assert.strictEqual(opened.length, 1, '沒有網址卻開了視窗：' + opened);
+
+    // 換工作區要重問；答「否」就不開頁
+    S.ws.path = '/other';
+    answer = false;
+    await warn([dotnet]);
+    assert.strictEqual(asked.length, 3, '換了工作區沒有重問');
+    assert.strictEqual(opened.length, 1, '答否還是開了下載頁');
+
+    // 空的、沒帶這個欄位的舊回應都不能炸
+    await warn([]);
+    await warn(undefined);
+    assert.strictEqual(asked.length, 3);
+    console.log('ok   工具鏈不在就先問人（問一次、只提醒不代裝）');
+  }
+
   console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });
 
@@ -1998,7 +2051,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       ${grab('TAIL_KEEP', 'const')}
       ${grab('tailLines')}
       ${grab('verifyCmd')}
-      async ${grab('verifyGate')}
+      ${grab('verifyGate')}
       return { gate: verifyGate, S: S, toasts: toasts, sent: () => sent };`)();
   };
   const V = { '/proj': 'npm test' };

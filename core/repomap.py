@@ -8,7 +8,7 @@ aider 的 repo map 是同一個想法，這裡刻意做得更小：只列頂層�
 
 這段只能放在對話最前面而且中途不要變 —— 動它等於放棄 Ollama 的 prefix cache。
 
-ponytail: Python 走 ast，JS/TS 與 C/C++ 各一組正規表示式，其他語言只列檔名。
+ponytail: Python 走 ast，JS/TS、C/C++、C# 各一組正規表示式，其他語言只列檔名。
           要加語言就往 file_symbols() 加一個分支。
 """
 
