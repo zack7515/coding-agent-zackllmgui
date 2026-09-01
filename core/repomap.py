@@ -38,6 +38,31 @@ C_FUNC = re.compile(r"^(?!return\b|if\b|for\b|while\b|switch\b|else\b|do\b|case\
                     r"([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)"
                     r"\s*\([^)]*\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]", re.M)
 
+# C#。跟 C/C++ 相反，這裡**不能**靠第一欄 —— class 縮在 namespace 裡、method 再縮
+# 一層，而 C# 10 的檔案範圍命名空間（namespace X;）又少一層。改成認存取修飾詞：
+# 區域變數與區域函式不會寫 public/internal，所以那個關鍵字就是天然的過濾器。
+CS_EXT = (".cs",)
+CS_MOD = r"(?:public|internal|private|protected)"
+CS_EXTRA = r"(?:static|virtual|override|abstract|sealed|async|extern|unsafe|new|partial|readonly)"
+CS_TYPE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*"
+                     rf"(?:namespace\s+([\w.]+)|(?:{CS_MOD}\s+)?(?:{CS_EXTRA}\s+)*"
+                     r"(?:class|struct|interface|enum|record(?:\s+(?:class|struct))?|delegate)"
+                     r"\s+(\w+))", re.M)
+# 回傳型別 → 名字 → 參數。要求寫得出存取修飾詞，建構式與 operator 因此自然落榜
+# （建構式跟類別同名，本來就列過了）。屬性沒有括號，也不會進來。
+CS_FUNC = re.compile(rf"^\s+(?:\[[^\]]*\]\s*)*{CS_MOD}\s+(?:{CS_EXTRA}\s+)*"
+                     r"[\w<>\[\],.?]+\s+(\w+)\s*(?:<[^>]*>)?\s*\(", re.M)
+
+
+def _in_order(hits) -> list:
+    """兩組正規表示式找到的名字排回檔案順序並去重 —— 讀地圖的人是照著檔案看的。"""
+    seen, names = set(), []
+    for _, n in sorted(hits):
+        if n and n not in seen:       # 標頭宣告一次、原始碼定義一次，不要列兩遍
+            seen.add(n)
+            names.append(n)
+    return names
+
 
 def file_symbols(p: Path) -> str:
     """一個檔案裡有哪些頂層符號。回傳空字串＝只列檔名就好。"""
@@ -56,13 +81,12 @@ def file_symbols(p: Path) -> str:
             # 兩組分開找，再照出現位置排回檔案順序 —— 讀地圖的人是照著檔案看的
             hits = [(m.start(), m.group(1)) for m in C_TYPE.finditer(body)]
             hits += [(m.start(), m.group(1)) for m in C_FUNC.finditer(body)]
-            seen = set()
-            names = []
-            for _, n in sorted(hits):
-                # 標頭宣告一次、原始碼定義一次，同一個名字不要列兩遍
-                if n not in seen:
-                    seen.add(n)
-                    names.append(n)
+            names = _in_order(hits)
+        elif p.suffix.lower() in CS_EXT:
+            body = p.read_text("utf-8", errors="replace")
+            hits = [(m.start(), m.group(1) or m.group(2)) for m in CS_TYPE.finditer(body)]
+            hits += [(m.start(), m.group(1)) for m in CS_FUNC.finditer(body)]
+            names = _in_order(hits)
         else:
             return ""
     except (SyntaxError, ValueError, OSError, RecursionError):

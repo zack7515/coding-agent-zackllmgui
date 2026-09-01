@@ -550,7 +550,28 @@ async function applyWorkspace(path) {
     ? '工作區：' + S.ws.path + '（' + (S.ws.files || 0) + ' 個檔案，'
       + names.length + ' 支工具可用）'
     : '已清除工作區，檔案類工具已停用');
+  warnMissingTools(data.missing_tools);
   return data;
+}
+
+// 工作區用得到的工具鏈這台沒有（C# 專案但沒裝 .NET SDK 是最典型的）。
+// **只提醒不代裝**：裝 SDK 是使用者的決定，沙盒裡也沒有網路。
+// 記在記憶體不寫進設定檔 —— 裝完重新整理就該重問一次，而不是永遠閉嘴。
+const askedTools = new Set();
+async function warnMissingTools(list) {
+  for (const m of (list || [])) {
+    const key = (S.ws.path || '') + '|' + m.lang;
+    if (askedTools.has(key)) continue;
+    askedTools.add(key);
+    await painted();                   // confirm() 會擋住主執行緒，先讓 toast 畫出來
+    const url = (String(m.how).match(/https?:\/\/\S+/) || [])[0];
+    const ok = confirm('這個工作區有 ' + m.lang + ' 的程式碼，但這台沒有裝'
+      + m.what + '（找不到 ' + m.tool + '）。\n\n'
+      + '編譯與測試會跑不動，模型也已經被告知不要自己去裝。\n\n'
+      + m.how + '\n\n'
+      + (url ? '要開下載頁嗎？' : '知道了嗎？'));
+    if (ok && url) window.open(url, '_blank', 'noopener');
+  }
 }
 
 // 執行前一定要人點頭。工具會在跑 serve.py 的那台機器上動手，不能自動放行。

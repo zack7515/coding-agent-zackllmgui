@@ -1758,6 +1758,43 @@ def test_c_syntax_check_needs_real_compile_flags():
             shutil.rmtree(ws / sub.split("/")[0])
 
 
+def test_csharp_waits_for_the_sdk_then_turns_on():
+    """沒裝 .NET 就什麼都不提，裝了才把 C# 那幾條打開。
+
+    「沒開放的功能一個字都不要提」套到工具鏈上：預填一條 `dotnet test` 給
+    一台沒有 dotnet 的機器，跟預填一條跑不動的 ctest 是同一件事。
+    介面靠 missing_tools 跳確認，**只提醒不代裝**。
+    """
+    with Workspace() as ws:
+        for f in ws.rglob("*.py"):
+            f.unlink()
+        (ws / "Program.cs").write_text("public class P { }\n", encoding="utf-8")
+        (ws / "App.csproj").write_text("<Project />\n", encoding="utf-8")
+        serve.cur().write = True
+
+        with mock.patch.object(serve.shutil, "which", return_value=None):
+            assert serve.verify_detect() == "", "沒有 dotnet 卻預填了 dotnet test"
+            rules = serve.agent_rules()
+            assert "沒有裝 .NET SDK" in rules, rules
+            assert "dotnet build" not in rules, "工具鏈不在就不該教它怎麼 build"
+            miss = serve.ws_missing_tools()
+            assert [m["lang"] for m in miss] == ["csharp"], miss
+
+        with mock.patch.object(serve.shutil, "which", side_effect=lambda n: "/x/" + n):
+            assert serve.verify_detect() == "dotnet test"
+            rules = serve.agent_rules()
+            assert "dotnet build" in rules and "dotnet test" in rules, rules
+            assert "沒有裝" not in rules, rules
+            assert serve.ws_missing_tools() == []
+
+        # C# 專案照樣拿不到 pytest 專用的那兩支
+        names = [d["function"]["name"] for d in serve.tool_defs()]
+        assert "run_tests" not in names and "setup_env" not in names, names
+
+        # obj/ 是 MSBuild 的產物，不該進地圖；bin/ 刻意不擋（別的專案裡常是原始碼）
+        assert "obj" in serve.workspace.DENY_DIRS and "bin" not in serve.workspace.DENY_DIRS
+
+
 def test_cc_flags_survives_windows_paths_and_msvc():
     """compile_commands.json 在 Windows 上長得不一樣，兩個地方會壞：
     shlex 的 POSIX 引號規則會把 `C:\\VS\\bin\\cl.exe` 的反斜線吃掉；

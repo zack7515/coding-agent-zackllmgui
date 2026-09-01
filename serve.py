@@ -84,8 +84,8 @@ from core.restore import (backup_file, checkpoint, journal_add, journal_for,
 from core.workspace import (BACKUP_DIR, DENY_DIRS, DENY_FILES, MAX_FILE_BYTES,
                             SESSIONS, SESSIONS_LOCK, SESSIONS_MAX, Session,
                             WORKTREE_DIR, WORKTREE_LINK, WORKTREE_MAX, WORKTREE_SKIP,
-                            _CUR, cur, session_for, ws_langs, ws_path, ws_rel, ws_root,
-                            ws_walk)
+                            _CUR, cur, session_for, ws_langs, ws_missing_tools,
+                            ws_path, ws_rel, ws_root, ws_walk)
 from core.cmdrisk import RISKY_CMDS, canon, command_risk
 from core.extract import extract_text
 from tools import browser
@@ -975,6 +975,10 @@ def verify_detect() -> str:
         for target in ("test", "check"):
             if re.search(rf"^\.?{target}\s*:", body, re.M):
                 return f"make {target}"
+    # 沒裝 .NET 就不要預填 dotnet —— 跟 ctest 那條同一個理由，跑不動的指令比留白糟
+    if shutil.which("dotnet") and (list(ws.glob("*.sln")) or list(ws.glob("*.csproj"))
+                                   or list(ws.glob("*/*.csproj"))):
+        return "dotnet test"
     if (ws / "tests").is_dir() or list(ws.glob("test_*.py")):
         return " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
     return ""
@@ -1136,6 +1140,15 @@ def agent_rules() -> str:
             r.append("- 要清掉建置目錄用 `rm -r build`，不要加 -f —— 加了會被擋下來。")
         else:
             r.append("- 要清掉建置目錄用 `rmdir /s build`，不要加 /q —— 加了會被擋下來。")
+    if "csharp" in langs and shutil.which("dotnet"):
+        r.append("- C#：編譯與測試用 run_shell 跑 dotnet build、dotnet test。"
+                 "寫檔後沒有語法檢查（dotnet build 是整包編譯，每寫一個檔跑一次撐不住），"
+                 "所以改完要自己 build 一次。")
+    # 缺工具鏈：講清楚缺什麼，而且**不要叫它自己去裝** —— 裝 SDK 是使用者的決定
+    for miss in ws_missing_tools():
+        r.append(f"- 這台沒有裝 {miss['what']}（找不到 {miss['tool']}），"
+                 f"所以編譯與測試都跑不動。撞到就直接告訴使用者要裝什麼，"
+                 f"不要自己下載或安裝。")
     if ALLOW_SANDBOX:
         # 講的必須是實際會用到的那個後端。跟 bwrap 底下的模型說「只看得到工作區」，
         # 它會以為系統編譯器不存在，然後想辦法自己弄一份。
@@ -1907,6 +1920,7 @@ class Handler(BaseHTTPRequestHandler):
                         "agent_rules": agent_rules(),
                         "repo_map": repo_map(),
                         "verify_hint": verify_detect(),
+                        "missing_tools": ws_missing_tools(),
                         "todos": cur().todos, "jobs": jobs_state(),
                         "plan": cur().plan["on"], "browser": ALLOW_BROWSER,
                         "sandbox": ALLOW_SANDBOX, "sandbox_info": sandbox_state(),
@@ -2318,7 +2332,8 @@ class Handler(BaseHTTPRequestHandler):
                     "browser": ALLOW_BROWSER, "sandbox": ALLOW_SANDBOX,
                     "auto": cur().auto, "sandbox_info": sandbox_state(),
                     "tool_defs": tool_defs(), "agent_rules": agent_rules(),
-                    "repo_map": repo_map(), "agents": agent_types()})
+                    "repo_map": repo_map(), "agents": agent_types(),
+                    "missing_tools": ws_missing_tools()})
 
     # -- 工作區 ------------------------------------------------------ #
 
@@ -2342,6 +2357,7 @@ class Handler(BaseHTTPRequestHandler):
         info["repo_map"] = repo_map()       # 換了工作區，地圖當然要跟著換
         info["verify_hint"] = verify_detect()
         info["agents"] = agent_types()      # 專案自己的 agents/ 會蓋掉內建的
+        info["missing_tools"] = ws_missing_tools()
         self._json(info)
 
     def _do_preview(self) -> None:

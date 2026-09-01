@@ -299,6 +299,7 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 |---|---|---|---|---|
 | **Python** | `ast` | `ruff`，沒裝退回 `ast` | `pytest -q` | ✅ |
 | **C / C++** | 正規表示式 | `-fsyntax-only`（需 `compile_commands.json`；MSVC 走 `/Zs`，沒驗過） | `ctest` / `make test` / `make check` | ✅ |
+| **C#** | 正規表示式 | ❌（見下） | `dotnet test` | ✅ |
 | JS / TS | 正規表示式 | `eslint`（沒裝就跳過） | `npm test` | ✅ |
 | 其他 | 只列檔名 | — | — | — |
 
@@ -323,9 +324,37 @@ C/C++ 專案裡：
 - **沙盒沒有網路**，所以 `FetchContent`、vcpkg、conan 一定失敗。相依套件要先在沙盒外
   準備好（例如 `apt install libgtest-dev`，或先在沙盒外跑一次 `cmake` 讓它下載完）。
 
-> **C# 沒有支援。** `dotnet build` 是整包編譯，每寫一個檔跑一次撐不住，
-> 所以做不出 per-write 的語法檢查。用 `run_shell` 跑 `dotnet test` 一樣可以，
-> 但上表那四格全部是空的。
+C# 專案裡：
+
+- 地圖認 `namespace`、`class`／`struct`／`interface`／`record`／`enum`／`delegate`，
+  以及寫得出存取修飾詞的方法。**不能像 C/C++ 那樣靠第一欄** —— class 縮在
+  `namespace` 裡、method 再縮一層，而 C# 10 的檔案範圍命名空間（`namespace X;`）
+  又少一層。改認 `public`／`internal`／`private`／`protected`：區域變數與區域函式
+  不會寫這幾個字，那就是天然的過濾器。
+- 有 `*.sln` 或 `*.csproj` 就預填 `dotnet test`（**前提是這台裝了 dotnet**）。
+- `obj/` 與 `.vs/` 不列進地圖。**`bin/` 刻意不擋** —— 那個名字在別的專案裡常常是
+  原始碼，而 `bin/` 裡的 `.dll`／`.exe`／`.pdb` 本來就被副檔名濾掉了。
+- 寫檔後**沒有**語法檢查，理由見下。
+
+> **C# 少的是「寫檔後語法檢查」那一格。** C 有翻譯單元，所以
+> `gcc -fsyntax-only a.c` 成立；C# 的一個 `class` 拆在幾個檔案裡是常態，
+> `csc` 單獨編一個檔會對每個寫在別處的型別噴 CS0246 —— 那不是缺 `-I` 能補的，
+> 是語言本身沒有這個概念。整包 `dotnet build` 每寫一個檔跑一次撐不住。
+> 其餘三格都在。
+
+### 工具鏈不在的時候
+
+工作區是 C# 但這台沒有 `dotnet`（或 C/C++ 專案沒有 `cc`），會有三件事同時發生：
+
+| | |
+|---|---|
+| 介面 | 跳一次確認，講清楚缺什麼、怎麼裝，有網址的話問你要不要開 |
+| 驗證指令 | 不預填 `dotnet test` —— 跟沒 configure 過就不給 `ctest` 同一條規則 |
+| 送給模型的規則 | 明講「這台沒有裝 .NET SDK」，**並且叫它不要自己去下載或安裝** |
+
+**只提醒，不代裝。** 裝 SDK 是使用者的決定，而且沙盒裡沒有網路，代裝這件事
+從機制上就做不到也不該做。確認過一次就不再問，裝好之後重新整理，
+預填與規則自己就出現了。
 
 **這一整套是在 Linux 上驗的**（Ubuntu 24.04 / gcc 13 / cmake 3.28 / bubblewrap）。
 實際跑過的：bubblewrap 沙盒裡 `cmake` configure → build → `ctest` 全過、

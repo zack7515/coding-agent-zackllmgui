@@ -149,6 +149,90 @@ def test_repo_map_reads_c_and_cpp_symbols():
             assert bad not in got, f"{bad} 不該出現在地圖上：{got}"
 
 
+def test_repo_map_reads_csharp():
+    """C# 不能靠第一欄 —— class 縮在 namespace 裡，method 再縮一層。
+
+    改認存取修飾詞：區域變數與區域函式不會寫 public/internal，那個關鍵字就是
+    天然的過濾器。驗的重點一樣是**誤報**：地圖上多一個不存在的名字，
+    模型會拿它去 search_files 然後空手而回。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "Shape.cs"
+        f.write_text("""using System;
+
+namespace Geo.Shapes
+{
+    public enum Kind { Circle, Rect }
+
+    public interface IArea { double Area(); }
+
+    [Serializable]
+    public abstract class Shape : IArea
+    {
+        private readonly Kind _kind;
+        public Shape(Kind kind) => _kind = kind;
+        public Kind Kind => _kind;
+        public abstract double Area();
+        public override string ToString()
+        {
+            int Helper(int x) => x * 2;
+            return Helper(1).ToString();
+        }
+        public static implicit operator double(Shape s) => s.Area();
+        internal async Task<int> CountAsync(List<int> xs) => xs.Count;
+    }
+
+    public sealed record Point(double X, double Y);
+
+    public static class Util
+    {
+        public static double Total(IEnumerable<IArea> items) => 0;
+        static double Hidden() => 0;
+    }
+}
+""", encoding="utf-8")
+        got = repomap.file_symbols(f).split(", ")
+        for want in ["Geo.Shapes", "Kind", "IArea", "Shape", "Area", "ToString",
+                     "CountAsync", "Point", "Util", "Total"]:
+            assert want in got, (want, got)
+        # 這幾個都不該出現：區域函式、運算子、欄位、屬性、建構式、沒有修飾詞的
+        for no in ["Helper", "operator", "_kind", "Hidden", "Serializable"]:
+            assert no not in got, (no, got)
+
+        # C# 10 的檔案範圍命名空間少一層縮排，一樣要抓得到
+        g = Path(tmp) / "Program.cs"
+        g.write_text("namespace App;\n\npublic class Program\n{\n"
+                     "    public static void Main(string[] args) { }\n}\n", encoding="utf-8")
+        assert repomap.file_symbols(g) == "App, Program, Main"
+
+
+def test_missing_toolchain_is_reported_not_installed():
+    """工作區用得到但這台沒裝的工具鏈要回報 —— 但這裡只回報，絕不代裝。
+
+    裝 SDK 是使用者的決定（而且沙盒裡沒有網路）。介面拿這份跳確認、
+    agent_rules 拿它叫模型不要自己去下載。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Program.cs").write_text("class P { }\n", encoding="utf-8")
+        workspace.SESSIONS[""].ws = root
+
+        real = workspace.shutil.which
+        try:
+            workspace.shutil.which = lambda name: None
+            miss = workspace.ws_missing_tools()
+            assert [m["lang"] for m in miss] == ["csharp"], miss
+            assert miss[0]["tool"] == "dotnet" and miss[0]["what"] and miss[0]["how"]
+
+            workspace.shutil.which = lambda name: "/usr/bin/" + name
+            assert workspace.ws_missing_tools() == [], "裝好之後就不該再回報"
+        finally:
+            workspace.shutil.which = real
+
+        # 只列真的可能沒有的：python 跑得起來 serve.py 就有，不必問
+        assert "python" not in workspace.LANG_TOOL
+
+
 def test_ws_langs_decides_which_tools_to_send():
     """工作區是哪種語言。C++ 專案不該看到 run_tests 與 setup_env。"""
     with tempfile.TemporaryDirectory() as tmp:

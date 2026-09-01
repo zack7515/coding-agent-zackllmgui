@@ -298,6 +298,7 @@ function applyAgentState(info) {
   S.plan = !!info.plan;
   S.mcp = info.mcp || null;
   S.agentTypes = info.agents || [];   // 子代理型別來自 agents/*.md，不是寫死的
+  warnMissingTools(info.missing_tools);   // 重整頁面時工作區已經在了，這裡也要問
   if (info.stream_tools) S.streamTools = info.stream_tools;
   renderTodos();
 }

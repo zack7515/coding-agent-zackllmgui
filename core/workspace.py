@@ -6,6 +6,7 @@
 
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -23,9 +24,12 @@ WORKTREE_LINK = ("node_modules",)  # 開 worktree 時從主 repo 連過去的資
 # setup_env 會裝進主專案。
 WORKTREE_SKIP = (BACKUP_DIR, WORKTREE_DIR) + WORKTREE_LINK
 # 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
+# obj/ 與 .vs/ 是 MSBuild／Visual Studio 的產物。刻意不擋 bin/ 與 packages/ ——
+# 那兩個名字在別的專案裡常常是原始碼，而 bin/ 裡的雜訊 DENY_EXT 已經濾掉了。
 DENY_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
              "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", "dist",
-             "build", ".next", ".idea", ".vscode", BACKUP_DIR, WORKTREE_DIR}
+             "build", ".next", ".idea", ".vscode", "obj", ".vs",
+             BACKUP_DIR, WORKTREE_DIR}
 # 這些檔案不讓模型讀，免得金鑰跟著進 context
 # 這裡也擋 .zackllmgui-*.json：那幾個檔案決定「什麼可以自動放行」，
 # 讓模型讀得到等於讓它知道怎麼繞，寫得到就等於自己給自己開權限。
@@ -35,7 +39,8 @@ DENY_FILES = re.compile(r"^(\.env(\..*)?|.*\.env|.*\.pem|.*\.key|.*\.pfx|id_rsa.
 # 編譯產物。DENY_DIRS 擋得掉 build/，Makefile 專案的產出卻落在原地，
 # 而專案地圖是每一輪都要重送的固定成本。不擋 read_file，只是不主動列出來。
 DENY_EXT = {".o", ".obj", ".a", ".so", ".dylib", ".dll", ".lib", ".exe",
-            ".d", ".gch", ".pch", ".pdb", ".ilk", ".pyd", ".pyc", ".class"}
+            ".d", ".gch", ".pch", ".pdb", ".ilk", ".pyd", ".pyc", ".class",
+            ".nupkg", ".snupkg"}
 MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看的
 
 # 工作區是哪種語言。決定要送哪幾支工具、提示詞怎麼寫 ——
@@ -43,8 +48,21 @@ MAX_FILE_BYTES = 400_000           # 單檔上限，再大就不是給模型看�
 # C 與 C++ 併成一個 "c"：工具鏈是同一套（gcc／cmake／ctest），分開沒有用處。
 LANG_EXT = {".py": "python",
             ".c": "c", ".h": "c", ".cpp": "c", ".cc": "c", ".cxx": "c",
-            ".hpp": "c", ".hh": "c", ".hxx": "c"}
+            ".hpp": "c", ".hh": "c", ".hxx": "c",
+            ".cs": "csharp"}
 LANG_SCAN = 400                    # 掃到這麼多檔就夠判斷了，跟專案地圖同一個上限
+
+# 這個語言要有哪支指令才算「這台裝好了」，沒有的話該裝什麼。
+# 只列**真的可能沒有**的：python 跑得起來 serve.py 就有，js 的 eslint 本來就是選配。
+# 這裡只負責回報，**絕不代裝** —— 裝 SDK 是使用者的決定，而且沙盒裡也沒有網路。
+LANG_TOOL = {
+    "c": ("cc", "C/C++ 編譯器",
+          "Linux：sudo apt install build-essential cmake｜"
+          "Windows：Visual Studio 的「C++ 桌面開發」工作負載，或 MSYS2 的 mingw-w64"),
+    "csharp": ("dotnet", ".NET SDK",
+               "https://dotnet.microsoft.com/download 下載安裝，"
+               "裝完把終端機重開一次讓 PATH 生效"),
+}
 
 
 class Session:
@@ -152,6 +170,16 @@ def ws_langs() -> set:
         if lang:
             got.add(lang)
     return got
+
+
+def ws_missing_tools() -> list:
+    """工作區用得到、但這台沒裝的工具鏈。回 [{"lang","tool","what","how"}]。"""
+    out = []
+    for lang in sorted(ws_langs()):
+        hit = LANG_TOOL.get(lang)
+        if hit and not shutil.which(hit[0]):
+            out.append({"lang": lang, "tool": hit[0], "what": hit[1], "how": hit[2]})
+    return out
 
 
 def ws_walk():
