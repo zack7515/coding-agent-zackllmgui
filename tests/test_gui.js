@@ -599,7 +599,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const S = { host: ${JSON.stringify(host)} };
     const SAME_ORIGIN = ${sameOrigin};
     const location = { origin: 'http://localhost:5678' };
-    ${script.slice(script.indexOf('const SRV_PATHS'), script.indexOf('function friendlyError'))}
+    ${script.slice(script.indexOf('function isSrvPath'), script.indexOf('function friendlyError'))}
     return { apiUrl: apiUrl, isSrvUrl: isSrvUrl, tab: TAB_ID };
   `)();
 
@@ -626,7 +626,19 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(!both.isSrvUrl('http://localhost:5678/api/chat'), '同源的 Ollama 路徑也不必掛');
   assert.ok(!mk('x', false).isSrvUrl('http://localhost:5678/tool'), 'file:// 下沒有 serve.py');
   assert.ok(both.tab && both.tab.length > 6, '分頁 id 太短，兩個分頁會撞在一起');
-  console.log('ok   分頁 id 只掛在 serve.py 的端點上');
+
+  // serve.py 的路由一支都不能漏。漏掉的請求不帶 X-Tab，落到「預設分頁」——
+  // 子代理就是這樣壞的：/agent 開在預設分頁，/tool 帶著 X-Tab 找不到那個 id。
+  const py = fs.readFileSync(path.join(__dirname, '..', 'serve.py'), 'utf8');
+  const routes = (py.match(/self\.path == "\/[a-z]*"/g) || [])
+    .map(function (m) { return m.slice(m.indexOf('"') + 1, -1); });
+  assert.ok(routes.length > 20, '沒抓到 serve.py 的路由：' + routes.length);
+  routes.forEach(function (r) {
+    assert.strictEqual(remote(r), 'http://localhost:5678' + r,
+      r + ' 沒被當成 serve.py 的端點 —— 會打到 Ollama，而且不帶 X-Tab');
+    assert.ok(both.isSrvUrl('http://localhost:5678' + r), r + ' 沒帶上分頁 id');
+  });
+  console.log('ok   分頁 id 只掛在 serve.py 的端點上（' + routes.length + ' 支路由全中）');
 })();
 
 // 重新整理之後那支筆不可以是灰的。檔位在「改檔案自動」以上，前提就是模型動得了
@@ -2026,7 +2038,42 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     console.log('ok   工具鏈不在就先問人（問一次、只提醒不代裝）');
   }
 
-  console.log('\n全部通過');
+  // /upstream 慢的時候不能先把狀態清成一排 false：那段空窗裡的 saveConfig 會把
+  // false 存進 localStorage，下次開頁面 restoreServerState 再推回去把工具關掉。
+  {
+    const AF = Object.getPrototypeOf(async function () {}).constructor;
+    const mk = function (answer) {
+      const seen = [];
+      return new AF('answer', 'seen', `
+        const S = { srv: { tools: true, toolsLocal: true }, tools: true,
+                    ws: { path: '/w', write: true }, toolDefs: [1], todos: [1],
+                    agentRules: 'x', repoMap: 'm', mcp: {}, tab: 'params' };
+        const SAME_ORIGIN = true;
+        const apiJson = async () => {
+          seen.push({ tools: S.srv.tools, ws: S.ws.path });   // 等待中別人看到的樣子
+          if (!answer) throw new Error('連不上');
+          return answer;
+        };
+        const applyParamLimits = () => {};
+        const applyAgentState = (info) => { S.srv.tools = !!info.tools; };
+        const setServerTools = async () => { throw new Error('不該推'); };
+        const renderFeatBtn = () => {}, renderWriteBtn = () => {}, renderWorkspace = () => {};
+        ` + grab('loadUpstream') + `
+        await loadUpstream();
+        return S;`)(answer, seen).then(function (S) { return { S: S, seen: seen }; });
+    };
+
+    const ok = await mk({ tools: true, workspace: { path: '/w', write: true } });
+    assert.deepStrictEqual(ok.seen[0], { tools: true, ws: '/w' },
+      '還沒問到答案就把狀態清成 false 了：' + JSON.stringify(ok.seen[0]));
+
+    const bad = await mk(null);
+    assert.strictEqual(bad.S.srv.tools, false, '問不到 serve.py 就該清空');
+    assert.strictEqual(bad.S.ws.path, '', '問不到 serve.py 就該清空工作區');
+    console.log('ok   /upstream 沒回來之前不動狀態，問不到才清空');
+  }
+
+console.log('\n全部通過');
 })().catch((e) => { console.error(e); process.exit(1); });
 
 // 收尾條件：模型說「做完了」不等於做完了。動過檔案的話先跑一次驗證指令，

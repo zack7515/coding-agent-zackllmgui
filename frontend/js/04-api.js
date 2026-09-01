@@ -1,12 +1,14 @@
 /* ══════════════════════ Ollama API ══════════════════════ */
-// serve.py 自己的端點，跟 Ollama 的 /api/* 不是同一回事。
-// S.host 是「Ollama 在哪」—— 照 README 的建議把它指到 GPU 主機之後，
-// /tool、/ls、/workspace 這些還是要問**端出這個頁面的那一台**，
-// 不然檔案分頁會說「這個頁面不是本機開的」，而且工具全部打到 Ollama 去。
-const SRV_PATHS = /^\/(upstream|tool|tools|run|preview|workspace|view|ls|browse|journal|rewind|checkpoint|rules|skills|git|restore|extract|ext|mcp|sys)$/;
+// serve.py 自己的端點，跟 Ollama 的 /api/* 不是同一回事。S.host 是「Ollama 在哪」，
+// 指到 GPU 主機之後 /tool、/ls、/workspace 這些還是要問端出這個頁面的那一台。
+// 以前這裡是一份手寫清單，漏了 /agent、/verify、/alive、/restart —— 所以改成反過來認：
+// Ollama 只有 /api/*，其餘一律是 serve.py 的，新加端點不會再漏。
+function isSrvPath(path) {
+  return !/^\/api\//.test(String(path));
+}
 
 function apiUrl(path) {
-  if (SAME_ORIGIN && SRV_PATHS.test(path)) return location.origin + path;
+  if (SAME_ORIGIN && isSrvPath(path)) return location.origin + path;
   return S.host.replace(/\/+$/, '') + path;
 }
 
@@ -25,7 +27,7 @@ const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
 // OPTIONS 預檢，Ollama 不見得接得住 —— 加錯地方的代價是整個頁面連不上。
 function isSrvUrl(url) {
   if (!SAME_ORIGIN || String(url).indexOf(location.origin) !== 0) return false;
-  return SRV_PATHS.test(String(url).slice(location.origin.length).replace(/[?#].*$/, ''));
+  return isSrvPath(String(url).slice(location.origin.length).replace(/[?#].*$/, ''));
 }
 
 if (typeof window !== 'undefined' && window.fetch) {
@@ -336,14 +338,7 @@ async function checkSourceChanged() {
 
 async function loadUpstream() {
   S.upstream = '';
-  S.srv = { tools: false, toolsLocal: false, extract: false, ext: false };
-  S.ws = { path: '', write: false, git: false, python: '', files: 0 };
-  S.toolDefs = [];
-  S.agentRules = '';
-  S.repoMap = '';
-  S.todos = [];
   S.atFiles = null;
-  S.mcp = null;
 
   // 直接開 HTML 檔的時候才是真的沒有 serve.py。
   // 這裡以前比的是 S.host === location.origin，等於「把 Ollama 指到別台」
@@ -358,7 +353,17 @@ async function loadUpstream() {
     S.srv.ollamaLocal = !!info.ollama_local;
     applyParamLimits();
     applyAgentState(info);
-  } catch (e) { /* 不是 serve.py 端出來的，當作沒有 */ }
+  } catch (e) {
+    // 問不到才清空。**進來就清是錯的**：/upstream 要算專案地圖，大專案上跑好幾百毫秒，
+    // 那段空窗裡的 saveConfig 會把一整排 false 存進去，下次開頁面再推回伺服器把工具關掉。
+    S.srv = { tools: false, toolsLocal: false, extract: false, ext: false };
+    S.ws = { path: '', write: false, git: false, python: '', files: 0 };
+    S.toolDefs = [];
+    S.agentRules = '';
+    S.repoMap = '';
+    S.todos = [];
+    S.mcp = null;
+  }
   // 上次開著就自動接回去，省得每次重開 serve.py 都要再點一次
   if (S.tools && S.srv.toolsLocal && !S.srv.tools) {
     try { await setServerTools({ enabled: true }); } catch (e) { /* 開不起來就算了 */ }

@@ -1266,6 +1266,44 @@ B 分頁載入時會先關掉全部再開自己的，於是 A 分頁的工具安
 新分頁開起來會承接它的工作區。`SESSIONS` 上限 32，滿了丟最久沒動的——分頁關掉
 不會通知伺服器，沒有上限就是慢性洩漏。
 
+#### 白名單漏了四支，而漏掉不會有錯誤訊息
+
+`SRV_PATHS` 原本是一份手寫的正規表示式清單，用來回答兩個問題：這條路徑要打給
+serve.py 還是 Ollama、要不要掛 `X-Tab`。後來加的 `/agent`、`/verify`、`/alive`、
+`/restart` 四支沒有補進去。
+
+代價分兩層。預設情況下 `S.host` 就是 `location.origin`，所以網址還是對的，只是
+**不帶 `X-Tab`**——請求安靜地落到預設分頁。子代理因此整組壞掉：`/agent` 把
+worktree 記進預設分頁的 `Session.agents`，`/tool` 帶著 `X-Tab` 回到自己的分頁，
+`bind_agent()` 在自己的 `agents` 裡找不到那個 id，回「沒有這個子代理」。
+第二層是照 README 把 Ollama 指到 GPU 主機之後：那四支會直接打到 Ollama 去。
+
+修法不是把四個名字補上去，是**反過來認**：Ollama 只有 `/api/*`，其餘一律是
+serve.py 的。清單會漏，補集不會。
+
+```js
+function isSrvPath(path) {
+  return !/^\/api\//.test(String(path));
+}
+```
+
+測試也跟著反過來：從 `serve.py` 把 `self.path == "/…"` 全部撈出來（目前 25 支），
+逐條斷言 `apiUrl()` 指回本機、`isSrvUrl()` 會掛 `X-Tab`。新加端點忘了同步時，
+紅的是測試而不是使用者。
+
+#### 半路存檔會把一整排 false 寫進 localStorage
+
+`loadUpstream()` 原本進門就把 `S.srv`／`S.ws`／`S.toolDefs` 清成預設值，再去問
+`/upstream`。而 `/upstream` 不便宜——它要算專案地圖、走一遍工作區、跑 `git status`。
+那段空窗裡只要有任何一次 `saveConfig()`（切走視窗就會觸發 `visibilitychange`），
+存進 `localStorage` 的 `conf.srv` 就是一整排 `false`。下次開頁面
+`restoreServerState()` 讀到它，會**把伺服器上開著的工具關掉**，而畫面上那支筆
+還亮著——「按鈕亮了可是工具未啟用」就是這麼來的。
+
+清空搬進 `catch`：問不到才當作沒有 serve.py。順帶兩個相關的小修：
+`renderWriteBtn()` 在按鈕被停用時不再點亮（灰掉還亮著等於騙人），
+`toggleWrite()` 切完就 `saveConfig()`，不必等關視窗那一下。
+
 ### 工具定義與規則只有一份
 
 `TOOL_SCHEMAS`、`tool_defs()`、`agent_rules()` 全都在 `serve.py`，由 `/upstream`、

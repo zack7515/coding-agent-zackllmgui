@@ -462,7 +462,7 @@ function renderWriteBtn() {
   const btn = $('writeBtn');
   if (!btn) return;
   const why = writeReason();
-  btn.classList.toggle('on', !!S.ws.write);
+  btn.classList.toggle('on', !!S.ws.write && !why);   // 灰掉還亮著等於騙人
   btn.disabled = !!why;
   btn.title = why || (S.ws.write
     ? '模型可以修改檔案（每一次仍然要你按確認）— 點一下關閉'
@@ -474,6 +474,7 @@ async function toggleWrite() {
   if (why) { toast(why); return; }
   try {
     await setServerTools({ write: !S.ws.write });
+    saveConfig();          // 下次開頁面靠這個值把權限推回去，不能只等關視窗才存
     toast(S.ws.write ? '模型可以修改檔案了，每一次仍然要你按確認' : '已改回唯讀');
   } catch (e) {
     toast('切換失敗：' + e.message);
