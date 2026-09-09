@@ -1528,6 +1528,68 @@ function isSrvPath(path) {
 預設。這一顆只是把那一下從「找那一列」變成一下。拍不到相就不給按鈕 ——
 一顆按了會失敗的按鈕比沒有按鈕更糟。
 
+#### 瀏覽器丟的錯是唯一回不到模型手上的那一類
+
+自我驗證這件事其實**大部分早就做完了**，只是名字不叫這個：`run_shell` 的
+stdout、`lint_after_write`、`check_job`、收尾驗證，全都是「跑一次 → 讀輸出 →
+沒過就丟回去讓它修」。凡是有 exit code 的東西都在這條路上。
+
+漏掉的是**沒有 exit code 的那一類**：頁面載入了，某一顆按鈕按下去沒反應。
+`node tests/test_gui.js` 的第一條會解析整份腳本，所以語法錯抓得到；`grab()`
+出來的那幾支函式的行為也測得到。但 `ReferenceError` 發生在一個沒被測到的
+click handler 裡時，測試全綠、build 成功、模型說做完了 —— 而畫面是壞的。
+
+第一個念頭是開一個 headless 瀏覽器去看。查下去發現 **Firefox 的 WebDriver
+沒有 log endpoint**（`get_log('browser')` 是 Chrome 才有的），要抓載入當下的錯
+就得在載入**之前**掛 hook —— 而 WebDriver 沒有這種時機。繞法（先導到
+about:blank 再注入、包一層 iframe shim）每一種都比問題本身複雜。
+
+那就讓**頁面自己回報**。`00-console.js` 排在最前面（`build.py` 照檔名排序），
+掛上三個來源：
+
+| 來源 | 抓的是 |
+|---|---|
+| `window.addEventListener('error', …, true)` | 丟出來沒人接的例外；capture 階段順便收資源載入失敗 |
+| `unhandledrejection` | `await` 沒有 try 的那些。**本機模型最常寫壞的一種** |
+| 包住 `console.error` | 自己 catch 起來但只印出來的 —— 那些同樣是「壞了但畫面不說」 |
+
+送回 `/clienterr`，`serve.py` 收進一個 `maxlen=50` 的 deque，模型用
+`read_console` 讀。三個決定值得寫下來：
+
+- **攢 800ms 再送。** 一個錯常常連帶三四個（onerror 一條、unhandledrejection
+  一條、自己的 console.error 一條），一條一個請求太吵。
+- **一次最多 20 條。** 壞在 render 迴圈裡的話它會一直丟。
+- **送的過程再丟錯就不收。** 不然送失敗 →（可能）console.error → 又收一條 →
+  再送一次，自己餵自己。這條沒有症狀，只會在真的壞掉那天把緩衝區灌滿垃圾。
+
+**讀完清空**，而且工具描述裡就這樣告訴模型：改完重新整理再讀一次，
+還有東西就是沒修好。這比回傳時間戳讓它自己比對可靠得多。
+
+沒有錯誤的時候**這支工具不會出現在清單裡**（`needs: "console"`），
+跟 `check_job` 一模一樣的做法 —— 一支工具的定義每一輪約 110 token，
+而多數對話從頭到尾網頁都沒出過錯。
+
+##### 那一圈要自己會轉
+
+上面那些只解決「錯誤送得回去」。還缺一步：**頁面要重新載入，錯誤才會產生**。
+而模型改的是 `frontend/js/*.js`，改完頁面還是舊的。
+
+`_serve_page()` 本來就每次請求都從 `frontend/` 重組，所以**重新整理就夠了**，
+不必重啟 `serve.py` —— 而重啟會殺掉正在跑的工具。`/alive` 因此多回一個
+`page_changed`（`frontend/` 的 mtime），跟 `src_changed` 分開：
+
+| 變的是 | 做什麼 |
+|---|---|
+| `serve.py`、`tools/`、`sandbox/` | 重啟 serve.py，再重新整理 |
+| `frontend/` | 只重新整理 |
+
+於是一圈自己會轉：改前端 → 頁面自己重載 → 壞了就回報 → `read_console` 讀得到。
+`checkSourceChanged` 在 `S.streaming` 時會跳過，所以重載落在這一輪結束之後 ——
+也就是模型下一輪讀得到上一輪改壞了什麼。
+
+**看不到的是別人的頁面。** hook 住在這個介面自己的 JS 裡，模型做出來的其他
+網頁不會回報 —— 那個要真的驅動一個瀏覽器，見 plan-agent 2.23。
+
 #### 它看不到自己做出來的東西
 
 `run_browser` 是 urllib 加 HTML→純文字，沒有無頭瀏覽器也沒有截圖。改 CSS 或
@@ -2258,10 +2320,10 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 113 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 115 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、還原點改名、＋資料夾
 python tests/test_core.py    # 13 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
-node tests/test_gui.js       # 78 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
+node tests/test_gui.js       # 80 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、
                              #        對話存取、子代理型別與 worktree、serve.py 的路由全都帶 X-Tab
 python tests/test_agent.py   # 需要 Ollama：讓真的模型修好一個壞掉的專案，跑到 pytest 通過
                              #   --no-rules 拿掉系統提示、--tools=a,b 只送幾支工具，都是量用的

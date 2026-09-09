@@ -354,15 +354,28 @@ wait、shot），回傳 console 的錯誤與最後一張截圖。
 **成本**：大。要嘛拉 selenium／playwright 進來（跟「零相依」直接衝突），
 要嘛自己講 CDP／WebDriver 協定（那是另一個專案）。
 
-**卡在哪**：先問「一張截圖夠不夠」。實際做前端任務時，最有價值的訊號常常不是
-像素而是 **console 的錯誤**，而那個用 headless Chrome 的 `--dump-dom` 加上
-一支腳本就拿得到 —— 也就是說 2.23 真正該先做的一半，可能只是把「怎麼截圖、
-怎麼撈 console」寫成一份 skill，讓模型 `load_skill` 之後照著做。
-**先寫那份 skill，用一陣子再回來看還缺什麼。**
+**卡在哪**：先問「一張截圖夠不夠」。實際做前端任務時最有價值的訊號常常不是
+像素而是 **console 的錯誤** —— 而**那一半已經做掉了，用的不是瀏覽器自動化**：
+頁面自己把 `window.onerror`／`unhandledrejection`／`console.error` 送回
+`serve.py`，模型用 `read_console` 讀（見 tech.md〈瀏覽器丟的錯〉）。零相依，
+而且看得到的是**真的那一次載入**，不是另外開一個 headless 跑出來的樣子。
+
+所以 2.23 剩下的範圍小了一圈，只剩兩件事：**互動**（點按鈕、填表單、量版面）
+與**模型自己做出來的其他頁面**（那個 `read_console` 看不到，因為 hook 住在
+這個介面自己的 JS 裡）。兩件都要真的驅動一個瀏覽器。
+
+**下一步不是做工具，是寫一份 skill。** geckodriver 已經在 `/snap/bin/`，
+WebDriver 就是 HTTP + JSON，`urllib` 講得動，不需要 selenium。把「怎麼開、
+怎麼點、怎麼截圖、怎麼收 console」寫成一份 skill 讓模型 `load_skill`，
+用一陣子再回來看要不要收斂成工具 —— 現在就包一支工具是在猜介面長什麼樣。
 
 > 這台的 Firefox 是 snap：`--headless --screenshot` 寫不進 `/tmp`、
 > 也不吃 `--profile`，兩次都掛住（`docs/shots/README.md` 記過同一個坑）。
 > 要寫那份 skill 的話，這是第一句要寫的話。
+>
+> Firefox 的 WebDriver **沒有 log endpoint**（`get_log('browser')` 是 Chrome
+> 才有的），所以載入當下丟的錯抓不到 —— 除非那一頁自己有 hook，也就是
+> `read_console` 走的那條路。這是「先做頁面自己回報」而不是先做自動化的原因。
 
 ---
 

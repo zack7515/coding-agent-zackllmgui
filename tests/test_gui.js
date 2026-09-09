@@ -1871,7 +1871,79 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     console.log('ok   外部 API 的工具開關、看不了圖就不送 view_image');
   }
 
-  // ── 圖片要跟著 tool 訊息送出去 ──────────────────────────
+  // ── 瀏覽器丟的錯要送得回去 ──────────────────────────────
+// 這一段跑在真正的頁面上，node 這裡驗的是「攢、上限、不自我餵食」那三條 ——
+// 那三條錯了不會有任何症狀，只會在真的壞掉那天沒有東西可讀。
+{
+  const mk = function () {
+    const sent = [];
+    const timers = [];
+    const box = new Function('fetch', 'apiUrl', 'setTimeout', 'location', 'window',
+                             'console', 'out', `
+      ${grab('CLIENT_ERR_MAX', 'const')}
+      ${grab('CLIENT_ERR_WAIT', 'const')}
+      let clientErrs = [], clientErrTimer = 0, clientErrSending = false;
+      ${grab('noteClientErr')}
+      ${grab('flushClientErrs')}
+      out.note = noteClientErr;
+      out.flush = function () { flushClientErrs(); };
+      out.pending = function () { return clientErrs.length; };
+      out.max = CLIENT_ERR_MAX;
+      out.wait = CLIENT_ERR_WAIT;`);
+    const out = {};
+    box(function (url, opt) { sent.push(JSON.parse(opt.body)); return Promise.resolve(); },
+        function (p) { return 'http://x' + p; },
+        function (fn, ms) { timers.push({ fn: fn, ms: ms }); return timers.length; },
+        { pathname: '/' }, {}, { error: function () {} }, out);
+    return { box: out, sent: sent, timers: timers };
+  };
+
+  // 一個錯常常連帶三四個：先攢一下再送，不要一條一個請求
+  let t = mk();
+  t.box.note('error', 'A', 'a.js:1');
+  t.box.note('error', 'B', '');
+  assert.strictEqual(t.timers.length, 1, '每一條都自己開一個計時器');
+  assert.strictEqual(t.timers[0].ms, t.box.wait);
+  assert.strictEqual(t.sent.length, 0, '還沒到時間就送出去了');
+  t.timers[0].fn();
+  assert.strictEqual(t.sent.length, 1);
+  assert.deepStrictEqual(t.sent[0].errors.map(function (e) { return e.text; }), ['A', 'B']);
+
+  // 壞在 render 迴圈裡的話會一直丟，要有上限
+  t = mk();
+  for (let i = 0; i < t.box.max + 50; i++) t.box.note('error', '第' + i);
+  assert.strictEqual(t.box.pending(), t.box.max, '沒有上限，壞掉的頁面會把自己灌爆');
+
+  // 送的過程再丟錯就不要再送 —— 不然送失敗會自己餵自己，一路遞迴下去
+  t = mk();
+  t.box.note('error', 'A');
+  t.timers[0].fn();                       // 送出去，clientErrSending 立起來
+  t.box.note('error', '送出去的時候又壞了');
+  assert.strictEqual(t.box.pending(), 0, '送的過程收下的錯會變成下一輪的錯，會滾雪球');
+
+  // 太長的要截掉：一個 stack trace 幾千字，五十條就把 context 燒光
+  t = mk();
+  t.box.note('error', 'x'.repeat(5000), 'y'.repeat(5000));
+  t.timers[0].fn();
+  assert.ok(t.sent[0].errors[0].text.length <= 1000, t.sent[0].errors[0].text.length);
+  assert.ok(t.sent[0].errors[0].where.length <= 300);
+  console.log('ok   瀏覽器丟的錯會攢起來送回 serve.py（有上限、不自我餵食）');
+}
+
+// ── frontend 改了只重新整理，不重啟 ──────────────────────
+{
+  const src = script.slice(script.indexOf('async function checkSourceChanged'),
+                           script.indexOf('async function loadUpstream'));
+  assert.ok(/page_changed && !data\.src_changed/.test(src),
+    'serve.py 沒改也跟著重啟了 —— 那會殺掉正在跑的工具');
+  assert.ok(src.indexOf('location.reload(); return;') > 0, '沒有重新整理那條路');
+  const py = fs.readFileSync(path.join(__dirname, '..', 'serve.py'), 'utf8');
+  assert.ok(/"page_changed": page_stamp\(\) != PAGE_STAMP/.test(py),
+    '/alive 沒有回報頁面變了沒');
+  console.log('ok   改前端只重新整理，改 serve.py 才重啟');
+}
+
+// ── 圖片要跟著 tool 訊息送出去 ──────────────────────────
 // 實測過 Ollama 吃得下 tool 訊息帶的 images（用一張左紅右藍的 png 問模型，
 // 它答得出來），所以不必再多包一則 user 訊息。這裡守的是別把那一行改掉。
 {

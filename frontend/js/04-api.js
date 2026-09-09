@@ -317,6 +317,10 @@ async function checkSourceChanged() {
     if (!res.ok) return;                       // 舊版沒有這支，靜靜略過
     data = await res.json();
   } catch (e) { return; }
+  // frontend/ 改了但 serve.py 沒改：重新整理就夠了（_serve_page 每次都重組），
+  // 不必重啟 —— 重啟會殺掉正在跑的工具。改前端 → 頁面自己重載 →
+  // 壞掉的話 00-console.js 把錯送回去 → 模型用 read_console 讀得到。
+  if (data.page_changed && !data.src_changed && data.local) { location.reload(); return; }
   if (!data.src_changed || !data.local) return;
   S.restarting = true;
   toast('serve.py 的程式碼改過了，重新啟動…');

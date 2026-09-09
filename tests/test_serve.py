@@ -1532,6 +1532,78 @@ def test_auto_mode_tells_the_model_nobody_may_answer():
         serve.cur().auto = "off"
 
 
+def test_browser_errors_reach_the_model():
+    """瀏覽器丟的錯是唯一回不到模型手上的那一類，這條路把它接回去。
+
+    run_shell 的 stdout、linter、收尾驗證都會回灌，只有 JS 例外靜靜留在 F12 裡 ——
+    而改壞前端最常見的樣子就是它：頁面照樣載入，某一顆按鈕按下去沒反應。
+    """
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 0)
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        serve.ALLOW_TOOLS = True
+        serve.CLIENT_ERRS.clear()
+        with Workspace():
+            # 沒有錯誤的時候這支工具不該出現在清單裡 —— 叫了也沒東西可讀
+            names = [d["function"]["name"] for d in serve.tool_defs()]
+            assert "read_console" not in names, names
+            assert "沒有錯誤" in serve.run_tool("read_console", {})
+
+            code, out = post(base + "/clienterr", json.dumps({"errors": [
+                {"kind": "error", "text": "ReferenceError: fooo is not defined",
+                 "where": "zackllmgui.html:4120:7"},
+                {"kind": "unhandled", "text": "TypeError: x is null"}]}).encode(),
+                {"Origin": base})
+            assert code == 200 and out["got"] == 2, out
+
+            names = [d["function"]["name"] for d in serve.tool_defs()]
+            assert "read_console" in names, "有錯誤了卻還是不送這支工具"
+
+            got = serve.run_tool("read_console", {})
+            assert "fooo is not defined" in got and "zackllmgui.html:4120" in got, got
+            assert "TypeError: x is null" in got, got
+            # 讀完要清掉：那是模型拿來判斷「修好了沒」的唯一根據
+            assert "沒有錯誤" in serve.run_tool("read_console", {})
+
+            # 壞掉的頁面會一直丟，緩衝區要有上限而且留最後那幾條
+            n = serve.CLIENT_ERRS.maxlen
+            for i in range(n + 10):
+                post(base + "/clienterr",
+                     json.dumps({"errors": [{"kind": "error", "text": f"第{i}條"}]}).encode(),
+                     {"Origin": base})
+            got = serve.run_tool("read_console", {})
+            assert f"第{n + 9}條" in got and "第0條" not in got, "留錯了那一端"
+    finally:
+        serve.ALLOW_TOOLS = False
+        serve.CLIENT_ERRS.clear()
+        server.shutdown()
+        server.server_close()
+
+
+def test_frontend_edits_reload_instead_of_restarting():
+    """frontend/ 改了只要重新整理，serve.py 改了才要重啟。
+
+    _serve_page 每次都從 frontend/ 重組，所以頁面自己重載就看得到新的 ——
+    而重啟會殺掉正在跑的工具。兩件事分開回報，網頁才選得對。
+    """
+    stamp = serve.page_stamp()
+    assert stamp, "有 frontend/ 卻算不出 stamp"
+    assert stamp == serve.page_stamp(), "沒改東西 stamp 就不該變"
+
+    target = serve.HERE / "frontend" / "js" / "00-console.js"
+    before = target.stat().st_mtime_ns
+    try:
+        os.utime(target, ns=(before + 10**9, before + 10**9))
+        assert serve.page_stamp() != stamp, "改了 frontend/ 卻說沒變"
+    finally:
+        os.utime(target, ns=(before, before))
+    assert serve.page_stamp() == stamp
+
+    # serve.py 那一份不該被 frontend/ 的改動帶著跑
+    assert "frontend" not in " ".join(serve.SRC_GLOBS)
+
+
 def test_skills_endpoint():
     """/ 選單要看得到 skills，而且 name 只能當資料夾名用。"""
     names = [s["name"] for s in serve.skills_list()]

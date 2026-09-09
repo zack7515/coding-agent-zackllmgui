@@ -290,9 +290,22 @@ bwrap 是 namespace 層的隔離，不換掉檔案系統，所以宿主機的 py
 | 要另外開 | `run_browser` | 勾「連網瀏覽」 |
 | 需要工作區 | `list_dir`、`search_files`、`read_file`、`run_shell`、`task` | 指定專案資料夾 |
 | 需要工作區＋看得了圖的模型 | `view_image` | 指定專案資料夾，而且模型有 vision |
+| 網頁出過錯才有 | `read_console` | 這個介面在瀏覽器裡丟過 JS 錯誤（沒出錯就不送這支，省 context） |
 | 需要是 Python 專案 | `run_tests`、`setup_env` | 工作區裡有 `.py` 檔（那兩支是 pytest 與 `.venv` 專用的） |
 | 需要再開一道 | `write_file`、`edit_file` | 勾「允許修改檔案」 |
 | 計畫模式時 | `submit_plan` | 勾「計畫模式」，核准後才放行寫入工具 |
+
+**讓它看得到瀏覽器的錯**：這個介面在瀏覽器裡丟出的 JS 例外、沒接住的 promise、
+`console.error`，都會送回 `serve.py`，模型用 `read_console` 讀。改壞前端最常見的
+樣子是「頁面照樣載入、版面看起來正常，只有某一顆按鈕按下去沒反應」——
+那種錯原本只留在 F12 裡，誰都看不到。
+
+讀完會清空，所以判準很簡單：**改完重新整理再讀一次，還有東西就是還沒修好。**
+而且 `frontend/` 一改頁面就自己重新整理（`serve.py` 沒變就不重啟 ——
+重啟會殺掉正在跑的工具），所以這一圈不用你插手。
+
+> **只看得到這個介面自己的 console。** hook 住在它自己的 JS 裡，模型做出來的
+> 其他網頁不會回報 —— 那個要真的開一個瀏覽器去驅動。
 
 **讓它看得到圖**：`view_image` 把工作區裡的一張 png／jpg／gif／webp 放進模型的
 context。截圖、設計稿、測試產出的圖表都算 —— `read_file` 讀圖片只會拿到亂碼。
@@ -1256,6 +1269,7 @@ ollamaGUI/
 │   ├── index.html          版面骨架（含 {{STYLE}} / {{SCRIPT}} 兩個標記）
 │   ├── style.css           全部的樣式
 │   └── js/                 依載入順序編號，串接起來就是原本那一大段 script
+│       ├── 00-console.js     瀏覽器丟的錯往回送（排最前面才抓得到載入當下的）
 │       ├── 01-icons.js       SVG 路徑
 │       ├── 02-const.js       預設值、參數定義、系統提示預設
 │       ├── 03-state-util.js  全域狀態 S、小工具、Markdown 轉 HTML
@@ -1271,9 +1285,9 @@ ollamaGUI/
 │       └── 13-init.js        接線與啟動
 │
 ├── tests/                自我檢查（Python 兩支無額外相依；網頁測試需要 Node.js）
-│   ├── test_serve.py       後端 113 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 115 項： python tests/test_serve.py
 │   ├── test_core.py        核心模組 13 項： python tests/test_core.py
-│   ├── test_gui.js         網頁 78 項： node tests/test_gui.js
+│   ├── test_gui.js         網頁 80 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │

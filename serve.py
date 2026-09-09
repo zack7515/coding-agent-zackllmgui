@@ -150,6 +150,10 @@ TODO_FILE = ".zackllmgui-todos.md"
 # 看得到的圖片。模型看不了圖的話這支工具根本不會出現在清單裡（網頁那一端擋）。
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
+# 網頁自己丟出來的錯（window.onerror、unhandledrejection、console.error）。
+# 環狀緩衝：壞掉的頁面會一直丟，而值錢的永遠是最後那幾條。
+CLIENT_ERRS = collections.deque(maxlen=50)
+
 # 自動模式下沒有人回答 ask_user_question 時，網頁等這麼久就替它往下走。
 # 真正在計時的是前端的 ASK_WAIT_MS，這裡只是拿來寫進提示詞（測試會比對兩邊）。
 ASK_WAIT_MIN = 3
@@ -208,6 +212,27 @@ def source_stamp() -> str:
 
 
 SRC_STAMP = source_stamp()
+
+
+def page_stamp() -> str:
+    """frontend/ 的 mtime。改了就叫網頁重新整理，不必重啟 serve.py。
+
+    沒有 frontend/（只複製兩個檔出去的裝法）就回空字串，永遠等於沒變。
+    """
+    src = HERE / "frontend"
+    if not src.is_dir():
+        return ""
+    bits = []
+    for f in sorted(src.rglob("*")):
+        try:
+            if f.is_file():
+                bits.append(f"{f.name}:{f.stat().st_mtime_ns}")
+        except OSError:
+            pass
+    return "|".join(bits)
+
+
+PAGE_STAMP = page_stamp()
 
 
 def restart_self() -> None:
@@ -1284,6 +1309,10 @@ def tool_defs() -> list:
         # 這用的是既有的 needs 閘門，不是新機制 —— 見 plan-agent 2.17 為什麼只做到這裡。
         if t["needs"] == "job" and (cur().ws is None or not JOBS):
             continue
+        # 沒有錯誤的時候這支工具叫了也沒東西可讀。跟 check_job 同一個做法：
+        # 一支工具的定義每一輪約 110 token，而多數對話從頭到尾網頁都沒出錯。
+        if t["needs"] == "console" and not CLIENT_ERRS:
+            continue
         if t["needs"] == "plan" and not cur().plan["on"]:
             continue
         if t["needs"] == "browser" and not ALLOW_BROWSER:
@@ -1367,6 +1396,25 @@ def png_size(data: bytes) -> tuple:
     return (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
 
 
+def _tool_read_console(clear: bool = True) -> str:
+    """讀網頁那一端丟出來的錯誤。讀完預設清掉 —— 那是它拿來當「修好了沒」的判準。
+
+    只看得到這個介面自己的 console，不是模型做出來的其他頁面。
+    """
+    rows = list(CLIENT_ERRS)
+    if clear:
+        CLIENT_ERRS.clear()
+    if not rows:
+        return "網頁那一端沒有錯誤。"
+    out = [f"網頁丟出 {len(rows)} 條（舊的在前）："]
+    for e in rows:
+        where = f"　{e['where']}" if e.get("where") else ""
+        out.append(f"[{e['ts']}] {e['kind']}: {e['text']}{where}")
+    out.append("（已經清空。改完之後重新整理頁面再讀一次，"
+               "還有東西就是沒修好。）" if clear else "")
+    return "\n".join(x for x in out if x)
+
+
 def _tool_view_image(path: str) -> str:
     """把工作區裡的一張圖送進模型的 context。回傳一行說明，圖片走 image 欄位。
 
@@ -1414,6 +1462,7 @@ TOOLS = {
     "setup_env": _tool_setup_env,
     "run_browser": _tool_run_browser,
     "view_image": _tool_view_image,
+    "read_console": _tool_read_console,
     "load_skill": _tool_load_skill,
 }
 WRITE_TOOLS = {"write_file", "edit_file"}
@@ -2066,8 +2115,11 @@ class Handler(BaseHTTPRequestHandler):
             # 輕到可以每幾秒問一次，只回本機：幾張卡、多少記憶體不給同網段的人看。
             self._json(dict(sys_usage(), jobs=jobs_state()) if self._is_local() else {})
         elif self.path == "/alive":
-            # 很輕的一支，網頁每 30 秒問一次。只回「程式碼有沒有被改過」
+            # 很輕的一支，網頁每 30 秒問一次。回「程式碼變了沒」與「頁面變了沒」。
+            # 分開的理由是處理方式不同：serve.py 變了要重啟，frontend/ 變了
+            # 重新整理就好（_serve_page 每次都重組），而重啟會殺掉正在跑的工具。
             self._json({"src_changed": source_stamp() != SRC_STAMP,
+                        "page_changed": page_stamp() != PAGE_STAMP,
                         "local": self._is_local()})
         elif self.path == "/ext":
             self._do_ext("GET")
@@ -2119,6 +2171,8 @@ class Handler(BaseHTTPRequestHandler):
             self._do_mcp()
         elif self.path == "/browse":
             self._do_browse()
+        elif self.path == "/clienterr":
+            self._do_client_err()
         elif self.path == "/ls":
             self._do_ls()
         elif self.path == "/skills":
@@ -2271,6 +2325,31 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"made": make_dir(str(req["mkdir"]))})
                 return
             self._json({"path": rel, "entries": list_entries(rel)})
+        except Exception as e:
+            self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+
+    def _do_client_err(self) -> None:
+        """收網頁自己丟出來的錯誤。只收本機的，而且只進記憶體。
+
+        不寫檔案：這是拿來給模型讀「剛剛壞在哪」的，不是日誌系統。
+        """
+        if not self._is_local():
+            self._json({"error": "只允許本機呼叫"}, 403)
+            return
+        try:
+            req = json.loads(self._read_body(64 * 1024) or b"{}")
+            rows = req.get("errors") if isinstance(req, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("errors 要是陣列")
+            ts = time.strftime("%H:%M:%S")
+            for e in rows[:20]:
+                if not isinstance(e, dict):
+                    continue
+                CLIENT_ERRS.append({
+                    "ts": ts, "kind": str(e.get("kind", "error"))[:20],
+                    "text": str(e.get("text", ""))[:1000],
+                    "where": str(e.get("where", ""))[:300]})
+            self._json({"got": len(rows)})
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
 

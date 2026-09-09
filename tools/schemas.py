@@ -90,6 +90,14 @@ TOOL_SCHEMAS = [
      "properties": {"path": {"type": "string",
                              "description": "相對於工作區的圖片路徑"}},
      "required": ["path"]},
+    {"name": "read_console", "needs": "console",
+     "description": ("讀這個介面在瀏覽器裡丟出來的錯誤（JS 例外、"
+                     "沒接住的 promise、console.error）。改完前端之後用這支確認"
+                     "有沒有壞掉 —— 讀完會清空，所以重新整理頁面再讀一次，"
+                     "還有東西就是還沒修好。看不到模型自己做出來的其他頁面"),
+     "properties": {"clear": {"type": "boolean",
+                              "description": "讀完要不要清空，預設 true"}},
+     "required": []},
     {"name": "setup_env", "needs": "python",
      "description": ("在工作區裡建立 .venv 並安裝套件，之後 run_tests 會自動用它。"
                      "需要套件（例如 pytest）時用這支，不要自己用 run_shell 下 pip install ——"

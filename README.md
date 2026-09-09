@@ -48,6 +48,8 @@ Linux 與 Windows 11 都已實機驗證；macOS 路徑已實作但尚未實機�
 |---|---|
 | **思考模式** | 控制項依模型能力自動變形：gpt-oss 給四段、qwen3 給開關、沒有的整組停用並**完全不送 `think` 欄位** |
 | **本機工具** | 讀檔、寫檔、列目錄、搜尋、`run_shell`、`run_tests`、`setup_env`、git、連網瀏覽、看圖 |
+| **它看得到瀏覽器的錯** | 頁面丟出的 JS 例外、沒接住的 promise、`console.error` 會送回 `serve.py`，模型用 `read_console` 讀。改壞前端最常見的樣子是「頁面照樣載入、某顆按鈕不動」——那種錯原本只留在 F12 裡。讀完就清空，所以**重新整理再讀一次，還有東西就是沒修好** |
+| **改前端不必手動重整** | `frontend/` 一改，頁面自己重新整理（`serve.py` 沒變就不重啟，重啟會殺掉正在跑的工具）。改 → 重載 → 壞了就回報 → 模型讀得到，這一圈自己會轉 |
 | **它看得到圖** | `view_image` 把工作區裡的 png／jpg 放進模型的 context —— 截圖、設計稿、測試產出的圖表都算。沒有內建的截圖工具是刻意的：讓它自己寫腳本、`run_shell` 跑出一張圖，再用這支看結果，你手上有 selenium 還是 `scrot` 它就用哪個。模型沒有 vision 就不送這支工具 |
 | **語言支援**（Linux 完整實測） | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。Windows 的一般工具流程已驗，MSVC／MinGW 的完整 C/C++ 流程尚未實測。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
@@ -307,9 +309,9 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 113 項
+python tests/test_serve.py    # 後端 115 項
 python tests/test_core.py     # core/ 各模組的介面 13 項
-node   tests/test_gui.js      # 網頁 78 項
+node   tests/test_gui.js      # 網頁 80 項
 ```
 
 兩支 Python 測試只用專案本身與標準函式庫，三支都不需要 Ollama 在跑；網頁測試需要 Node.js。
