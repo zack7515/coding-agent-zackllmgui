@@ -441,12 +441,31 @@ function askUser(args) {
     waitBadge(true);
     notifyBg('模型在問你：' + String(args.question || '').slice(0, 80));
 
-    const done = function (text) {
+    // 自動模式下人可能不在，而這個 Promise 沒有別的出路 —— 沒人按送出就是
+    // 整輪靜靜地掛在這裡，跑一半的任務連停在哪都不會說。等不到就替它往下走。
+    // 手動的三檔不設時限：那幾檔本來每個工具都要人點，人就在旁邊。
+    let timer = 0;
+    if (S.auto === 'full' || S.auto === 'ws') {
+      const hint = document.createElement('div');
+      hint.className = 'muted';
+      hint.style.cssText = 'margin-top:6px; font-size:11px';
+      hint.textContent = '沒有人回答的話，' + (ASK_WAIT_MS / 60000)
+        + ' 分鐘後讓它自己判斷繼續';
+      el.querySelector('.tool-card').appendChild(hint);
+      timer = setTimeout(function () {
+        done('（等了 ' + (ASK_WAIT_MS / 60000) + ' 分鐘沒有人回答 —— 自動模式下'
+          + '沒有人在旁邊。用你的最佳判斷繼續做，做完時把你假設了什麼講清楚。）',
+          true);
+      }, ASK_WAIT_MS);
+    }
+
+    const done = function (text, timedOut) {
+      clearTimeout(timer);
       waitBadge(false);
       el.querySelector('.ta:last-child').innerHTML = '';
       opts.innerHTML = '';
       opts.hidden = true;
-      el.querySelector('.q').textContent += '\n你：' + text;
+      el.querySelector('.q').textContent += (timedOut ? '\n（沒有人回答）' : '\n你：' + text);
       resolve(text);
     };
     send.addEventListener('click', function () { if (answer()) done(answer()); });
@@ -848,6 +867,9 @@ async function execTool(name, args, msg, agent) {
       msg.backup = msg.content.slice(at + 8).trim();
       msg.content = msg.content.slice(0, at).trim();
     }
+    // view_image 回的圖。apiMessages 會把它掛在這則 tool 訊息上送給模型 ——
+    // 實測 Ollama 吃得下 tool 訊息帶的 images，不必再多包一則 user 訊息。
+    if (data.image) msg.images = [data.image];
     if (data.todos) { S.todos = data.todos; renderTodos(); }
     if (data.tool_defs) S.toolDefs = data.tool_defs;   // 核准計畫後會多出寫入工具
   } catch (e) {

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """serve.py 的自我檢查。 python test_serve.py 就跑，沒有測試框架。"""
 
+import base64
 import http.client
 import io
 import json
@@ -9,6 +10,7 @@ import glob
 import os
 import re
 import select
+import shlex
 import socket
 import stat
 import shutil
@@ -1381,6 +1383,153 @@ def test_checkpoint_dedupe_stays_inside_one_chat():
         assert [e["path"] for e in serve.journal_for("乙")] == ["乙再問"]
         assert [e["path"] for e in serve.journal_for("甲")] == ["甲問的"]
         serve.workspace.set_cur_chat("")
+
+
+def test_view_image_is_the_only_way_a_picture_reaches_the_model():
+    """圖片要進 context 只有這一條路，而它跟其他檔案工具同一道邊界。
+
+    read_file 讀 png 只會拿到亂碼。這台上的模型全都有 vision，缺的一直是
+    「把工作區裡的圖遞給它」這一步 —— 截圖、設計稿、測試產出的圖表都算。
+    """
+    with Workspace() as ws:
+        png = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR"
+               + (7).to_bytes(4, "big") + (5).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+               + b"\x00" * 20)
+        (ws / "shot.png").write_bytes(png)
+
+        out = serve.run_tool("view_image", {"path": "shot.png"})
+        assert "shot.png" in out and "7×5" in out, out
+        assert serve._SHOT.b64, "圖片沒有放進 image 欄位"
+        assert base64.b64decode(serve._SHOT.b64) == png
+
+        # 邊界跟 read_file 同一道：出了工作區一律不給
+        # 邊界之外、不是圖片、不存在、太大，四種都要擋
+        (ws / "big.png").write_bytes(png + b"\x00" * serve.MAX_IMAGE_BYTES)
+        for bad in ("../外面.png", "/etc/x.png", "~/家.png", ".git/x.png",
+                    "pkg/calc.py", "沒有這張.png", "big.png"):
+            try:
+                serve.run_tool("view_image", {"path": bad})
+                raise AssertionError(f"{bad} 竟然送得出去")
+            except (PermissionError, FileNotFoundError, ValueError):
+                pass
+
+
+def test_the_image_field_does_not_stick_to_the_next_tool():
+    """圖片一定要 pop：留著的話下一個工具的結果會跟著上一張圖。
+
+    那種漏法不會報錯，只會讓模型在讀檔案時看到一張三輪之前的截圖 ——
+    而 base64 是一串亂碼，人在畫面上也看不出哪裡不對。
+    """
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 0)
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        serve.ALLOW_TOOLS = True
+        with Workspace() as ws:
+            (ws / "shot.png").write_bytes(
+                b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR"
+                + (4).to_bytes(4, "big") + (3).to_bytes(4, "big")
+                + b"\x08\x02\x00\x00\x00" + b"\x00" * 20)
+            code, out = post(base + "/tool",
+                             json.dumps({"name": "view_image",
+                                         "args": {"path": "shot.png"}}).encode(),
+                             {"Origin": base})
+            assert code == 200 and out.get("image"), out
+            assert "4×3" in out["result"], out
+
+            code, out = post(base + "/tool",
+                             json.dumps({"name": "read_file",
+                                         "args": {"path": "pkg/calc.py"}}).encode(),
+                             {"Origin": base})
+            assert code == 200 and "image" not in out, "上一張圖黏在下一個工具上了"
+    finally:
+        serve.ALLOW_TOOLS = False
+        server.shutdown()
+        server.server_close()
+
+
+def test_git_state_reaches_the_model_not_just_the_ui():
+    """分支與髒不髒要寫進系統提示。
+
+    不講的話它會直接 commit 到 main，或把使用者原本就沒 commit 的改動
+    算成自己這一輪的成果。git_state() 早就在算了，只是從來沒給模型看過。
+    """
+    with Workspace() as ws:
+        def git(*a):
+            return subprocess.run(["git", "-C", str(ws)] + list(a),
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace")
+
+        assert serve.git_brief() == "", "空殼 .git 不該硬掰一個分支出來"
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        assert "main 分支" in serve.git_brief()
+        assert "乾淨" in serve.git_brief()
+        assert "main 分支" in serve.agent_rules(), "算出來了卻沒進提示詞"
+
+        (ws / "pkg" / "calc.py").write_text("改過了\n", encoding="utf-8")
+        (ws / "新的.py").write_text("x = 1\n", encoding="utf-8")
+        brief = serve.git_brief()
+        assert "2 個檔案還沒 commit" in brief, brief
+        assert "不一定是你改的" in brief, "沒講清楚那些不見得是它改的"
+
+        git("checkout", "-qb", "功能分支")
+        assert "功能分支 分支" in serve.git_brief()
+
+
+def test_verify_detect_adds_the_type_check():
+    """型別檢查是自主改多檔最缺的訊號，而 jest 多半不做型別檢查。
+
+    設定檔在不在＝專案自己開了沒有，但跑的字串是寫死的常數 ——
+    從專案裡讀「要跑什麼」等於讓 clone 回來的 repo 指定一條會自動執行的指令。
+    """
+    with Workspace() as ws:
+        for f in ws.rglob("*.py"):
+            f.unlink()
+        (ws / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+        assert serve.verify_detect() == "npx tsc --noEmit", "有 tsconfig 卻留白"
+
+        (ws / "package.json").write_text('{"scripts": {"test": "jest"}}\n', encoding="utf-8")
+        assert serve.verify_detect() == "npx tsc --noEmit && npm test", \
+            "有測試就只跑測試的話，型別錯誤照樣溜過去"
+
+        (ws / "tsconfig.json").unlink()
+        assert serve.verify_detect() == "npm test"
+
+        # mypy：專案自己有設定、而且這台裝了，才加上去
+        (ws / "package.json").unlink()
+        (ws / "tests").mkdir()
+        py = " ".join(shlex.quote(x) for x in serve.detect_python()) + " -m pytest -q"
+        assert serve.verify_detect() == py
+        (ws / "mypy.ini").write_text("[mypy]\n", encoding="utf-8")
+        with mock.patch.object(serve.shutil, "which", return_value=None):
+            assert serve.verify_detect() == py, "沒裝 mypy 卻預填了 mypy"
+        with mock.patch.object(serve.shutil, "which", side_effect=lambda n: "/x/" + n):
+            assert serve.verify_detect() == "mypy . && " + py
+            (ws / "mypy.ini").unlink()
+            (ws / "pyproject.toml").write_text("[tool.mypy]\nstrict = true\n",
+                                               encoding="utf-8")
+            assert serve.verify_detect() == "mypy . && " + py
+
+
+def test_auto_mode_tells_the_model_nobody_may_answer():
+    """自動模式下 ask_user_question 可能等不到人，提示詞要先講。
+
+    網頁那一端等 ASK_WAIT_MIN 分鐘就替它往下走。模型不知道這件事的話，
+    它會把「問一句」當成免費的動作，而那一問要花三分鐘。
+    """
+    with Workspace():
+        serve.cur().auto = "off"
+        assert "不要自己猜" in serve.agent_rules()
+        serve.cur().auto = "full"
+        rules = serve.agent_rules()
+        assert f"{serve.ASK_WAIT_MIN} 分鐘" in rules, rules
+        assert "自己決定得了的就不要問" in rules
+        serve.cur().auto = "off"
 
 
 def test_skills_endpoint():

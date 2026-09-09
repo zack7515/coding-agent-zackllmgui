@@ -378,6 +378,7 @@ async function init() {
   refreshSys();
   setInterval(refreshSys, 3000);            // 背景分頁不會問，refreshSys 自己擋掉
   $('resumeBtn').addEventListener('click', resumeRun);
+  $('rewindBtn').addEventListener('click', rewindTurn);
   $('queueDrop').addEventListener('click', function () {
     S.queued = []; renderQueue(); toast('排隊的話取消了');
   });

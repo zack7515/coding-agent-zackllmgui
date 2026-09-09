@@ -19,8 +19,11 @@ console.log('ok   腳本可解析');
 // 假 DOM 只做這幾支會用到的：className / innerHTML / querySelector / classList。
 function fakeDom() {
   const mk = function () {
-    const el = { className: '', textContent: '', title: '', kids: [], _html: '' };
+    const el = { className: '', textContent: '', title: '', kids: [], _html: '',
+                 style: {}, hidden: false, value: '' };
     el.classList = { add: function (c) { el.className += ' ' + c; } };
+    el.addEventListener = function (ev, fn) { (el.on = el.on || {})[ev] = fn; };
+    el.focus = function () {};
     Object.defineProperty(el, 'innerHTML', {
       get: function () { return el._html; },
       set: function (h) {
@@ -33,10 +36,17 @@ function fakeDom() {
       }
     });
     el.querySelector = function (sel) {
-      const want = sel.replace('.', '');
-      return el.kids.filter(function (k) {
+      // innerHTML 那個 parser 把所有 class 攤平成一層，所以 :last-child 就是
+      // 「同名的最後一個」。[data-send] 只有送出鍵一個，認 mini 就夠。
+      if (sel === '[data-send]') {
+        return el.kids.filter(function (k) { return k.className === 'mini'; })[0] || null;
+      }
+      const last = sel.indexOf(':last-child') > 0;
+      const want = sel.replace(':last-child', '').replace('.', '');
+      const hit = el.kids.filter(function (k) {
         return k.className.split(' ').indexOf(want) >= 0;
-      })[0] || null;
+      });
+      return (last ? hit[hit.length - 1] : hit[0]) || null;
     };
     el.appendChild = function (k) { el.kids.push(k); return k; };
     return el;
@@ -1838,13 +1848,146 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     // 兩種 provider 拿到的工具清單要一樣，再濾掉 task 等於白白少一支
     const defs = new Function('S', grab('toolDefs') + '\nreturn toolDefs();');
     const all = [{ function: { name: 'task' } }, { function: { name: 'read_file' } }];
-    assert.strictEqual(defs({ provider: 'openai', toolDefs: all }).length, 2,
+    const eyes = { caps: { m: ['vision'] }, model: 'm' };
+    assert.strictEqual(defs(Object.assign({ provider: 'openai', toolDefs: all }, eyes)).length, 2,
       '外部 API 模式又把 task 濾掉了');
-    assert.strictEqual(defs({ provider: 'ollama', toolDefs: all }).length, 2);
-    console.log('ok   外部 API 的工具開關');
+    assert.strictEqual(defs(Object.assign({ provider: 'ollama', toolDefs: all }, eyes)).length, 2);
+
+    // 看不了圖的模型不該收到 view_image：它會呼叫，然後對著空氣描述一張看不到的圖
+    const withImg = all.concat([{ function: { name: 'view_image' } }]);
+    const names = function (S) {
+      return defs(S).map(function (d) { return d.function.name; });
+    };
+    assert.deepStrictEqual(
+      names({ provider: 'ollama', toolDefs: withImg, caps: { m: ['tools'] }, model: 'm' }),
+      ['task', 'read_file'], '沒有 vision 卻送了 view_image');
+    assert.deepStrictEqual(
+      names({ provider: 'ollama', toolDefs: withImg,
+              caps: { m: ['tools', 'vision'] }, model: 'm' }),
+      ['task', 'read_file', 'view_image']);
+    // 還沒問到能力（第一次選模型）也當作沒有 —— 寧可少一支，不要叫它看不到的東西
+    assert.deepStrictEqual(names({ provider: 'ollama', toolDefs: withImg, caps: {}, model: 'm' }),
+      ['task', 'read_file']);
+    console.log('ok   外部 API 的工具開關、看不了圖就不送 view_image');
   }
 
-  // ── 等人回應時的分頁標題 ────────────────────────────────
+  // ── 圖片要跟著 tool 訊息送出去 ──────────────────────────
+// 實測過 Ollama 吃得下 tool 訊息帶的 images（用一張左紅右藍的 png 問模型，
+// 它答得出來），所以不必再多包一則 user 訊息。這裡守的是別把那一行改掉。
+{
+  const box = new Function('S', `
+    const $ = function () { return { value: '' }; };
+    const agentRules = function () { return ''; };   // 一行寫完的，grab() 抓不動
+    const repoMap = function () { return ''; };
+    const squeezeTools = function (m) { return m; };  // 這裡不測壓縮，另一支在測
+    ${grab('apiMessages')}
+    return apiMessages;`);
+  const send = box({ srv: {}, agentRules: '', repoMap: '' });
+  const msgs = send({ messages: [
+    { role: 'user', content: '看一下截圖' },
+    { role: 'tool', tool_name: 'view_image', content: 'shot.png（12 KB）',
+      images: ['QUJD'], folded: true, args: { path: 'shot.png' } }
+  ] });
+  const tool = msgs[msgs.length - 1];
+  assert.deepStrictEqual(tool.images, ['QUJD'], '圖片沒有跟著 tool 訊息送出去');
+  assert.strictEqual(tool.folded, undefined, '介面自己的欄位漏進 payload 了');
+  console.log('ok   view_image 的圖跟著 tool 訊息送給模型');
+}
+
+// ── 跑歪的那一輪要留下「退回」這條路 ────────────────────
+// 原本只有 toast 閃一下，跑了二十分鐘的任務驗收沒過也不留痕跡。
+// **不自動退**：跑歪的那一輪多半也做對了一些東西，替人決定全部丟掉更糟。
+{
+  const box = new Function('S', 'els', `
+    const $ = function (id) { return els[id] || (els[id] = { hidden: true, textContent: '' }); };
+    const current = function () { return S._c; };
+    ${grab('resumeReason')}
+    ${grab('renderResumeBar')}
+    return { why: resumeReason, paint: renderResumeBar };`);
+
+  const run = function (chat, ws) {
+    const els = {};
+    const S = { _c: chat, streaming: false, ws: { path: ws === undefined ? '/w' : ws } };
+    box(S, els).paint();
+    return els;
+  };
+  const msgs = [{ role: 'user', content: '改一下' },
+                { role: 'assistant', content: '做完了' }];
+
+  let els = run({ messages: msgs });
+  assert.ok(els.resumeBar.hidden, '好好收工的那一輪不該冒出續跑條');
+
+  els = run({ messages: msgs, verifyFailed: 'npm test', lastCkpt: '1.5' });
+  assert.ok(!els.resumeBar.hidden && els.resumeWhy.textContent.indexOf('npm test') >= 0,
+    '驗收兩次沒過卻一點痕跡都沒留：' + els.resumeWhy.textContent);
+  assert.ok(!els.rewindBtn.hidden, '拍到相了卻不給退回的按鈕');
+
+  // 沒有檢查點就沒得退 —— 給一顆按了會失敗的按鈕比不給更糟
+  els = run({ messages: msgs, verifyFailed: 'npm test' });
+  assert.ok(!els.resumeBar.hidden && els.rewindBtn.hidden, '沒拍到相卻給了退回鍵');
+  els = run({ messages: msgs, stopWhy: '輪數用完', lastCkpt: '1.5' }, '');
+  assert.ok(els.rewindBtn.hidden, '沒有工作區卻給了退回鍵');
+  console.log('ok   驗收沒過留得下痕跡，退回這一輪只在退得掉時才給');
+}
+
+// ── 問了沒有人答：自動模式下要自己往下走 ────────────────
+// 這個 Promise 原本沒有別的出路。半夜跑到這裡就是整輪靜靜地掛著 ——
+// 不是失敗、不是逾時，是連停在哪都不會說，而那是無人看管最貴的失敗。
+{
+  const mkBox = function (auto) {
+    const timers = [];
+    const fn = new Function('S', 'document', 'setTimeout', 'clearTimeout', 'stub', `
+      const { $, msgEl, ico, waitBadge, notifyBg, pin } = stub;
+      ${grab('ASK_WAIT_MS', 'const')}
+      ${grab('askUser')}
+      return askUser;`);
+    const dom = fakeDom();
+    const stub = { $: function () { return dom.createElement(); },
+                   msgEl: function () { return dom.createElement(); },
+                   ico: function () { return ''; },
+                   waitBadge: function () {}, notifyBg: function () {},
+                   pin: function () {} };
+    const box = fn({ auto: auto }, dom,
+                   function (fnc, ms) { timers.push({ fn: fnc, ms: ms }); return timers.length; },
+                   function (id) { if (id) timers[id - 1] = null; },
+                   stub);
+    return { ask: box, timers: timers };
+  };
+
+  for (const auto of ['off', 'read', 'edit']) {
+    const b = mkBox(auto);
+    b.ask({ question: '要用哪個資料庫？' });
+    assert.strictEqual(b.timers.length, 0,
+      auto + ' 檔位不該有時限 —— 那幾檔每個工具都要人點，人就在旁邊');
+  }
+
+  for (const auto of ['full', 'ws']) {
+    const b = mkBox(auto);
+    let answered = '';
+    b.ask({ question: '要用哪個資料庫？' }).then(function (t) { answered = t; });
+    assert.strictEqual(b.timers.length, 1, auto + ' 檔位沒有設時限，會永遠掛著');
+    assert.strictEqual(b.timers[0].ms, 3 * 60 * 1000);
+    b.timers[0].fn();                       // 時間到，沒有人回答
+    await new Promise(function (r) { setTimeout(r, 0); });
+    assert.ok(answered.indexOf('沒有人在旁邊') >= 0, '要講清楚為什麼沒有答案：' + answered);
+    assert.ok(answered.indexOf('最佳判斷') >= 0, '要叫它自己決定，不是丟一句空話');
+    assert.ok(answered.indexOf('假設') >= 0, '自己決定的事後面要交代');
+  }
+  console.log('ok   自動模式下問了沒人答，等到就自己往下走');
+}
+
+// ── serve.py 跟前端講的是同一個等待時間 ──────────────────
+{
+  const py = fs.readFileSync(path.join(__dirname, '..', 'serve.py'), 'utf8');
+  const min = Number((py.match(/^ASK_WAIT_MIN = (\d+)/m) || [])[1]);
+  const ms = Number((script.match(/const ASK_WAIT_MS = (\d+) \* 60 \* 1000/) || [])[1]);
+  assert.ok(min > 0 && ms > 0, '兩邊的常數至少要抓得到：' + min + ' / ' + ms);
+  assert.strictEqual(min, ms,
+    '提示詞跟模型說等 ' + min + ' 分鐘，實際等 ' + ms + ' 分鐘');
+  console.log('ok   等待時間兩邊是同一個數字（' + min + ' 分鐘）');
+}
+
+// ── 等人回應時的分頁標題 ────────────────────────────────
   {
     const box = new Function(`
       const document = { title: 'ZackLLMGUI' };

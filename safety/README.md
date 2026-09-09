@@ -349,6 +349,22 @@ SKILL.md 的正文可以寫 !`git status`，`load_skill` 會把它換成現在�
 沒有改名也沒有刪除，所以不存在「按錯一下毀掉東西」的路徑。
 `tests/test_serve.py::test_new_folder_stays_inside_the_workspace` 逐項驗這些。
 
+## 3.10 `view_image` 走的是同一道邊界，但它把東西送出去
+
+`view_image` 讀工作區裡的一張圖，base64 之後放進送給模型的訊息裡。
+
+邊界跟 `read_file` 一模一樣：`ws_path()` 擋 `..`、絕對路徑、symlink、`.git`
+與 `.zackllmgui-backup/`，副檔名不在 `IMAGE_EXT` 裡就拒絕，超過
+`MAX_IMAGE_BYTES`（4 MB）也拒絕。沒有新的路徑限制，也沒有繞過任何一道。
+
+**要知道的是它的方向**：圖片會**離開這台機器**，如果 Ollama 指到別台。
+一張截圖上可能有終端機裡的 token、瀏覽器分頁的網址、旁邊視窗的內容 ——
+`DENY_FILES` 攔得住 `.env`，攔不住一張把 `.env` 拍進去的截圖。這跟
+`read_file` 讀到什麼就送什麼是同一件事，只是圖片比較容易夾帶你沒注意到的東西。
+
+模型沒有 `vision` 能力時這支工具不會出現在清單裡，不過那是省 context，
+**不是安全機制** —— 真正的閘門是 `WS_TOOLS`（要有工作區）與 `_is_local()`。
+
 ## 4. 怎麼真的關起來
 
 兩種做法，對應兩種不同的威脅 —— 混在一起講就會得出「容器不安全」這種假結論：

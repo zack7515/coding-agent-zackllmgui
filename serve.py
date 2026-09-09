@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import collections
 import contextlib
 import difflib
@@ -145,6 +146,13 @@ MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_LINE_CHARS = 4000              # 單行上限。minified JS 或 base64 一行就好幾 MB
 
 TODO_FILE = ".zackllmgui-todos.md"
+
+# 看得到的圖片。模型看不了圖的話這支工具根本不會出現在清單裡（網頁那一端擋）。
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+# 自動模式下沒有人回答 ask_user_question 時，網頁等這麼久就替它往下走。
+# 真正在計時的是前端的 ASK_WAIT_MS，這裡只是拿來寫進提示詞（測試會比對兩邊）。
+ASK_WAIT_MIN = 3
 
 
 
@@ -970,14 +978,20 @@ def verify_detect() -> str:
     ws = cur().ws
     if ws is None:
         return ""
+    # 型別檢查是自主改多檔最缺的那個訊號：改了簽名沒改呼叫端，單檔 lint 看不到，
+    # 而 jest／ts-jest 多半也不做型別檢查。設定檔在不在＝專案自己開了沒有，
+    # 但跑的字串是寫死的常數 —— 跟上面同一條規矩，讀「有沒有」可以，讀「跑什麼」不行。
+    ts = "npx tsc --noEmit" if (ws / "tsconfig.json").is_file() else ""
     pkg = ws / "package.json"
     if pkg.is_file():
         try:
             meta = json.loads(pkg.read_text("utf-8", errors="replace"))
             if "test" in (meta.get("scripts") or {}):
-                return "npm test"
+                return f"{ts} && npm test" if ts else "npm test"
         except (ValueError, OSError):
             pass
+    if ts:
+        return ts
     if (ws / "CMakeLists.txt").is_file():
         # 已經 configure 過才給 ctest —— 沒有 build/ 的話那條指令只會回錯誤，
         # 而預填一條跑不動的指令比留白更糟
@@ -996,8 +1010,28 @@ def verify_detect() -> str:
                                    or list(ws.glob("*/*/*.csproj"))):
         return "dotnet test"
     if (ws / "tests").is_dir() or list(ws.glob("test_*.py")):
-        return " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
-    return ""
+        py = " ".join(shlex.quote(x) for x in detect_python()) + " -m pytest -q"
+        return f"mypy . && {py}" if mypy_configured(ws) else py
+    return "mypy ." if mypy_configured(ws) else ""
+
+
+def mypy_configured(ws) -> bool:
+    """專案自己開了 mypy 嗎。只看設定檔在不在，不讀裡面寫什麼。
+
+    沒裝就當作沒開 —— 預填一條跑不動的指令比留白更糟，跟 ctest 那條同一個理由。
+    """
+    if not shutil.which("mypy"):
+        return False
+    if (ws / "mypy.ini").is_file() or (ws / ".mypy.ini").is_file():
+        return True
+    for name, key in (("pyproject.toml", "[tool.mypy]"), ("setup.cfg", "[mypy]")):
+        f = ws / name
+        try:
+            if f.is_file() and key in f.read_text("utf-8", errors="replace"):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def sandbox_state() -> dict:
@@ -1131,6 +1165,11 @@ def agent_rules() -> str:
               "- 找東西先用 search_files 或 list_dir 定位，再用 read_file 讀那一段；"
               "不要整個檔案讀進來。",
               "- read_file 每行開頭的「行號→」是為了讓你引用位置，不是檔案內容。"]
+        # 不講的話它會直接 commit 到 main，或把使用者原本就沒 commit 的改動
+        # 算成自己這一輪的成果。資料 git_state() 早就在算了，只是沒給模型看過。
+        brief = git_brief()
+        if brief:
+            r.append(brief)
     langs = ws_langs()
     if cur().write:
         r += ["- 修改既有檔案一律用 edit_file：old 要與檔案內容完全一致（含縮排），"
@@ -1193,7 +1232,13 @@ def agent_rules() -> str:
                  "拿到網址再 open；open 會一併給你那一頁上的連結，順著走下去。")
     if len(TOOL_SCHEMAS) and ALLOW_TOOLS:
         r.append("- 多步驟的工作先用 todo_write 列出待辦，每完成一項就整份重送並標成完成。")
-        r.append("- 需要使用者決定的事用 ask_user_question 問，不要自己猜。")
+        if cur().auto in ("full", "ws"):
+            # 人可能不在。問可以問，但要知道等不到人時網頁會替它回一句叫它自己決定。
+            r.append(f"- 需要使用者決定的事用 ask_user_question 問。但現在是自動模式，"
+                     f"沒有人回答的話等 {ASK_WAIT_MIN} 分鐘就會叫你自己判斷 ——"
+                     f"所以自己決定得了的就不要問。")
+        else:
+            r.append("- 需要使用者決定的事用 ask_user_question 問，不要自己猜。")
     if cur().plan["on"] and not cur().plan["approved"]:
         r.append("- 目前是計畫模式：先用 submit_plan 送出計畫，"
                  "使用者核准之前不會有修改檔案的工具可用。")
@@ -1309,6 +1354,40 @@ def _tool_todo_write(items) -> str:
     return f"待辦清單已更新（還剩 {left} 項）：\n{render_todos(sync=False)}"
 
 
+# 圖片走 /tool 回應的 image 欄位，不塞進那個回給模型的字串裡 ——
+# base64 進了 content 就是幾十萬個字元的亂碼，而且模型也看不懂。
+# thread-local 的理由跟 _CUR 一樣：ThreadingHTTPServer 一個請求一條執行緒。
+_SHOT = threading.local()
+
+
+def png_size(data: bytes) -> tuple:
+    """PNG 的寬高。不是 PNG 就回 (0, 0) —— 只是拿來寫進說明，猜不到就不寫。"""
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
+        return (0, 0)
+    return (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
+
+
+def _tool_view_image(path: str) -> str:
+    """把工作區裡的一張圖送進模型的 context。回傳一行說明，圖片走 image 欄位。
+
+    邊界跟其他檔案工具同一道 —— ws_path() 擋 ..、絕對路徑與外連。
+    """
+    p = ws_path(str(path or ""))
+    if not p.is_file():
+        raise FileNotFoundError(f"{path} 不在，或不是一個檔案")
+    if p.suffix.lower() not in IMAGE_EXT:
+        raise ValueError(f"{ws_rel(p)} 不是圖片，只認 "
+                         + "／".join(sorted(IMAGE_EXT)))
+    data = p.read_bytes()
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"這張圖 {len(data) // 1024} KB，超過 "
+                         f"{MAX_IMAGE_BYTES // 1024} KB 的上限")
+    _SHOT.b64 = base64.b64encode(data).decode()
+    w, h = png_size(data)
+    return (f"{ws_rel(p)}（{len(data) // 1024} KB"
+            + (f"，{w}×{h}" if w else "") + "）已經放進你的 context，直接看圖回答。")
+
+
 def _tool_submit_plan(plan: str) -> str:
     """先講計畫、人核准了才動手。核准的動作在網頁上，不在這裡。"""
     text = str(plan or "").strip()
@@ -1334,11 +1413,12 @@ TOOLS = {
     "submit_plan": _tool_submit_plan,
     "setup_env": _tool_setup_env,
     "run_browser": _tool_run_browser,
+    "view_image": _tool_view_image,
     "load_skill": _tool_load_skill,
 }
 WRITE_TOOLS = {"write_file", "edit_file"}
 WS_TOOLS = {"read_file", "list_dir", "search_files", "run_shell", "run_tests",
-            "setup_env", "check_job"} | WRITE_TOOLS
+            "setup_env", "check_job", "view_image"} | WRITE_TOOLS
 
 
 # ══════════════════════ git 整合 ══════════════════════ #
@@ -1348,19 +1428,51 @@ def git_run(*a, timeout: int = 60):
                           stderr=subprocess.STDOUT, timeout=timeout)
 
 
+def git_text(*a) -> str:
+    """跑一條唯讀的 git 指令，失敗就回空字串。
+
+    git_run 把 stderr 併進 stdout 又沒看 returncode —— 不擋的話
+    「fatal: not a git repository」會被當成分支名稱一路顯示到畫面上。
+    """
+    proc = git_run(*a)
+    return "" if proc.returncode else proc.stdout.decode("utf-8", "replace")
+
+
 def git_state() -> dict:
     """工作區的 git 狀態。不是 repo 就回 {"repo": False}。"""
     if cur().ws is None or not (cur().ws / ".git").exists():
         return {"repo": False}
     try:
-        branch = git_run("rev-parse", "--abbrev-ref", "HEAD").stdout.decode("utf-8", "replace").strip()
-        porcelain = git_run("status", "--porcelain").stdout.decode("utf-8", "replace")
-        stat = git_run("diff", "--stat", "HEAD").stdout.decode("utf-8", "replace").strip()
+        branch = git_text("rev-parse", "--abbrev-ref", "HEAD").strip()
+        porcelain = git_text("status", "--porcelain")
+        stat = git_text("diff", "--stat", "HEAD").strip()
     except Exception as e:
         return {"repo": True, "error": f"{type(e).__name__}: {e}"}
     files = [ln[3:] for ln in porcelain.splitlines() if ln.strip()]
     return {"repo": True, "branch": branch, "dirty": len(files),
             "files": files[:50], "stat": stat[:4000]}
+
+
+def git_brief() -> str:
+    """一行 git 現況，給系統提示用。不是 repo 就回空字串。
+
+    只問分支與髒檔案數：diff --stat 在大 repo 上要好幾百毫秒，而這一行每次
+    開關工具、換工作區都會重算一次。
+    """
+    if cur().ws is None or not (cur().ws / ".git").exists():
+        return ""
+    try:
+        branch = git_text("rev-parse", "--abbrev-ref", "HEAD").strip()
+        rows = git_text("status", "--porcelain")
+    except Exception:
+        return ""
+    if not branch:
+        return ""
+    dirty = len([ln for ln in rows.splitlines() if ln.strip()])
+    where = f"- 這是 git repo，現在在 {branch} 分支"
+    where += (f"，有 {dirty} 個檔案還沒 commit（不一定是你改的）。" if dirty
+              else "，工作區是乾淨的。")
+    return where + "要 commit 或換分支之前先自己確認一次現況。"
 
 
 def git_action(action: str, message: str = "") -> dict:
@@ -2524,8 +2636,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
             return
-        self._json({"result": out, "todos": cur().todos, "plan": cur().plan,
-                    "jobs": jobs_state(), "tool_defs": tool_defs()})
+        resp = {"result": out, "todos": cur().todos, "plan": cur().plan,
+                "jobs": jobs_state(), "tool_defs": tool_defs()}
+        # view_image 放的。一定要 pop：留著的話下一個工具的結果會跟著上一張圖。
+        shot = getattr(_SHOT, "b64", "")
+        _SHOT.b64 = ""
+        if shot:
+            resp["image"] = shot
+        self._json(resp)
 
     def do_DELETE(self):
         # /api/delete 會刪掉 Ollama 的模型。--host 0.0.0.0 時同網段任何人都連得到

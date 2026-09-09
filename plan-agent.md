@@ -341,6 +341,29 @@ focus chain…）為什麼長成那樣，寫在 [tech.md](tech.md) 的〈長指�
 **現在的做法**：不做。要讓內建的跑就把工作區指到真正的專案
 （`--workspace ~/專案`），那本來就是正常用法。
 
+### 2.23 真的操作瀏覽器（點、填、看 console）
+
+**問題**：`view_image` 讓它看得到一張圖了，但那是**靜態**的一張。點按鈕、填表單、
+看 console 的錯誤、量版面有沒有跑掉 —— 這些還是得它自己寫腳本。而寫腳本這條路
+是通的（`run_shell` 加上這台裝的 selenium／geckodriver），只是每次都要重寫一遍，
+而且撞到的坑（snap confinement、profile、等待條件）它不會記得。
+
+**做完長什麼樣**：一支 `run_page` 之類的工具，接受一串動作（open、click、type、
+wait、shot），回傳 console 的錯誤與最後一張截圖。
+
+**成本**：大。要嘛拉 selenium／playwright 進來（跟「零相依」直接衝突），
+要嘛自己講 CDP／WebDriver 協定（那是另一個專案）。
+
+**卡在哪**：先問「一張截圖夠不夠」。實際做前端任務時，最有價值的訊號常常不是
+像素而是 **console 的錯誤**，而那個用 headless Chrome 的 `--dump-dom` 加上
+一支腳本就拿得到 —— 也就是說 2.23 真正該先做的一半，可能只是把「怎麼截圖、
+怎麼撈 console」寫成一份 skill，讓模型 `load_skill` 之後照著做。
+**先寫那份 skill，用一陣子再回來看還缺什麼。**
+
+> 這台的 Firefox 是 snap：`--headless --screenshot` 寫不進 `/tmp`、
+> 也不吃 `--profile`，兩次都掛住（`docs/shots/README.md` 記過同一個坑）。
+> 要寫那份 skill 的話，這是第一句要寫的話。
+
 ---
 
 ## 3. 優先序

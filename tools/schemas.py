@@ -82,6 +82,14 @@ TOOL_SCHEMAS = [
          "query": {"type": "string", "description": "action=search 時的關鍵字"},
          "limit": {"type": "integer", "description": "搜尋結果或連結的筆數上限，預設 10"}},
      "required": ["action"]},
+    {"name": "view_image", "needs": "ws",
+     "description": ("看工作區裡的一張圖片（png／jpg／gif／webp）—— 截圖、設計稿、"
+                     "測試產出的圖表都用這支，read_file 讀圖片只會拿到亂碼。"
+                     "沒有內建的截圖工具：要看網頁長什麼樣就自己寫一支腳本、"
+                     "用 run_shell 跑出一個 png，再用這支看結果"),
+     "properties": {"path": {"type": "string",
+                             "description": "相對於工作區的圖片路徑"}},
+     "required": ["path"]},
     {"name": "setup_env", "needs": "python",
      "description": ("在工作區裡建立 .venv 並安裝套件，之後 run_tests 會自動用它。"
                      "需要套件（例如 pytest）時用這支，不要自己用 run_shell 下 pip install ——"

@@ -340,6 +340,14 @@ function buildToolMsg(m) {
     });
     el.querySelector('.th').appendChild(link);
   }
+  // view_image 拿回來的圖。畫面上要看得到，不然只會顯示「已經放進 context」
+  // 那一行說明 —— 人根本不知道模型看的是什麼。
+  if (m.images && m.images.length) {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + m.images[0];
+    img.style.cssText = 'max-width:100%; border-radius:8px; margin-top:8px; display:block';
+    el.querySelector('.tool-card').appendChild(img);
+  }
   if (m.backup) {
     const bar = el.querySelector('.ta');
     bar.hidden = false;
@@ -578,6 +586,7 @@ async function verifyGate(c) {
   }
   if (!data.exit) { toast('驗證通過：' + cmd); return ''; }
   S.run.verified = (S.run.verified || 0) + 1;
+  if (S.run.verified >= VERIFY_TRIES) { c.verifyFailed = cmd; saveChats(); }
   return '`' + cmd + '` 沒有通過（exit ' + data.exit + '）：\n\n'
     + tailLines(String(data.output || ''), 60)
     + '\n\n修到它過，然後再說做完了。'
@@ -670,12 +679,17 @@ async function send() {
 async function checkpoint(note) {
   if (!S.tools || !S.ws.path) return;
   const c = current();
+  delete c.verifyFailed;              // 新的一輪，上一輪的驗收結果不算數
   try {
-    await fetch(apiUrl('/checkpoint'), {
+    const res = await fetch(apiUrl('/checkpoint'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat: c.id, note: String(note || '').slice(0, 100),
                              msg: c.messages.length - 1 })
     });
+    // 記下這一相的 id：跑歪的時候「退回這一輪開始前」要指得回這裡，
+    // 不然人得自己切到紀錄分頁、在幾十列裡找出是哪一列。
+    const data = await res.json();
+    if (data.id) c.lastCkpt = data.id;
   } catch (e) { /* 照不到相不是送不出訊息的理由 */ }
 }
 
@@ -770,6 +784,9 @@ function flushQueue(c) {
 function resumeReason(c) {
   if (!c || S.streaming || !c.messages.length) return '';
   if (c.stopWhy) return c.stopWhy;        // 輪數或預算用完，按「繼續」就重新算一段
+  // 自動驗收兩次都沒過，模型還是說做完了。無人看管時這是最常見的跑歪樣子，
+  // 而它原本一點痕跡都不留 —— 只有 toast 閃過一次。
+  if (c.verifyFailed) return '收尾驗證沒過（' + c.verifyFailed + '），它還是說做完了';
   const last = c.messages[c.messages.length - 1];
   if (last.role === 'tool') return '工具跑完就停住了 —— 模型還沒接話';
   if (last.role === 'assistant' && String(last.stats || '').indexOf('已停止') >= 0) {
@@ -779,9 +796,23 @@ function resumeReason(c) {
 }
 
 function renderResumeBar() {
-  const why = resumeReason(current());
+  const c = current();
+  const why = resumeReason(c);
   $('resumeBar').hidden = !why;
   if (why) $('resumeWhy').textContent = why;
+  // 退回這一輪：只有拍到相才給。**不自動退** —— 跑歪的那一輪多半也做對了一些
+  // 東西，替人決定全部丟掉是更糟的預設。這裡只是把那一下變成一下。
+  $('rewindBtn').hidden = !(why && c && c.lastCkpt && S.ws.path);
+}
+
+async function rewindTurn() {
+  const c = current();
+  if (!c || !c.lastCkpt) return;
+  if (!confirm('把工作區退回這一輪開始前？\n\n這一輪之後改的檔案都會退掉，'
+               + '對話內容不受影響。')) return;
+  await doRewind(c.lastCkpt);
+  delete c.lastCkpt;                  // 退過一次就沒有第二次可退
+  renderResumeBar();
 }
 
 async function resumeRun() {

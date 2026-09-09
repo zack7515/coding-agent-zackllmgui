@@ -332,8 +332,18 @@ function finishCheck(run) {
 
 function toolDefs() {
   // 子代理改走 chatStream 之後，外部 API 那條路它自己就處理好了，不必再濾掉 task。
-  return S.toolDefs || [];
+  const defs = S.toolDefs || [];
+  // 看不了圖的模型收到 view_image，只會呼叫了然後對著空氣描述 ——
+  // 跟伺服器那邊「沒開放的工具一個字都不要提」同一條規矩，只是這一條要看模型。
+  if ((S.caps[S.model] || []).indexOf('vision') >= 0) return defs;
+  return defs.filter(function (d) {
+    return ((d || {}).function || {}).name !== 'view_image';
+  });
 }
+
+// 自動模式下 ask_user_question 等不到人就自己往下走。跟 serve.py 的
+// ASK_WAIT_MIN 是同一個數字（提示詞要講給模型聽，測試會比對兩邊）。
+const ASK_WAIT_MS = 3 * 60 * 1000;
 
 // 後端的 tail_of() 的前端版。**中途停掉那條路繞過了後端的截斷** ——
 // 正常結束時結果是後端算好的（留最後 100 行），按停止或連線斷掉時用的是
@@ -405,7 +415,7 @@ const AUTO_MODES = [
 // （serve.py 的 preview_risk），而上面那條風險檢查排在自動模式前面 ——
 // 會跑指令的那幾份一定跳確認卡，其餘的（九成）照舊自動載入。
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
-  'todo_write', 'load_skill'];
+  'todo_write', 'load_skill', 'view_image'];
 
 // 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
 // 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。

@@ -938,7 +938,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
       <div id="composer">
         <div id="slashBar" hidden></div>
         <div id="runBar" hidden></div>
-        <div id="resumeBar" hidden><span id="resumeWhy"></span><button class="mini" id="resumeBtn">繼續</button></div>
+        <div id="resumeBar" hidden><span id="resumeWhy"></span><button class="mini" id="resumeBtn">繼續</button><button class="mini" id="rewindBtn" hidden title="把工作區退回這一輪開始前，對話不動">退回這一輪</button></div>
         <div id="queueBar" hidden><span id="queueWhy"></span><button class="mini" id="queueDrop">取消</button></div>
         <div id="todoBar" hidden></div>
         <div id="ctxRow" hidden><div id="ctxTrack"><div id="ctxFill"></div></div><span id="ctxText"></span></div>
@@ -1600,8 +1600,18 @@ function finishCheck(run) {
 
 function toolDefs() {
   // 子代理改走 chatStream 之後，外部 API 那條路它自己就處理好了，不必再濾掉 task。
-  return S.toolDefs || [];
+  const defs = S.toolDefs || [];
+  // 看不了圖的模型收到 view_image，只會呼叫了然後對著空氣描述 ——
+  // 跟伺服器那邊「沒開放的工具一個字都不要提」同一條規矩，只是這一條要看模型。
+  if ((S.caps[S.model] || []).indexOf('vision') >= 0) return defs;
+  return defs.filter(function (d) {
+    return ((d || {}).function || {}).name !== 'view_image';
+  });
 }
+
+// 自動模式下 ask_user_question 等不到人就自己往下走。跟 serve.py 的
+// ASK_WAIT_MIN 是同一個數字（提示詞要講給模型聽，測試會比對兩邊）。
+const ASK_WAIT_MS = 3 * 60 * 1000;
 
 // 後端的 tail_of() 的前端版。**中途停掉那條路繞過了後端的截斷** ——
 // 正常結束時結果是後端算好的（留最後 100 行），按停止或連線斷掉時用的是
@@ -1673,7 +1683,7 @@ const AUTO_MODES = [
 // （serve.py 的 preview_risk），而上面那條風險檢查排在自動模式前面 ——
 // 會跑指令的那幾份一定跳確認卡，其餘的（九成）照舊自動載入。
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
-  'todo_write', 'load_skill'];
+  'todo_write', 'load_skill', 'view_image'];
 
 // 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
 // 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。
@@ -3075,6 +3085,14 @@ function buildToolMsg(m) {
     });
     el.querySelector('.th').appendChild(link);
   }
+  // view_image 拿回來的圖。畫面上要看得到，不然只會顯示「已經放進 context」
+  // 那一行說明 —— 人根本不知道模型看的是什麼。
+  if (m.images && m.images.length) {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + m.images[0];
+    img.style.cssText = 'max-width:100%; border-radius:8px; margin-top:8px; display:block';
+    el.querySelector('.tool-card').appendChild(img);
+  }
   if (m.backup) {
     const bar = el.querySelector('.ta');
     bar.hidden = false;
@@ -3313,6 +3331,7 @@ async function verifyGate(c) {
   }
   if (!data.exit) { toast('驗證通過：' + cmd); return ''; }
   S.run.verified = (S.run.verified || 0) + 1;
+  if (S.run.verified >= VERIFY_TRIES) { c.verifyFailed = cmd; saveChats(); }
   return '`' + cmd + '` 沒有通過（exit ' + data.exit + '）：\n\n'
     + tailLines(String(data.output || ''), 60)
     + '\n\n修到它過，然後再說做完了。'
@@ -3405,12 +3424,17 @@ async function send() {
 async function checkpoint(note) {
   if (!S.tools || !S.ws.path) return;
   const c = current();
+  delete c.verifyFailed;              // 新的一輪，上一輪的驗收結果不算數
   try {
-    await fetch(apiUrl('/checkpoint'), {
+    const res = await fetch(apiUrl('/checkpoint'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat: c.id, note: String(note || '').slice(0, 100),
                              msg: c.messages.length - 1 })
     });
+    // 記下這一相的 id：跑歪的時候「退回這一輪開始前」要指得回這裡，
+    // 不然人得自己切到紀錄分頁、在幾十列裡找出是哪一列。
+    const data = await res.json();
+    if (data.id) c.lastCkpt = data.id;
   } catch (e) { /* 照不到相不是送不出訊息的理由 */ }
 }
 
@@ -3505,6 +3529,9 @@ function flushQueue(c) {
 function resumeReason(c) {
   if (!c || S.streaming || !c.messages.length) return '';
   if (c.stopWhy) return c.stopWhy;        // 輪數或預算用完，按「繼續」就重新算一段
+  // 自動驗收兩次都沒過，模型還是說做完了。無人看管時這是最常見的跑歪樣子，
+  // 而它原本一點痕跡都不留 —— 只有 toast 閃過一次。
+  if (c.verifyFailed) return '收尾驗證沒過（' + c.verifyFailed + '），它還是說做完了';
   const last = c.messages[c.messages.length - 1];
   if (last.role === 'tool') return '工具跑完就停住了 —— 模型還沒接話';
   if (last.role === 'assistant' && String(last.stats || '').indexOf('已停止') >= 0) {
@@ -3514,9 +3541,23 @@ function resumeReason(c) {
 }
 
 function renderResumeBar() {
-  const why = resumeReason(current());
+  const c = current();
+  const why = resumeReason(c);
   $('resumeBar').hidden = !why;
   if (why) $('resumeWhy').textContent = why;
+  // 退回這一輪：只有拍到相才給。**不自動退** —— 跑歪的那一輪多半也做對了一些
+  // 東西，替人決定全部丟掉是更糟的預設。這裡只是把那一下變成一下。
+  $('rewindBtn').hidden = !(why && c && c.lastCkpt && S.ws.path);
+}
+
+async function rewindTurn() {
+  const c = current();
+  if (!c || !c.lastCkpt) return;
+  if (!confirm('把工作區退回這一輪開始前？\n\n這一輪之後改的檔案都會退掉，'
+               + '對話內容不受影響。')) return;
+  await doRewind(c.lastCkpt);
+  delete c.lastCkpt;                  // 退過一次就沒有第二次可退
+  renderResumeBar();
 }
 
 async function resumeRun() {
@@ -4439,12 +4480,31 @@ function askUser(args) {
     waitBadge(true);
     notifyBg('模型在問你：' + String(args.question || '').slice(0, 80));
 
-    const done = function (text) {
+    // 自動模式下人可能不在，而這個 Promise 沒有別的出路 —— 沒人按送出就是
+    // 整輪靜靜地掛在這裡，跑一半的任務連停在哪都不會說。等不到就替它往下走。
+    // 手動的三檔不設時限：那幾檔本來每個工具都要人點，人就在旁邊。
+    let timer = 0;
+    if (S.auto === 'full' || S.auto === 'ws') {
+      const hint = document.createElement('div');
+      hint.className = 'muted';
+      hint.style.cssText = 'margin-top:6px; font-size:11px';
+      hint.textContent = '沒有人回答的話，' + (ASK_WAIT_MS / 60000)
+        + ' 分鐘後讓它自己判斷繼續';
+      el.querySelector('.tool-card').appendChild(hint);
+      timer = setTimeout(function () {
+        done('（等了 ' + (ASK_WAIT_MS / 60000) + ' 分鐘沒有人回答 —— 自動模式下'
+          + '沒有人在旁邊。用你的最佳判斷繼續做，做完時把你假設了什麼講清楚。）',
+          true);
+      }, ASK_WAIT_MS);
+    }
+
+    const done = function (text, timedOut) {
+      clearTimeout(timer);
       waitBadge(false);
       el.querySelector('.ta:last-child').innerHTML = '';
       opts.innerHTML = '';
       opts.hidden = true;
-      el.querySelector('.q').textContent += '\n你：' + text;
+      el.querySelector('.q').textContent += (timedOut ? '\n（沒有人回答）' : '\n你：' + text);
       resolve(text);
     };
     send.addEventListener('click', function () { if (answer()) done(answer()); });
@@ -4846,6 +4906,9 @@ async function execTool(name, args, msg, agent) {
       msg.backup = msg.content.slice(at + 8).trim();
       msg.content = msg.content.slice(0, at).trim();
     }
+    // view_image 回的圖。apiMessages 會把它掛在這則 tool 訊息上送給模型 ——
+    // 實測 Ollama 吃得下 tool 訊息帶的 images，不必再多包一則 user 訊息。
+    if (data.image) msg.images = [data.image];
     if (data.todos) { S.todos = data.todos; renderTodos(); }
     if (data.tool_defs) S.toolDefs = data.tool_defs;   // 核准計畫後會多出寫入工具
   } catch (e) {
@@ -7553,6 +7616,7 @@ async function init() {
   refreshSys();
   setInterval(refreshSys, 3000);            // 背景分頁不會問，refreshSys 自己擋掉
   $('resumeBtn').addEventListener('click', resumeRun);
+  $('rewindBtn').addEventListener('click', rewindTurn);
   $('queueDrop').addEventListener('click', function () {
     S.queued = []; renderQueue(); toast('排隊的話取消了');
   });
