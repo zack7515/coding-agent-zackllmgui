@@ -122,6 +122,21 @@ function verifyMenuItem() {
   };
 }
 
+// 收尾驗證量的是「測試過了沒」。這一格量的是另一半：**有沒有做到使用者要的**。
+// 預設關著是因為它是一次完整的模型呼叫，本機跑起來要幾十秒。
+function reviewMenuItem() {
+  return {
+    label: '收尾複查：' + (S.review ? '開' : '關'),
+    meta: S.review ? '模型說做完時，另外開一次乾淨的呼叫看 diff' : '',
+    action: function () {
+      S.review = !S.review;
+      saveConfig();
+      toast(S.review ? '收尾複查開了：說做完之前會先拿 diff 對一次原始要求'
+                     : '收尾複查關了');
+    }
+  };
+}
+
 function autoMenuItem() {
   return {
     label: '自動模式：' + autoLabel(),
@@ -192,7 +207,7 @@ function openFeatureMenu() {
     };
   });
   rows.push('-', autoMenuItem());
-  if (S.srv.tools) rows.push(verifyMenuItem(), subModelMenuItem());
+  if (S.srv.tools) rows.push(verifyMenuItem(), reviewMenuItem(), subModelMenuItem());
   // 一條規則都沒有就不佔一列：規則只從確認卡的「以後都放行」長出來，
   // 沒有人會為了設定它而打開選單。有東西了才需要一個看得到、刪得掉的地方。
   if ((S.rules || []).length) {

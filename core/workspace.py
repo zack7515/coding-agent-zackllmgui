@@ -17,13 +17,14 @@ HERE = Path(__file__).resolve().parent.parent   # serve.py 那一層
 # ── 工作區（改檔案／跑測試用，見 plan-agent.md） ──────────────────── #
 BACKUP_DIR = ".zackllmgui-backup"
 WORKTREE_DIR = ".zackllmgui-worktrees"   # 隔離型子代理各自的 git worktree
+OUT_DIR = ".zackllmgui-out"              # 塞不進 context 的工具輸出落地的地方
 WORKTREE_MAX = 8                   # 同時最多幾份，忘了收的不會無限長
 WORKTREE_LINK = ("node_modules",)  # 開 worktree 時從主 repo 連過去的資料夾
 # ponytail: 一個名字就夠了。第二個出現時這裡是加一個字串，不是開一份設定檔 ——
 # 條件很嚴：純相依、名字全世界一樣、重建很貴。vendor/target 都還沒真的遇到。
 # .venv 刻意不連：那一份是 detect_python() 用讀的借過去的，連過去的話子代理的
 # setup_env 會裝進主專案。
-WORKTREE_SKIP = (BACKUP_DIR, WORKTREE_DIR) + WORKTREE_LINK
+WORKTREE_SKIP = (BACKUP_DIR, WORKTREE_DIR, OUT_DIR) + WORKTREE_LINK
 # 這些資料夾不讓模型碰：版控內部、虛擬環境、相依套件、備份自己
 # obj/ 與 .vs/ 是 MSBuild／Visual Studio 的產物。刻意不擋 bin/ 與 packages/ ——
 # 那兩個名字在別的專案裡常常是原始碼，而 bin/ 裡的雜訊 DENY_EXT 已經濾掉了。

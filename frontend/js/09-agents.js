@@ -289,9 +289,9 @@ async function runTools(c, calls, depth) {
     c.stopWhy = over;
     saveChats();
     stopRunTicker();
-    markTurnDone(c);
     renderResumeBar();
     toast(over + ' —— 下面有「繼續」');
+    endTurn(c);
     return;
   }
   S.run.rounds = depth;

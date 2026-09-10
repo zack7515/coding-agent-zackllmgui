@@ -1952,6 +1952,99 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   console.log('ok   瀏覽器丟的錯會攢起來送回 serve.py（有上限、不自我餵食）');
 }
 
+// ── 自動模式下沒有人會去按「繼續」──────────────────────
+// 放著跑三十分鐘的任務停在輪數上限、或停在「收尾驗證沒過」，實際結果就是
+// 它在那裡等到有人回來。這幾條錯了不會有症狀，只會在真的放著跑那天發現
+// 它半小時前就停了。
+{
+  const mk = function (auto) {
+    const out = { toasts: [], pushed: [] };
+    const box = new Function('S', 'toast', 'saveChats', 'buildUserMsg', '$', 'pin',
+                             'resumeRun', 'out', `
+      ${grab('resumeReason')}
+      ${grab('AUTO_RESUME_MAX', 'const')}
+      ${grab('autoResumable')}
+      ${grab('maybeAutoResume')}
+      return { can: autoResumable, go: maybeAutoResume };`);
+    return box({ auto: auto, streaming: false },
+               function (m) { out.toasts.push(m); },
+               function () { }, function () { return {}; },
+               function () { return { appendChild: function () { } }; },
+               function () { },
+               async function () { out.resumed = (out.resumed || 0) + 1; }, out);
+  };
+
+  const chat = function (extra) {
+    return Object.assign({ messages: [{ role: 'tool', content: '3 failed' }] }, extra || {});
+  };
+
+  // 使用者按停止是明確的指令 —— 自動模式也不該跟他吵
+  const b = mk('full');
+  assert.strictEqual(b.can({ messages: [
+    { role: 'assistant', content: '寫到一半', stats: '（已停止）' }] }), '',
+    '使用者按了停止還自己接著跑');
+  // 輪數用完、收尾驗證沒過、工具跑完沒接話 —— 這三種是「沒有人在」才卡住的
+  assert.ok(b.can(chat({ stopWhy: '輪數用完' })));
+  assert.ok(b.can(chat({ verifyFailed: 'npm test' })));
+  assert.ok(b.can(chat()));
+
+  // 手動的那幾檔不自己續：人就在旁邊
+  ['off', 'read', 'edit'].forEach(function (m) {
+    const q = mk(m); const c = chat();
+    q.go(c);
+    assert.strictEqual(c.autoResumes, undefined, m + ' 檔也自己續跑了');
+  });
+}
+
+(async function () {
+  const mk = function (auto) {
+    const out = { toasts: [] };
+    const box = new Function('S', 'toast', 'saveChats', 'buildUserMsg', '$', 'pin',
+                             'resumeRun', 'out', `
+      ${grab('resumeReason')}
+      ${grab('AUTO_RESUME_MAX', 'const')}
+      ${grab('autoResumable')}
+      ${grab('maybeAutoResume')}
+      return { go: maybeAutoResume, max: AUTO_RESUME_MAX, out: out };`);
+    return box({ auto: auto, streaming: false },
+               function (m) { out.toasts.push(m); },
+               function () { }, function () { return {}; },
+               function () { return { appendChild: function () { } }; },
+               function () { },
+               async function () { out.resumed = (out.resumed || 0) + 1; }, out);
+  };
+
+  const t = mk('full');
+  const c = { messages: [{ role: 'tool', content: '3 failed' }], stopWhy: '輪數用完' };
+  for (let i = 0; i < t.max + 2; i++) await t.go(c);
+  assert.strictEqual(c.autoResumes, t.max, '沒有上限，卡住的任務會一直燒下去');
+  // 每次都要它先講「還差什麼」，不然三次自動續跑長得一模一樣
+  assert.ok(c.messages.some(function (m) {
+    return m.nudge && /還差什麼/.test(m.content);
+  }), '自動續跑沒有要它講進度');
+  assert.ok(t.out.toasts.some(function (x) { return /停下來等你/.test(x); }),
+    '撞到上限卻沒有講');
+  console.log('ok   自動模式停住會自己接著跑（使用者按停止不算，有上限）');
+})();
+
+// ── 收尾複查：做到了沒，不由做的人自己說 ──────────────────
+{
+  const src = script.slice(script.indexOf('async function reviewGate'),
+                           script.indexOf('function apiMessages'));
+  // 拿模型自己塞回去的話當「使用者的要求」，等於自問自答
+  const asked = new Function('c', grab('askedFor') + '\nreturn askedFor(c);');
+  assert.strictEqual(asked({ messages: [
+    { role: 'user', content: '幫我改 calc' },
+    { role: 'assistant', content: '好' },
+    { role: 'user', nudge: true, content: '（自動驗收）測試沒過' }] }), '幫我改 calc');
+
+  assert.ok(/S\.review/.test(src), '複查沒有開關，每一輪都會多燒一次完整呼叫');
+  assert.ok(/S\.run\.reviewed \|\| 0\) >= 1/.test(src), '一輪複查一次以上會來回打轉');
+  assert.ok(/\/\^\\s\*OK\\b\/i/.test(src), 'OK 的判斷沒有釘死在第一行');
+  assert.ok(/catch \(e\) \{\s*return '';/.test(src), '拿不到 diff 要放行，不能擋住收工');
+  console.log('ok   收尾複查拿 diff 對原始要求（有開關、一輪一次、壞了要放行）');
+}
+
 // ── frontend 改了只重新整理，不重啟 ──────────────────────
 {
   const src = script.slice(script.indexOf('async function checkSourceChanged'),
@@ -1961,6 +2054,14 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(src.indexOf('location.reload(); return;') > 0, '沒有重新整理那條路');
   const py = fs.readFileSync(path.join(__dirname, '..', 'serve.py'), 'utf8');
   assert.ok(/"page_changed": changed/.test(py), '/alive 沒有回報頁面變了沒');
+  // 重整只能發生在**一輪真的結束**的時候。掛在 setStreaming 上的話，每一輪
+  // 工具之間都會跑到一次（模型每講完一段就 setStreaming(false)），
+  // 等於任務跑到一半把頁面重整掉。
+  const ss = script.slice(script.indexOf('function setStreaming'),
+                          script.indexOf('function setStreaming') + 500);
+  assert.ok(ss.indexOf('checkSourceChanged') < 0, '重整掛在每一輪都會跑到的地方');
+  assert.ok(/function endTurn\([\s\S]{0,200}checkSourceChanged\(\)/.test(script),
+    '一輪結束沒有問一次前端改了沒');
   console.log('ok   改前端只重新整理，改 serve.py 才重啟');
 }
 

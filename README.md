@@ -52,6 +52,9 @@ Linux 與 Windows 11 都已實機驗證；macOS 路徑已實作但尚未實機�
 | **改前端不必手動重整** | `frontend/` 一改，頁面自己重新整理（`serve.py` 沒變就不重啟，重啟會殺掉正在跑的工具）。改 → 重載 → 壞了就回報 → 模型讀得到，這一圈自己會轉 |
 | **它看得到圖** | `view_image` 把工作區裡的 png／jpg 放進模型的 context —— 截圖、設計稿、測試產出的圖表都算。沒有內建的截圖工具是刻意的：讓它自己寫腳本、`run_shell` 跑出一張圖，再用這支看結果，你手上有 selenium 還是 `scrot` 它就用哪個。模型沒有 vision 就不送這支工具 |
 | **語言支援**（Linux 完整實測） | **Python 與 C/C++** 有完整的一套（專案地圖的符號、寫檔後語法檢查、驗證指令預填、測試辨識）；JS/TS 有地圖與 eslint。Windows 的一般工具流程已驗，MSVC／MinGW 的完整 C/C++ 流程尚未實測。其他語言用 `run_shell` 一樣做得完，只是少了這幾條回饋 |
+| **塞不進 context 的輸出不會消失** | 跑壞的測試、大 diff、裝套件的錯誤動輒好幾萬字。截掉就丟的話最該細看的那些永遠找不回來 —— 所以全文落地成 `.zackllmgui-out/` 底下的檔案，只把頭尾與路徑給模型，它自己 `search_files` 去挖。那個資料夾會寫進 `.git/info/exclude`，不會變成你 `git status` 上的雜訊 |
+| **沒有人在的時候它會自己接著跑** | 全自動模式下停在輪數上限、或停在「收尾驗證沒過」，它自己按「繼續」，最多三次 —— 而且每次都要先講一句「還差什麼」。使用者**按停止**不算：那是明確的指令 |
+| **做到了沒不由它自己說** | 收尾複查（預設關，選單開）：模型說做完時，另外開一次**乾淨的**呼叫，只給它原始要求與這一輪的 `git diff`，不給它自己的推理過程。沒做到就把具體漏了什麼丟回去 |
 | **長指令丟背景** | `npm install`、`cargo build` 這種跑幾分鐘的加 `background`，模型先去做別的再回來收；**關掉分頁它還在跑** |
 | **沙盒** | Linux 用 bubblewrap、macOS 用 sandbox-exec、Windows 用 Docker Desktop 容器；Linux 與 Windows 11 已實測。**預設關**，按鈕開。bwrap 自動接 GPU，容器要明確加 `--sandbox-gpu` |
 | **權限規則** | 確認卡上的「以後都放行」把這次的判斷寫成一條規則，不用每天重新點。allow / ask / deny 寫成檔案，專案與全域兩份都讀，`deny` 由 `serve.py` 強制 |
@@ -309,9 +312,9 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 115 項
+python tests/test_serve.py    # 後端 116 項
 python tests/test_core.py     # core/ 各模組的介面 13 項
-node   tests/test_gui.js      # 網頁 80 項
+node   tests/test_gui.js      # 網頁 82 項
 ```
 
 兩支 Python 測試只用專案本身與標準函式庫，三支都不需要 Ollama 在跑；網頁測試需要 Node.js。

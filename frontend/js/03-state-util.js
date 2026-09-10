@@ -11,6 +11,7 @@ const S = {
   ws: { path: '', write: false, git: false, python: '', files: 0 },
   toolDefs: [], agentRules: '', repoMap: '', tab: 'params', fv: null, todos: [], plan: false,
   verify: {}, verifyHint: '', subModel: '',   // 驗證指令依工作區存；子代理模型見 subModelMenuItem
+  review: false,              // 收尾複查：預設關，它是一次完整的模型呼叫
   jobs: [],                                // 背景指令，活在 serve.py 那個行程裡
   pre: null,                               // 背景先算好的壓縮摘要
   streamTools: ['run_shell', 'run_tests'], mcp: null, cpus: 0, layers: {},

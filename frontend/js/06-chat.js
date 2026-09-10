@@ -134,7 +134,7 @@ function saveConfig() {
     userName: S.userName,
     showThink: S.showThink, params: S.params, tools: S.tools,
     provider: S.provider, oa: S.oa, paramsVersion: 3, tab: S.tab, auto: S.auto,
-    sysChips: S.sysChips, verify: S.verify, subModel: S.subModel,
+    sysChips: S.sysChips, verify: S.verify, subModel: S.subModel, review: S.review,
     hideSidebar: document.body.classList.contains('hide-sidebar'),
     hideParams: document.body.classList.contains('hide-params'),
     sideW: savedSideWidth('--side-w'), paramsW: savedSideWidth('--params-w'),
@@ -427,6 +427,53 @@ function paintTurn(el, turn) {
 // 一輪真的結束了：把總計記到最後一則助理訊息上。
 // **只在有跑過工具的時候記** —— 純聊天那一則的統計本來就寫了總計幾秒，
 // 再加一行是重複的。長任務才是這一行存在的理由。
+// 全自動模式下沒有人會去按「繼續」。放著跑三十分鐘的任務停在輪數上限、或停在
+// 「收尾驗證沒過」，實際結果就是它在那裡等到有人回來 —— 而自動模式的定義
+// 就是沒有人在。這跟 ask_user_question 等不到人就自己往下走是同一個決定。
+// 有上限：連續續三次還在原地，就是真的卡住了，那時停下來比繼續燒有用。
+const AUTO_RESUME_MAX = 3;
+
+// 哪幾種停下來可以自己接著跑。**使用者按停止不算** —— 那是明確的指令，
+// 自動模式也不該跟他吵。這裡不重寫理由，只是把那一種濾掉。
+function autoResumable(c) {
+  const why = resumeReason(c);
+  if (!why) return '';
+  const last = c.messages[c.messages.length - 1];
+  const stopped = last && last.role === 'assistant'
+    && String(last.stats || '').indexOf('已停止') >= 0;
+  return stopped ? '' : why;
+}
+
+async function maybeAutoResume(c) {
+  if (S.auto !== 'full' && S.auto !== 'ws') return;
+  const why = autoResumable(c);
+  if (!why) return;
+  if ((c.autoResumes || 0) >= AUTO_RESUME_MAX) {
+    toast('自動續跑 ' + AUTO_RESUME_MAX + ' 次還是沒完，停下來等你看一眼');
+    return;
+  }
+  c.autoResumes = (c.autoResumes || 0) + 1;
+  // 每次都要它先講「還差什麼」。不然三次自動續跑長得一模一樣，
+  // 人回來只看得到它跑了很久，看不出來是有進展還是在原地打轉。
+  const m = { role: 'user', nudge: true, text: '（自動續跑）' + why,
+    content: '（沒有人在旁邊，自動接著跑。）' + why
+      + '。先用一句話說現在還差什麼，再繼續做。'
+      + '做不下去就直說卡在哪，不要空轉。' };
+  c.messages.push(m);
+  saveChats();
+  $('thread').appendChild(buildUserMsg(m));
+  pin();
+  await resumeRun();
+}
+
+// 一輪真的結束了。三件事都只該發生在這裡：記時間、看前端要不要重整、
+// 決定要不要自己接著跑。
+function endTurn(c) {
+  markTurnDone(c);
+  checkSourceChanged();     // 改過前端的話，這是重整最不打擾人的時機
+  maybeAutoResume(c);
+}
+
 function markTurnDone(c) {
   const r = S.run;
   if (!c || !r || !r.t0 || !r.rounds) return;
@@ -593,6 +640,65 @@ async function verifyGate(c) {
     + (S.run.verified >= VERIFY_TRIES ? '（這是最後一次自動驗收）' : '');
 }
 
+// 收尾驗證跑的是指令，量得出來。這一支量的是另一半：**有沒有做到使用者要的**。
+// 到現在為止那一半還是模型自評，而自評是最不可靠的一種判斷 —— 它會把自己
+// 的推理過程當成證據。所以另外開一次**乾淨的**呼叫：只給原始要求與這一輪的
+// diff，不給它自己講過的話。一輪只做一次，這是一次完整的模型呼叫。
+const REVIEW_PROMPT =
+  '你是收尾複查。下面是使用者原本的要求，以及一個模型為了達成它做出來的改動。\n' +
+  '判斷這些改動有沒有真的做到那個要求。\n\n' +
+  '第一行只能是 OK 或 NG：\n' +
+  '- OK：做到了，或只剩無關緊要的細節。\n' +
+  '- NG：漏了要求裡明講的東西、改錯地方、或改動跟要求對不起來。\n' +
+  'NG 的話第二行起用三行以內講清楚**具體漏了什麼**，要指得出檔案或函式名。\n\n' +
+  '只看 diff 裡真的有的東西，不要推測沒看到的部分。'
+  + '風格、命名、沒寫測試都不是 NG 的理由 —— 那些不是「有沒有做到」。\n\n';
+
+// 這一輪是為了回應哪一句。自動驗收與自動續跑塞回去的那些不算（nudge），
+// 拿它們去複查等於拿模型自己的話當作使用者的要求。
+function askedFor(c) {
+  for (let i = c.messages.length - 1; i >= 0; i--) {
+    const m = c.messages[i];
+    if (m.role === 'user' && !m.nudge) return String(m.content || '');
+  }
+  return '';
+}
+
+async function reviewGate(c) {
+  if (!S.review || !S.run.wroteFiles || (S.run.reviewed || 0) >= 1) return '';
+  const ask = askedFor(c);
+  if (!ask) return '';
+  let diff = '';
+  try {
+    const res = await fetch(apiUrl('/git'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'diff' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    diff = String(data.diff || '');
+  } catch (e) {
+    return '';           // 不是 git repo、或問不到 —— 複查是加分項，不該擋住收工
+  }
+  if (!diff.trim()) return '';
+  S.run.reviewed = 1;
+  blockComposer('收尾複查中…');
+  let verdict = '';
+  try {
+    verdict = (await once(REVIEW_PROMPT + '## 使用者的要求\n\n' + ask
+      + '\n\n## 這一輪的改動\n\n```diff\n' + diff + '\n```')).trim();
+  } catch (e) {
+    toast('收尾複查跑不起來：' + friendlyError(e).msg);
+    return '';
+  } finally {
+    blockComposer('');
+  }
+  if (!verdict || /^\s*OK\b/i.test(verdict)) { toast('收尾複查：做到了'); return ''; }
+  return '收尾複查（另一個乾淨的 context 拿你的 diff 對過原始要求）說沒做到：\n\n'
+    + verdict.replace(/^\s*NG\b[：:]?\s*/i, '')
+    + '\n\n把上面講的補完，然後再說做完了。不同意的話講清楚為什麼。';
+}
+
 function apiMessages(c) {
   const out = [];
   const sys = [($('system').value || '').trim(), agentRules(), repoMap()]
@@ -658,6 +764,7 @@ async function send() {
             wroteTests: '', ranTests: false, nagged: false, chat: c.id,
             t0: performance.now() };
   delete c.stopWhy;              // 上一輪停在哪裡，跟這一輪沒關係了
+  delete c.autoResumes;          // 人講話了就是新的一段，自動續跑的次數重算
   S.queued = [];                 // 新的一輪，上一輪沒送出的插話不留著
   renderRunBar();
   autoGrow();
@@ -712,9 +819,6 @@ function setStreaming(on) {
   btn.disabled = on ? false : !!S.blocked;
   $('hint').textContent = on ? '產生中…' : (S.blocked || '');
   renderResumeBar();          // 開始跑就收起來，停下來就自己冒出來
-  // 停下來就馬上問一次「前端改了沒」，不要等下一次 30 秒的輪詢：改前端的
-  // 那一輪跑完到頁面重整之間，read_console 讀到的都還是改之前的 console。
-  if (!on) checkSourceChanged();
 }
 
 function stopStream() { if (S.abort) S.abort.abort(); }
@@ -950,7 +1054,7 @@ async function runStream(c, depth) {
     const f = friendlyError(err);
     if (f.abort) {
       finishStream(c, el, content, thinking, '（已停止）', t0);
-      markTurnDone(c);          // 中途停掉也要看得到已經花了多久
+      endTurn(c);               // 中途停掉也要看得到已經花了多久
       return;
     }
     thinkEl.hidden = !thinking || !S.showThink;
@@ -989,7 +1093,7 @@ async function runStream(c, depth) {
 
   // 模型不再呼叫工具＝它認為做完了。這裡是整個迴圈唯一的出口。
   // done 是假的代表使用者按了停止或連線斷了，那種情況不該再推它繼續。
-  if (!done || (depth || 0) >= MAX_TOOL_ROUNDS) { markTurnDone(c); return; }
+  if (!done || (depth || 0) >= MAX_TOOL_ROUNDS) { endTurn(c); return; }
 
   // 排隊的插話優先：使用者剛講的話比自動檢查重要
   if (flushQueue(c)) { await runStream(c, (depth || 0) + 1); return; }
@@ -1006,8 +1110,20 @@ async function runStream(c, depth) {
     return;
   }
 
+  // 驗證指令排在複查前面：它便宜、而且客觀。測試都沒過就不必問「做到了沒」
+  const missed = await reviewGate(c);
+  if (missed) {
+    const rm = { role: 'user', nudge: true, text: '（收尾複查）' + missed, content: missed };
+    c.messages.push(rm);
+    saveChats();
+    $('thread').appendChild(buildUserMsg(rm));
+    pin();
+    await runStream(c, (depth || 0) + 1);
+    return;
+  }
+
   const nag = finishCheck(S.run);
-  if (!nag) { markTurnDone(c); return; }
+  if (!nag) { endTurn(c); return; }
   S.run.nagged = true;
   const msg = { role: 'user', nudge: true, text: '（自動檢查）' + nag, content: nag };
   c.messages.push(msg);

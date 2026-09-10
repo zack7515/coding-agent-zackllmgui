@@ -66,7 +66,7 @@ from core import repomap, restore, sysinfo, workspace
 from core.agents import (AGENTS_DIR, SUB_DEPTH_MAX, agent_chain, agent_close,
                          agent_guard, agent_open, agent_stop, agent_trace,
                          agent_types, agent_view, agents_roots, as_agent,
-                         bind_agent, git_at, worktree_orphans)
+                         bind_agent, git_at, git_exclude, worktree_orphans)
 from core.jobs import (BG_MAX, BG_TIMEOUT, BG_WAIT, BG_WAIT_MAX, JOBS, JOBS_LOCK,
                        _job_tail, _start_job, decode_output, jobs_state, kill_tree,
                        process_group_kwargs, tail_of)
@@ -81,9 +81,9 @@ from core.rules import (RULES_FILE, rule_match, rules_files, rules_load,
                         rules_path, rules_save)
 from core.restore import (backup_file, checkpoint, journal_add, journal_for,
                           journal_path, journal_read, restore_backup,
-                          rewind_to, ws_is_git)
+                          rewind_to, ws_diff, ws_is_git)
 from core.workspace import (BACKUP_DIR, DENY_DIRS, DENY_FILES, MAX_FILE_BYTES,
-                            SESSIONS, SESSIONS_LOCK, SESSIONS_MAX, Session,
+                            OUT_DIR, SESSIONS, SESSIONS_LOCK, SESSIONS_MAX, Session,
                             WORKTREE_DIR, WORKTREE_LINK, WORKTREE_MAX, WORKTREE_SKIP,
                             _CUR, cur, session_for, ws_langs, ws_missing_tools,
                             ws_path, ws_rel, ws_root, ws_walk)
@@ -105,6 +105,13 @@ UPSTREAM_TIMEOUT = 900
 CHUNK = 8192
 MAX_UPLOAD = 32 * 1024 * 1024      # 檔案解析的上限，避免有人把記憶體灌爆
 TOOL_OUTPUT_LIMIT = 8000           # 工具結果塞回模型前先截斷，別把 context 撐爆
+# 截掉就丟的話，跑壞的測試、大 diff、裝套件失敗的訊息永遠找不回來 —— 而那幾樣
+# 正好是最需要細看的。所以先落地成檔案，只回頭尾與路徑，模型自己去挖。
+# 只對「再叫一次不會有一樣的東西」的工具做：read_file 的輸出檔案本來就在硬碟上。
+SPILL_TOOLS = {"run_shell", "run_tests", "check_job", "setup_env"}
+OUT_KEEP = 20                      # 落地的輸出留最近幾份，多的自己刪掉
+OUT_HEAD, OUT_TAIL = 2000, 4000    # 回給模型的頭與尾（加起來要小於上面那個上限）
+REVIEW_DIFF_MAX = 12000            # 收尾複查看的 diff 上限，再長也讀不出結論
 SHELL_TIMEOUT = 30
 ALLOW_TOOLS = True                 # 預設開著；--no-tools 關掉，網頁上也隨時能切
 
@@ -1548,6 +1555,8 @@ def git_action(action: str, message: str = "") -> dict:
         if proc.returncode != 0:
             raise RuntimeError(out or "commit 失敗")
         return dict(git_state(), message=out)
+    if action == "diff":
+        return {"diff": ws_diff(REVIEW_DIFF_MAX)}
     if action == "discard":
         # 不用 checkout -- . ：那個真的救不回來。stash 之後還能 git stash pop
         proc = git_run("stash", "push", "-u", "-m",
@@ -1771,6 +1780,42 @@ def preview_tool(name: str, args: dict) -> str:
     return ""
 
 
+def spill(out: str, tool: str):
+    """把完整輸出寫進工作區，回傳相對路徑；寫不了就回 None。
+
+    放在工作區裡而不是備份目錄，是因為模型要讀得回來 —— read_file 與
+    search_files 都出不了工作區。連帶寫一行 .git/info/exclude，免得它變成
+    使用者 git status 上的雜訊，或被 `git add -A` 一起 commit 進去。
+    """
+    if cur().ws is None:
+        return None
+    try:
+        d = ws_root() / OUT_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        git_exclude(ws_root(), OUT_DIR + "/")
+        name = f"{tool}-{time.strftime('%H%M%S')}-{os.urandom(2).hex()}.txt"
+        (d / name).write_text(out, encoding="utf-8", errors="replace")
+        # 留最近幾份就好。這是暫存不是日誌，長在使用者的專案裡更不該無限長
+        for old in sorted(d.glob("*.txt"), key=lambda x: x.stat().st_mtime)[:-OUT_KEEP]:
+            old.unlink()
+    except OSError:
+        return None
+    return f"{OUT_DIR}/{name}"
+
+
+def clip(out: str, tool: str = "") -> str:
+    """太長的工具輸出：能落地的落地，只回頭尾與路徑；其餘照舊截掉。"""
+    if len(out) <= TOOL_OUTPUT_LIMIT:
+        return out
+    path = spill(out, tool) if tool in SPILL_TOOLS else None
+    if not path:
+        return out[:TOOL_OUTPUT_LIMIT] + f"\n…（已截斷，原本 {len(out)} 個字元）"
+    return (out[:OUT_HEAD]
+            + f"\n\n…（中間 {len(out) - OUT_HEAD - OUT_TAIL} 個字元沒有貼進來。"
+              f"全文在 {path}，用 search_files 找關鍵字、或 read_file 讀某幾行。）\n\n"
+            + out[-OUT_TAIL:])
+
+
 def run_tool(name: str, args: dict) -> str:
     """執行一個工具。呼叫端負責先問過使用者。"""
     agent_guard(name)          # 子代理的工具白名單。在網頁之外再擋一次是刻意的
@@ -1780,10 +1825,7 @@ def run_tool(name: str, args: dict) -> str:
     if name.startswith("mcp__"):
         if not isinstance(args, dict):
             raise ValueError("args 必須是物件")
-        out = mcp_call(name, args)
-        if len(out) > TOOL_OUTPUT_LIMIT:
-            out = out[:TOOL_OUTPUT_LIMIT] + f"\n…（已截斷，原本 {len(out)} 個字元）"
-        return out
+        return clip(mcp_call(name, args))
     fn = TOOLS.get(name)
     if fn is None:
         raise ValueError(f"沒有這個工具：{name}")
@@ -1813,8 +1855,7 @@ def run_tool(name: str, args: dict) -> str:
             note = ""            # 檢查出事絕對不能把已經成功的寫檔變成錯誤
         if note:
             out = out + "\n\n" + note
-    if len(out) > TOOL_OUTPUT_LIMIT:
-        out = out[:TOOL_OUTPUT_LIMIT] + f"\n…（已截斷，原本 {len(out)} 個字元）"
+    out = clip(out, name)
     if name != "todo_write":
         try:
             note = sync_todo_file()      # 截斷之後才接，這一段不能被截掉
@@ -2289,8 +2330,15 @@ class Handler(BaseHTTPRequestHandler):
             out = "\n".join(ring)
             if dropped:
                 out = f"（前面省略 {dropped} 行）\n" + out
+            result = f"{head}\n[exit {code}]\n" + tail_of(out)
+            # tail_of 只留最後一百行加上錯誤行，其餘就這樣消失了 —— 而跑壞的
+            # 測試、裝套件的失敗訊息正好常常在那中間。差很多的時候整份落地。
+            if len(out) > len(result) + OUT_HEAD and (path := spill(out, name)):
+                result += (f"\n\n（上面是節錄。這次跑出來的完整輸出在 {path}，"
+                           f"共 {len(out)} 個字元 —— 用 search_files 找關鍵字、"
+                           f"或 read_file 讀某幾行。）")
             self._chunk({"done": True, "code": code, "flooded": flooded,
-                         "result": f"{head}\n[exit {code}]\n" + tail_of(out)})
+                         "result": result})
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

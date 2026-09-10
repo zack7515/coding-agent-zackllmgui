@@ -817,6 +817,22 @@ check_job  {"id": "job1", "wait": 60}
 同樣的道理，這條指令也要過 `command_risk()` —— ⚠ 與 ⛔ 級的一律拒絕，
 沒有確認卡的執行路徑不能比有確認卡的鬆。
 
+**收尾複查**（扳手 →「收尾複查」，**預設關**）
+
+驗證指令量的是「測試過了沒」。這一格量的是另一半：**有沒有做到你要的**。
+開著的話，模型說做完時會另外開一次**乾淨的**呼叫，只給它你原本那句話與這一輪的
+`git diff` —— 不給它自己的推理過程，因為那正是要繞開的東西。說沒做到就把「具體
+漏了什麼」丟回去讓它補，一輪只做一次。
+
+預設關是因為它是一次完整的模型呼叫，本機跑起來要幾十秒。不是 git repo、
+或這一輪沒動到檔案就不會跑。你的暫存區不會被動到（用暫存索引算的）。
+
+**沒有人在的時候它會自己按「繼續」**（「跑指令自動」以上的兩檔）
+
+放著跑的任務停在輪數上限、或停在「收尾驗證沒過」時，它自己續，最多三次，
+而且每次都要先講一句「還差什麼」（不然三次長得一模一樣，你回來看不出有沒有進展）。
+**你按停止不算** —— 那是明確的指令。你自己送出下一句話，次數就重算。
+
 **專案地圖**（沒有設定，開工作區就有）
 
 系統提示裡會帶一份地圖：每個檔案一行，冒號後面是那個檔案裡的頂層符號。
@@ -1219,6 +1235,7 @@ code block 的語言標籤），旁邊的 × 只移除那一個附件。
 | 設定、外部 API 金鑰 | **瀏覽器的 `localStorage`**（小，不會撞到配額） | 同上 |
 | 改檔案前的備份 | `<工作區>/.zackllmgui-backup/<時間戳>/<相對路徑>` | 你的專案裡 |
 | 還原點的順序紀錄 | `<工作區>/.zackllmgui-backup/journal.jsonl` | 同上 |
+| 塞不進 context 的工具輸出 | `<工作區>/.zackllmgui-out/<工具>-<時間>.txt`，留最近 20 份 | 同上（會寫進 `.git/info/exclude`，不會出現在 `git status`） |
 | MCP 設定 | `<工作區>/.zackllmgui-mcp.json`，或 `serve.py` 旁邊 | 同上（連線跟著分頁的工作區走，兩個專案各起各的） |
 | skills | `serve.py` 旁邊的 `skills/`（內建）＋ `<工作區>/skills/`（你自己的） | 兩邊都讀 |
 | 子代理型別 | `serve.py` 旁邊的 `agents/`＋`<工作區>/agents/`，規則同 skills | 兩邊都讀 |
@@ -1285,9 +1302,9 @@ ollamaGUI/
 │       └── 13-init.js        接線與啟動
 │
 ├── tests/                自我檢查（Python 兩支無額外相依；網頁測試需要 Node.js）
-│   ├── test_serve.py       後端 115 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 116 項： python tests/test_serve.py
 │   ├── test_core.py        核心模組 13 項： python tests/test_core.py
-│   ├── test_gui.js         網頁 80 項： node tests/test_gui.js
+│   ├── test_gui.js         網頁 82 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
 │   └── test_skills.py      驗證 skills/ 的格式與工具支援
 │

@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 from core import workspace
-from core.workspace import BACKUP_DIR, WORKTREE_DIR, cur, ws_path, ws_rel, ws_root
+from core.workspace import (BACKUP_DIR, OUT_DIR, WORKTREE_DIR, cur, ws_path,
+                            ws_rel, ws_root)
 
 JOURNAL = "journal.jsonl"          # 放在 BACKUP_DIR 底下
 
@@ -137,7 +138,7 @@ def journal_for(chat: str) -> list:
 # 用 ref 釘住。HEAD、分支、使用者的暫存區都沒動 —— 用 stash 或 checkout 會蓋掉。
 # ponytail: 不是 git repo 就不照相，.gitignore 忽略的也不在快照裡。
 CKPT_REF = "refs/zackllmgui/ckpt"
-CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR)
+CKPT_SKIP = ("--", ".", ":!" + BACKUP_DIR, ":!" + WORKTREE_DIR, ":!" + OUT_DIR)
 
 
 def ws_is_git() -> bool:
@@ -159,6 +160,24 @@ def tmp_index():
             return proc.stdout.strip()
 
         yield run
+
+
+def ws_diff(limit: int) -> str:
+    """工作區相對 HEAD 的完整 diff，含還沒進版控的新檔案。
+
+    用暫存索引算，不動使用者的暫存區 —— 收尾複查是唯讀的事，不該讓
+    git status 從此多出一排 staged 檔案。排除的資料夾跟檢查點同一份。
+    """
+    if not ws_is_git():
+        return ""
+    try:
+        with tmp_index() as git:
+            git("add", "-A", *CKPT_SKIP)
+            out = git("diff", "--cached", "HEAD")
+    except Exception:
+        return ""       # 空殼 .git、還沒有第一個 commit —— 複查是加分項，不該吵
+    return out[:limit] + (f"\n…（diff 太長，只給前 {limit} 個字元）"
+                          if len(out) > limit else "")
 
 
 def ckpt_msg(note: str, files: list) -> str:

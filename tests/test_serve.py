@@ -269,12 +269,33 @@ def test_ext_forwarding():
 
 
 def test_tool_output_truncated():
-    serve.ALLOW_TOOLS = True
-    serve.set_workspace(str(HERE))
-    out = serve.run_tool("run_shell", {"command": shell_python("print('x'*20000)")})
-    assert len(out) < serve.TOOL_OUTPUT_LIMIT + 200 and "已截斷" in out
-    serve.ALLOW_TOOLS = False
-    serve.cur().ws = None
+    """塞不進 context 的輸出要落地成檔案，不是截掉就丟。
+
+    跑壞的測試、裝套件的錯誤訊息正好都很長，而那正是最需要細看的東西。
+    """
+    with Workspace() as ws:
+        out = serve.run_tool("run_shell", {"command": shell_python(
+            "print('開頭那一行'); print('x' * 20000); print('結尾那一行')")})
+        assert len(out) < serve.TOOL_OUTPUT_LIMIT, len(out)
+        assert "開頭那一行" in out and "結尾那一行" in out, "頭尾都要留在回傳裡"
+        hit = re.search(r"(\.zackllmgui-out/\S+?\.txt)", out)
+        assert hit, out[:400]
+        full = (ws / hit.group(1)).read_text("utf-8")
+        assert "x" * 20000 in full, "落地的不是完整輸出"
+
+        # 落地留最近幾份就好：這是暫存不是日誌，長在使用者的專案裡
+        for _ in range(serve.OUT_KEEP + 3):
+            serve.run_tool("run_shell", {"command": shell_python("print('y' * 20000)")})
+        kept = list((ws / serve.OUT_DIR).glob("*.txt"))
+        assert len(kept) <= serve.OUT_KEEP, len(kept)
+
+    # 再叫一次就有的那些不落地 —— 檔案本來就在硬碟上，沒必要抄第二份
+    with Workspace() as ws:
+        big = "行\n" * 6000
+        (ws / "big.txt").write_text(big, encoding="utf-8")
+        out = serve.run_tool("read_file", {"path": "big.txt"})
+        assert "已截斷" in out, out[-200:]
+        assert not (ws / serve.OUT_DIR).exists(), "read_file 的輸出不該落地"
 
 
 # ══════════════════════ 工作區 ══════════════════════ #
@@ -1597,6 +1618,41 @@ def test_browser_errors_reach_the_model():
         serve.cur().errs.clear()
         server.shutdown()
         server.server_close()
+
+
+def test_review_diff_does_not_touch_the_index():
+    """收尾複查要看「這一輪改了什麼」，但它是唯讀的事。
+
+    用暫存索引算：真的 git add 下去的話，使用者的暫存區會從此多出一排檔案 ——
+    而那是他自己在管的東西。
+    """
+    with Workspace() as ws:
+        def git(*a):
+            return subprocess.run(["git", "-C", str(ws)] + list(a),
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace").stdout
+
+        # 不是 git repo 的時候要安靜跳過，不是丟例外
+        assert serve.ws_diff(9999) == ""
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        (ws / "pkg" / "calc.py").write_text("def add(a, b):\n    return a - b\n",
+                                            encoding="utf-8")
+        (ws / "pkg" / "new.py").write_text("X = 1\n", encoding="utf-8")
+        diff = serve.ws_diff(9999)
+        assert "calc.py" in diff and "return a - b" in diff, diff[:300]
+        assert "new.py" in diff, "還沒進版控的新檔案也要看得到"
+        # 使用者的暫存區一個字都不能動
+        assert git("diff", "--cached", "--name-only").strip() == "", "動到暫存區了"
+
+        # 太長就砍，而且要說砍了
+        big = serve.ws_diff(200)
+        assert len(big) < 400 and "太長" in big, big[-120:]
 
 
 def test_frontend_edits_reload_instead_of_restarting():

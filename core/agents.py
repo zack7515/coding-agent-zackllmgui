@@ -64,6 +64,26 @@ def agent_types() -> list:
     return [found[k] for k in sorted(found)]
 
 
+def git_exclude(root: Path, line: str) -> None:
+    """讓 git 別把這個路徑看成未追蹤的檔案。
+
+    寫 `.git/info/exclude` 而不是 `.gitignore`：那是使用者的檔案，我們不動它。
+    寫不進去只是主目錄會多一筆未追蹤，不值得讓呼叫端失敗。
+    """
+    try:
+        ex = Path(git_at(root, "rev-parse", "--git-common-dir").strip())
+        if not ex.is_absolute():
+            ex = root / ex
+        ex = ex / "info" / "exclude"
+        ex.parent.mkdir(parents=True, exist_ok=True)
+        if line.rstrip("\n") not in (
+                ex.read_text("utf-8", errors="replace") if ex.is_file() else "").splitlines():
+            with ex.open("a", encoding="utf-8") as fh:
+                fh.write(line if line.endswith("\n") else line + "\n")
+    except Exception:
+        pass
+
+
 def git_at(root: Path, *args) -> str:
     """在指定的資料夾跑 git。跟 git_run() 不同：那一支固定跑在工作區根目錄，
     這一支要能指到 worktree 或主 repo 兩邊。"""
@@ -138,21 +158,7 @@ def worktree_add() -> dict:
     tag = f"{int(time.time() * 1000) % 100000000:08d}"
     dst = root / WORKTREE_DIR / tag
     branch = f"zackllmgui/{tag}"
-    # 主 worktree 不該把這個資料夾看成未追蹤的檔案。寫 .git/info/exclude 而不是
-    # .gitignore：那是使用者的檔案，我們不動它。
-    try:
-        ex = Path(git_at(root, "rev-parse", "--git-common-dir").strip())
-        if not ex.is_absolute():
-            ex = root / ex
-        ex = ex / "info" / "exclude"
-        ex.parent.mkdir(parents=True, exist_ok=True)
-        line = WORKTREE_DIR + "/\n"
-        had = ex.read_text("utf-8", errors="replace") if ex.is_file() else ""
-        if line not in had:
-            with ex.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-    except Exception:
-        pass          # 沒寫成功只是主目錄會多一筆未追蹤，不影響隔離本身
+    git_exclude(root, WORKTREE_DIR + "/")
     git_at(root, "worktree", "add", "-b", branch, str(dst), "HEAD")
     # 沒進版控的東西不會跟過來，而 node_modules 重建一次要幾分鐘、還多佔一份磁碟。
     # **連過去等於共用**：子代理在裡面 npm install 會動到主專案那一份，
