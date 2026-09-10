@@ -712,6 +712,9 @@ function setStreaming(on) {
   btn.disabled = on ? false : !!S.blocked;
   $('hint').textContent = on ? '產生中…' : (S.blocked || '');
   renderResumeBar();          // 開始跑就收起來，停下來就自己冒出來
+  // 停下來就馬上問一次「前端改了沒」，不要等下一次 30 秒的輪詢：改前端的
+  // 那一輪跑完到頁面重整之間，read_console 讀到的都還是改之前的 console。
+  if (!on) checkSourceChanged();
 }
 
 function stopStream() { if (S.abort) S.abort.abort(); }

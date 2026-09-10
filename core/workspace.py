@@ -4,6 +4,7 @@
 `ws_path()` 是所有檔案工具的安全邊界，只有這一份，不要為了方便繞過它。
 """
 
+import collections
 import os
 import re
 import shutil
@@ -67,13 +68,14 @@ LANG_TOOL = {
 
 
 class Session:
-    """一個瀏覽器分頁的狀態（工作區、寫入權、自動模式、待辦、計畫）。
+    """一個瀏覽器分頁的狀態（工作區、寫入權、自動模式、待辦、計畫、console 的錯）。
 
-    這五樣不能是全域的：兩個分頁各開一個專案時，A 的 write_file 會靜靜寫進
+    這幾樣不能是全域的：兩個分頁各開一個專案時，A 的 write_file 會靜靜寫進
     B 的資料夾。分頁每個請求都帶 X-Tab，照它找回自己那一份。
     工具開關、沙盒、連網、MCP、背景指令仍是行程一份 —— 那是對這台服務授的權。
     """
-    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan", "agents", "seen")
+    __slots__ = ("ws", "write", "auto", "todos", "todo_mtime", "plan",
+                 "agents", "seen", "errs", "page")
 
     def __init__(self, base=None):
         self.ws = base.ws if base else None            # Path；沒設定就沒有任何檔案工具
@@ -84,6 +86,11 @@ class Session:
         self.plan = {"text": "", "approved": False, "on": False}
         self.agents = {}                               # 子代理 id -> {"ws", "branch"}
         self.seen = time.time()
+        # 網頁自己丟出來的錯（window.onerror、unhandledrejection、console.error）。
+        # 環狀緩衝：壞掉的頁面會一直丟，值錢的永遠是最後那幾條。跟分頁走 ——
+        # 全域一份的話 B 分頁的模型讀得到 A 的錯，而且讀完會替 A 清掉。
+        self.errs = collections.deque(maxlen=50)
+        self.page = ""                                 # 上次看到的 frontend/ mtime
 
 
 SESSIONS = {"": Session()}         # "" 是預設分頁：命令列 --workspace 設的就是它

@@ -1875,11 +1875,12 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 // 這一段跑在真正的頁面上，node 這裡驗的是「攢、上限、不自我餵食」那三條 ——
 // 那三條錯了不會有任何症狀，只會在真的壞掉那天沒有東西可讀。
 {
-  const mk = function () {
+  const mk = function (opts) {
+    opts = opts || {};
     const sent = [];
     const timers = [];
     const box = new Function('fetch', 'apiUrl', 'setTimeout', 'location', 'window',
-                             'console', 'out', `
+                             'console', 'SAME_ORIGIN', 'out', `
       ${grab('CLIENT_ERR_MAX', 'const')}
       ${grab('CLIENT_ERR_WAIT', 'const')}
       let clientErrs = [], clientErrTimer = 0, clientErrSending = false;
@@ -1892,9 +1893,10 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
       out.wait = CLIENT_ERR_WAIT;`);
     const out = {};
     box(function (url, opt) { sent.push(JSON.parse(opt.body)); return Promise.resolve(); },
-        function (p) { return 'http://x' + p; },
+        opts.apiUrl || function (p) { return 'http://x' + p; },
         function (fn, ms) { timers.push({ fn: fn, ms: ms }); return timers.length; },
-        { pathname: '/' }, {}, { error: function () {} }, out);
+        { pathname: '/' }, {}, { error: function () {} },
+        opts.sameOrigin !== false, out);
     return { box: out, sent: sent, timers: timers };
   };
 
@@ -1914,12 +1916,32 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   for (let i = 0; i < t.box.max + 50; i++) t.box.note('error', '第' + i);
   assert.strictEqual(t.box.pending(), t.box.max, '沒有上限，壞掉的頁面會把自己灌爆');
 
-  // 送的過程再丟錯就不要再送 —— 不然送失敗會自己餵自己，一路遞迴下去
+  // 送的過程再丟錯就不要再送一次 —— 不然送失敗會自己餵自己，一路遞迴下去。
+  // 但要**收下來**：丟掉的話，送不出去的那一刻起這個頁面就等於全聾了。
   t = mk();
   t.box.note('error', 'A');
+  const during = t.timers.length;
   t.timers[0].fn();                       // 送出去，clientErrSending 立起來
   t.box.note('error', '送出去的時候又壞了');
-  assert.strictEqual(t.box.pending(), 0, '送的過程收下的錯會變成下一輪的錯，會滾雪球');
+  assert.strictEqual(t.box.pending(), 1, '送的過程丟的錯被丟掉了');
+  assert.strictEqual(t.timers.length, during + 1, '送的過程又排了一次，會滾雪球');
+  // 旗子要有人放掉。卡在 true 的話後面所有的錯都不會再送出去
+  assert.ok(t.timers.some(function (x) { return x.ms >= 5000; }),
+    '沒有保底把 clientErrSending 放掉，送不出去就永久靜音');
+
+  // 直接開 HTML 檔：沒有後端可送，也不能送去 Ollama 主機
+  t = mk({ sameOrigin: false });
+  t.box.note('error', 'A');
+  t.timers[0].fn();
+  assert.strictEqual(t.sent.length, 0, '沒有後端還把堆疊送去 Ollama 主機');
+  assert.strictEqual(t.box.pending(), 0, '送不出去還一直攢，位子會被佔滿');
+
+  // 載入到一半丟的錯會比 04-api.js 早：那時候整批要留著，不是丟掉
+  t = mk({ apiUrl: function () { throw new ReferenceError('apiUrl 還沒載到'); } });
+  t.box.note('error', '載入當下就壞了');
+  t.timers[0].fn();
+  assert.strictEqual(t.sent.length, 0);
+  assert.strictEqual(t.box.pending(), 1, '這個檔存在的理由就是抓載入當下的錯');
 
   // 太長的要截掉：一個 stack trace 幾千字，五十條就把 context 燒光
   t = mk();
@@ -1938,8 +1960,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     'serve.py 沒改也跟著重啟了 —— 那會殺掉正在跑的工具');
   assert.ok(src.indexOf('location.reload(); return;') > 0, '沒有重新整理那條路');
   const py = fs.readFileSync(path.join(__dirname, '..', 'serve.py'), 'utf8');
-  assert.ok(/"page_changed": page_stamp\(\) != PAGE_STAMP/.test(py),
-    '/alive 沒有回報頁面變了沒');
+  assert.ok(/"page_changed": changed/.test(py), '/alive 沒有回報頁面變了沒');
   console.log('ok   改前端只重新整理，改 serve.py 才重啟');
 }
 

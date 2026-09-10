@@ -415,7 +415,7 @@ const AUTO_MODES = [
 // （serve.py 的 preview_risk），而上面那條風險檢查排在自動模式前面 ——
 // 會跑指令的那幾份一定跳確認卡，其餘的（九成）照舊自動載入。
 const READ_ONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'fetch_url',
-  'todo_write', 'load_skill', 'view_image'];
+  'todo_write', 'load_skill', 'view_image', 'read_console'];
 
 // 「改檔案自動」以上的檔位，前提就是模型動得了檔案 —— 沒有寫入權限的話那幾檔
 // 本身沒有意義（畫面說「改檔案自動放行」，實際上它連檔案都開不了）。

@@ -368,7 +368,8 @@ SKILL.md 的正文可以寫 !`git status`，`load_skill` 會把它換成現在�
 ## 3.11 `/clienterr`：網頁往回送的唯一一條路
 
 `00-console.js` 會把這個頁面丟出的 JS 錯誤 POST 到 `/clienterr`，
-存進記憶體裡一個 `maxlen=50` 的 deque，模型用 `read_console` 讀。
+存進記憶體裡一個 `maxlen=50` 的 deque（跟著分頁走，不是全域一份），
+模型用 `read_console` 讀。
 
 - **只收本機**（`_is_local()`），跟其他寫入類端點同一道。
 - **只進記憶體，不寫檔案。** 這是拿來給模型讀「剛剛壞在哪」的，不是日誌系統 ——

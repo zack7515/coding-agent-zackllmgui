@@ -13,23 +13,37 @@ let clientErrTimer = 0;
 let clientErrSending = false;     // 送的過程再丟錯就不要再送，不然會自己餵自己
 
 function noteClientErr(kind, text, where) {
-  if (clientErrSending || clientErrs.length >= CLIENT_ERR_MAX) return;
+  if (clientErrs.length >= CLIENT_ERR_MAX) return;
   clientErrs.push({ kind: kind, text: String(text || '').slice(0, 1000),
                     where: String(where || '').slice(0, 300) });
-  if (clientErrTimer) return;
+  // 送的過程中丟的錯照收，只是不另外排一次（排了就會自己餵自己）。
+  // 丟掉的話，送不出去的那一刻起這個頁面就等於全聾了。
+  if (clientErrTimer || clientErrSending) return;
   clientErrTimer = setTimeout(flushClientErrs, CLIENT_ERR_WAIT);
 }
 
 function flushClientErrs() {
   clientErrTimer = 0;
+  if (!clientErrs.length) return;
+  if (clientErrSending) {                    // 上一批還在路上，等它
+    clientErrTimer = setTimeout(flushClientErrs, CLIENT_ERR_WAIT);
+    return;
+  }
+  // SAME_ORIGIN 與 apiUrl 都住在後面的檔案，載入到一半丟的錯會比它們早 ——
+  // 讀不到就整批留著（下一條錯會再排一次），不要在這裡把它清掉。
+  let url = '';
+  try { url = SAME_ORIGIN ? apiUrl('/clienterr') : ''; } catch (e) { return; }
   const rows = clientErrs;
   clientErrs = [];
-  // 直接開 HTML 檔的時候沒有後端可送。apiUrl 住在 04-api.js，
-  // 載入到一半丟的錯會比它早 —— 所以這裡問一次，不要假設它在。
-  if (!rows.length || typeof apiUrl !== 'function') return;
+  // 直接開 HTML 檔的時候沒有後端可送。攢著只會一直佔著那 20 個位子，
+  // 而且 apiUrl 在這種情況會指到 Ollama 主機 —— 那裡不該收到堆疊。
+  if (!url) return;
   clientErrSending = true;
+  // 送不出去也要把旗子放掉。卡在 true 的話後面所有的錯都不會再送出去，
+  // 防遞迴的旗子就變成永久靜音。
+  setTimeout(function () { clientErrSending = false; }, 5000);
   try {
-    fetch(apiUrl('/clienterr'), {
+    fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ errors: rows, url: location.pathname })
     }).catch(function () { /* 送不到就算了，這不是能拿來報錯的地方 */ })
@@ -57,9 +71,16 @@ window.addEventListener('unhandledrejection', function (e) {
 // 自己 catch 起來然後 console.error 的也算 —— 那些同樣是「壞了但畫面不說」。
 const _consoleError = console.error;
 console.error = function () {
-  noteClientErr('console.error',
-    [].map.call(arguments, function (a) {
-      return (a && a.stack) || (typeof a === 'object' ? JSON.stringify(a) : String(a));
-    }).join(' '), '');
+  // 整段包起來：診斷用的東西弄壞呼叫它的人，就會把「有記下來的錯」
+  // 變成「沒人接的錯」，連 F12 裡都看不到。
+  try {
+    noteClientErr('console.error',
+      [].map.call(arguments, function (a) {
+        if (a && a.stack) return a.stack;
+        if (typeof a !== 'object' || a === null) return String(a);
+        // 環狀結構（DOM 節點就是）會讓 stringify 直接丟例外
+        try { return JSON.stringify(a); } catch (e) { return String(a); }
+      }).join(' '), '');
+  } catch (e) { /* 記不下來也要讓原本那行印出去 */ }
   _consoleError.apply(console, arguments);
 };

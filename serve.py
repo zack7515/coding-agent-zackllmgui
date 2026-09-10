@@ -150,9 +150,9 @@ TODO_FILE = ".zackllmgui-todos.md"
 # 看得到的圖片。模型看不了圖的話這支工具根本不會出現在清單裡（網頁那一端擋）。
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
-# 網頁自己丟出來的錯（window.onerror、unhandledrejection、console.error）。
-# 環狀緩衝：壞掉的頁面會一直丟，而值錢的永遠是最後那幾條。
-CLIENT_ERRS = collections.deque(maxlen=50)
+# read_console 一次最多列這麼多字。整串交給 run_tool 去截的話，被砍掉的
+# 正好是最後那幾條 —— 而值錢的就是那幾條（緩衝本身在 Session.errs）。
+CONSOLE_CHARS = 6000
 
 # 自動模式下沒有人回答 ask_user_question 時，網頁等這麼久就替它往下走。
 # 真正在計時的是前端的 ASK_WAIT_MS，這裡只是拿來寫進提示詞（測試會比對兩邊）。
@@ -218,6 +218,8 @@ def page_stamp() -> str:
     """frontend/ 的 mtime。改了就叫網頁重新整理，不必重啟 serve.py。
 
     沒有 frontend/（只複製兩個檔出去的裝法）就回空字串，永遠等於沒變。
+    用相對路徑不是檔名：搬到子資料夾的檔案 mtime 不變，只比檔名的話 stamp
+    一模一樣，但 build.py 只收 js/*.js，那個檔已經整個掉出去了。
     """
     src = HERE / "frontend"
     if not src.is_dir():
@@ -226,13 +228,10 @@ def page_stamp() -> str:
     for f in sorted(src.rglob("*")):
         try:
             if f.is_file():
-                bits.append(f"{f.name}:{f.stat().st_mtime_ns}")
+                bits.append(f"{f.relative_to(src)}:{f.stat().st_mtime_ns}")
         except OSError:
             pass
     return "|".join(bits)
-
-
-PAGE_STAMP = page_stamp()
 
 
 def restart_self() -> None:
@@ -1311,7 +1310,7 @@ def tool_defs() -> list:
             continue
         # 沒有錯誤的時候這支工具叫了也沒東西可讀。跟 check_job 同一個做法：
         # 一支工具的定義每一輪約 110 token，而多數對話從頭到尾網頁都沒出錯。
-        if t["needs"] == "console" and not CLIENT_ERRS:
+        if t["needs"] == "console" and not cur().errs:
             continue
         if t["needs"] == "plan" and not cur().plan["on"]:
             continue
@@ -1401,18 +1400,27 @@ def _tool_read_console(clear: bool = True) -> str:
 
     只看得到這個介面自己的 console，不是模型做出來的其他頁面。
     """
-    rows = list(CLIENT_ERRS)
-    if clear:
-        CLIENT_ERRS.clear()
+    errs = cur().errs
+    # 一條一條取，不要 list() 完再 clear()：那兩步中間 /clienterr 送進來的
+    # 那一條會被清掉，而它正好是最新的一條。
+    rows = [errs.popleft() for _ in range(len(errs))] if clear else list(errs)
     if not rows:
         return "網頁那一端沒有錯誤。"
-    out = [f"網頁丟出 {len(rows)} 條（舊的在前）："]
-    for e in rows:
+    # 從最新的往回收，收滿了就停 —— 留頭砍尾的話砍掉的是最新的那幾條。
+    lines, used = [], 0
+    for e in reversed(rows):
         where = f"　{e['where']}" if e.get("where") else ""
-        out.append(f"[{e['ts']}] {e['kind']}: {e['text']}{where}")
-    out.append("（已經清空。改完之後重新整理頁面再讀一次，"
-               "還有東西就是沒修好。）" if clear else "")
-    return "\n".join(x for x in out if x)
+        line = f"[{e['ts']}] {e['kind']}: {e['text']}{where}"
+        used += len(line) + 1
+        if used > CONSOLE_CHARS and lines:
+            break
+        lines.append(line)
+    lines.reverse()
+    head = (f"網頁丟出 {len(rows)} 條（舊的在前）：" if len(lines) == len(rows)
+            else f"網頁丟出 {len(rows)} 條，只列得下最新的 {len(lines)} 條：")
+    tail = ("（已經清空。改完之後重新整理頁面再讀一次，"
+            "還有東西就是沒修好。）" if clear else "")
+    return "\n".join(x for x in [head] + lines + [tail] if x)
 
 
 def _tool_view_image(path: str) -> str:
@@ -2118,8 +2126,14 @@ class Handler(BaseHTTPRequestHandler):
             # 很輕的一支，網頁每 30 秒問一次。回「程式碼變了沒」與「頁面變了沒」。
             # 分開的理由是處理方式不同：serve.py 變了要重啟，frontend/ 變了
             # 重新整理就好（_serve_page 每次都重組），而重啟會殺掉正在跑的工具。
+            # 頁面那一半記在**分頁**上，不是行程上：行程的 stamp 沒有人更新，
+            # 第一次改完前端之後每 30 秒就會再重整一次，永遠停不下來。
+            now = page_stamp()
+            s = cur()
+            changed = bool(s.page) and now != s.page
+            s.page = now
             self._json({"src_changed": source_stamp() != SRC_STAMP,
-                        "page_changed": page_stamp() != PAGE_STAMP,
+                        "page_changed": changed,
                         "local": self._is_local()})
         elif self.path == "/ext":
             self._do_ext("GET")
@@ -2342,14 +2356,16 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(rows, list):
                 raise ValueError("errors 要是陣列")
             ts = time.strftime("%H:%M:%S")
+            errs, kept = cur().errs, 0
             for e in rows[:20]:
                 if not isinstance(e, dict):
                     continue
-                CLIENT_ERRS.append({
+                errs.append({
                     "ts": ts, "kind": str(e.get("kind", "error"))[:20],
                     "text": str(e.get("text", ""))[:1000],
                     "where": str(e.get("where", ""))[:300]})
-            self._json({"got": len(rows)})
+                kept += 1
+            self._json({"got": kept})
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, 400)
 

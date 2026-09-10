@@ -1543,7 +1543,7 @@ def test_browser_errors_reach_the_model():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         serve.ALLOW_TOOLS = True
-        serve.CLIENT_ERRS.clear()
+        serve.cur().errs.clear()
         with Workspace():
             # 沒有錯誤的時候這支工具不該出現在清單裡 —— 叫了也沒東西可讀
             names = [d["function"]["name"] for d in serve.tool_defs()]
@@ -1567,16 +1567,34 @@ def test_browser_errors_reach_the_model():
             assert "沒有錯誤" in serve.run_tool("read_console", {})
 
             # 壞掉的頁面會一直丟，緩衝區要有上限而且留最後那幾條
-            n = serve.CLIENT_ERRS.maxlen
+            n = serve.cur().errs.maxlen
             for i in range(n + 10):
                 post(base + "/clienterr",
                      json.dumps({"errors": [{"kind": "error", "text": f"第{i}條"}]}).encode(),
                      {"Origin": base})
             got = serve.run_tool("read_console", {})
             assert f"第{n + 9}條" in got and "第0條" not in got, "留錯了那一端"
+
+            # 一條 stack trace 就幾千字。列不下的時候砍的要是**舊的**那幾條 ——
+            # 整串交給 run_tool 去截的話，砍掉的正好是最新、也最值錢的那幾條。
+            for i in range(20):
+                post(base + "/clienterr", json.dumps({"errors": [
+                    {"kind": "error", "text": f"第{i}條" + "x" * 900}]}).encode(),
+                    {"Origin": base})
+            got = serve.run_tool("read_console", {})
+            assert len(got) < serve.CONSOLE_CHARS * 1.5, len(got)
+            assert "第19條" in got and "第0條" not in got, "列不下的時候砍錯了那一端"
+
+            # 分頁各自一份：B 分頁的模型不該讀到 A 的錯，更不該替 A 清掉
+            post(base + "/clienterr",
+                 json.dumps({"errors": [{"kind": "error", "text": "別的分頁"}]}).encode(),
+                 {"Origin": base, "X-Tab": "another"})
+            assert "沒有錯誤" in serve.run_tool("read_console", {}), "讀到別的分頁的錯"
+            assert serve.session_for("another").errs, "被別的分頁讀走了"
+            serve.session_for("another").errs.clear()
     finally:
         serve.ALLOW_TOOLS = False
-        serve.CLIENT_ERRS.clear()
+        serve.cur().errs.clear()
         server.shutdown()
         server.server_close()
 
@@ -1590,6 +1608,9 @@ def test_frontend_edits_reload_instead_of_restarting():
     stamp = serve.page_stamp()
     assert stamp, "有 frontend/ 卻算不出 stamp"
     assert stamp == serve.page_stamp(), "沒改東西 stamp 就不該變"
+    # 相對路徑不是檔名：搬到子資料夾的檔案 mtime 不變，只比檔名的話 stamp
+    # 一模一樣，但它已經掉出 build.py 的 js/*.js 了
+    assert "js/00-console.js" in stamp, "stamp 只記了檔名"
 
     target = serve.HERE / "frontend" / "js" / "00-console.js"
     before = target.stat().st_mtime_ns
@@ -1602,6 +1623,27 @@ def test_frontend_edits_reload_instead_of_restarting():
 
     # serve.py 那一份不該被 frontend/ 的改動帶著跑
     assert "frontend" not in " ".join(serve.SRC_GLOBS)
+
+    # 「頁面變了沒」記在分頁上，不是行程上。記在行程上的話沒有人會去更新它，
+    # 改完前端之後每 30 秒就會再重整一次頁面，永遠停不下來。
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 0)
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        def alive():
+            req = urllib.request.Request(base + "/alive", headers={"X-Tab": "reload"})
+            return json.loads(urllib.request.urlopen(req, timeout=5).read())
+
+        assert alive()["page_changed"] is False, "第一次問就說變了"
+        os.utime(target, ns=(before + 10**9, before + 10**9))
+        try:
+            assert alive()["page_changed"] is True, "改了前端卻沒叫它重整"
+            assert alive()["page_changed"] is False, "重整一次就夠了，這樣會一直重整下去"
+        finally:
+            os.utime(target, ns=(before, before))
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_skills_endpoint():
