@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from core import workspace
+from core.agents import git_exclude
 from core.workspace import (BACKUP_DIR, OUT_DIR, WORKTREE_DIR, cur, ws_path,
                             ws_rel, ws_root)
 
@@ -37,6 +38,9 @@ def backup_file(p: Path) -> str:
         dst = root / BACKUP_DIR / f"{stamp}-{n}" / rel
         if not dst.exists():
             break
+    # 第一次備份的時候順手擋掉，不然整個備份目錄會變成 git status 上的雜訊
+    if not (root / BACKUP_DIR).exists():
+        git_exclude(root, BACKUP_DIR + "/")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(p, dst)
     return dst.relative_to(root).as_posix()

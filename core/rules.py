@@ -12,6 +12,7 @@ from pathlib import Path
 from core.workspace import HERE, cur
 
 RULES_FILE = ".zackllmgui-rules.json"   # 兩份都讀，專案的優先
+HOOKS_FILE = ".zackllmgui-hooks.json"   # 同上
 
 # ══════════════════════ 允許規則 ══════════════════════ #
 # 人真正想要的不是全有全無的三段，而是「pytest 一律放行、git commit 要問我、
@@ -21,7 +22,7 @@ RULES_FILE = ".zackllmgui-rules.json"   # 兩份都讀，專案的優先
 #   deny 規則 > 擋掉的危險指令 > 風險指令一律問 > allow 規則 > 自動模式
 # allow **不能**蓋過風險指令：那條保證寫在文件上，不能被一個設定檔拿掉。
 
-def rules_files() -> list:
+def config_files(name: str) -> list:
     """[(範圍, 路徑)]。兩份都讀，專案的排在前面（第一條命中的說了算）。
 
     **不能寫成二選一。** skills 那邊踩過同一個坑：只要專案有了自己的一份，
@@ -29,11 +30,15 @@ def rules_files() -> list:
     """
     out = []
     if cur().ws is not None:
-        out.append(("專案", cur().ws / RULES_FILE))
-    here = HERE / RULES_FILE
+        out.append(("專案", cur().ws / name))
+    here = HERE / name
     if not out or out[0][1].resolve() != here.resolve():
         out.append(("全域", here))
     return out
+
+
+def rules_files() -> list:
+    return config_files(RULES_FILE)
 
 
 def rules_path(write: bool = False) -> Path:
@@ -114,3 +119,31 @@ def rule_match(name: str, args: dict) -> dict:
                 or (pat.endswith("*") and subject.startswith(pat[:-1]))):
             return r
     return None
+
+
+# ══════════════════════ hooks ══════════════════════ #
+# 寫完檔案跑一條自己的檢查。內建的那組（ruff／eslint／-fsyntax-only）寫死在
+# serve.py 裡，用 mypy、shellcheck、clippy、prettier 的人本來完全沒有入口。
+#
+# **不過 shell。** hooks 檔跟著專案走，一個陌生的 repo 設成工作區的當下就會
+# 讀到它 —— 管道與重導向給的是「開一個 shell 出來」那種程度的自由，那跟
+# 「跑一個檢查器」差太多了。要管道就自己寫成一個腳本，再把腳本掛上來。
+
+def hooks(event: str) -> list:
+    """這個事件要跑的指令。專案與全域兩份都跑，專案的先跑。"""
+    out = []
+    for scope, f in config_files(HOOKS_FILE):
+        if not f.is_file():
+            continue
+        try:
+            data = json.loads(f.read_text("utf-8", errors="replace"))
+        except ValueError:
+            continue           # 壞掉就當成沒有：跟 rules 同一條規矩
+        for h in (data.get("hooks") if isinstance(data, dict) else data) or []:
+            if not isinstance(h, dict) or str(h.get("on", "")) != event:
+                continue
+            run = str(h.get("run", "")).strip()
+            if run:
+                out.append({"run": run, "match": str(h.get("match", "*")) or "*",
+                            "scope": scope})
+    return out

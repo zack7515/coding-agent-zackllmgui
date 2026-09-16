@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))          # 測試搬進 tests/ 之後才找得到 serve.py
 
 import serve
+from core import rules
 
 RULES = ".zackllmgui-rules.json"
 
@@ -3447,3 +3448,109 @@ if __name__ == "__main__":
         t()
         print("ok  ", t.__name__)
     print(f"\n{len(tests)} 項全過")
+
+
+def test_remember_survives_into_the_next_conversation():
+    """記下來的東西要進系統提示，重複的不記第二次，多了丟最舊的。"""
+    with Workspace() as ws:
+        assert serve.notes_text() == ""
+        serve.run_tool("remember", {"note": "測試要先 source .venv/bin/activate"})
+        assert "source .venv" in (ws / serve.NOTES_FILE).read_text("utf-8")
+        # 同一件事記兩次不該長出兩行 —— 模型每一輪都想記一次同樣的東西
+        again = serve.run_tool("remember", {"note": "測試要先  source .venv/bin/activate "})
+        assert "記過了" in again
+        assert (ws / serve.NOTES_FILE).read_text("utf-8").count("source .venv") == 1
+
+        rules = serve.agent_rules()
+        assert "source .venv" in rules and serve.NOTES_FILE in rules, rules
+
+        for i in range(serve.NOTES_MAX + 5):
+            serve.run_tool("remember", {"note": f"第 {i} 條"})
+        lines = (ws / serve.NOTES_FILE).read_text("utf-8").strip().splitlines()
+        assert len(lines) == serve.NOTES_MAX
+        assert "source .venv" not in "\n".join(lines)     # 最舊的被擠掉了
+        assert lines[-1] == f"- 第 {serve.NOTES_MAX + 4} 條"
+
+
+def test_remember_needs_a_workspace_and_counts_as_read_only():
+    """沒有工作區就沒有這支；它會寫檔，但不吃「修改檔案」那道開關。"""
+    with Workspace():
+        serve.cur().write = False
+        assert "remember" in {d["function"]["name"] for d in serve.tool_defs()}
+        serve.run_tool("remember", {"note": "不開修改檔案也記得動"})
+    assert "remember" in serve.WS_TOOLS and "remember" not in serve.WRITE_TOOLS
+    try:
+        serve.run_tool("remember", {"note": "沒有工作區"})
+        raise AssertionError("沒有工作區竟然也記得下去")
+    except PermissionError:
+        pass
+
+
+def _hooks_file(ws: Path, rows: list) -> None:
+    (ws / rules.HOOKS_FILE).write_text(
+        json.dumps({"hooks": rows}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_write_hook_output_goes_back_to_the_model():
+    """使用者自己掛的檢查：沒過就把輸出接在寫檔結果後面。"""
+    with Workspace() as ws:
+        fail = ws / "fail.py"
+        fail.write_text("import sys\nprint('壞了 pkg/calc.py')\nsys.exit(1)\n",
+                        encoding="utf-8")
+        _hooks_file(ws, [{"on": "write", "match": "*.py",
+                          "run": f"{sys.executable} fail.py"}])
+        out = serve.run_tool("write_file", {"path": "pkg/new.py", "content": "x = 1\n"})
+        assert "[hook" in out and "壞了" in out, out
+
+        # 樣式對不上就不跑
+        out = serve.run_tool("write_file", {"path": "note.txt", "content": "x"})
+        assert "[hook" not in out, out
+
+
+def test_write_hook_appends_the_filename_and_skips_what_it_cannot_run():
+    with Workspace() as ws:
+        (ws / "echo.py").write_text("import sys\nprint(sys.argv[1])\nsys.exit(1)\n",
+                                    encoding="utf-8")
+        _hooks_file(ws, [{"on": "write", "match": "*.py",
+                          "run": f"{sys.executable} echo.py"},
+                         {"on": "write", "run": "這個執行檔不存在-zzz"},
+                         {"on": "done", "run": f"{sys.executable} echo.py"}])
+        out = serve.run_tool("write_file", {"path": "pkg/new.py", "content": "x = 1\n"})
+        # 沒寫 {file} 的話檔名接在後面，所以 argv[1] 印得出剛寫的那個檔
+        assert "pkg/new.py" in out.split("[hook")[1]
+        # 跑不起來的跟別的事件的都安靜跳過，不能變成噪音
+        assert out.count("[hook") == 1, out
+
+
+def test_write_hook_will_not_run_a_blocked_command():
+    """hooks 檔跟著專案走，陌生的 repo 設成工作區的當下就讀到了。"""
+    with Workspace() as ws:
+        _hooks_file(ws, [{"on": "write", "run": "rm -rf /tmp/zzz"}])
+        out = serve.run_tool("write_file", {"path": "pkg/new.py", "content": "x = 1\n"})
+        assert "[hook] 沒有跑" in out and "rm -rf" in out, out
+
+
+def test_its_own_scratch_stays_out_of_git_status():
+    """備份與筆記都是這支程式的暫存，不該變成使用者 `git status` 上的雜訊。"""
+    d = Path(tempfile.mkdtemp(prefix="zackgit-"))
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+        (d / "app.py").write_text("x = 0\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                        "commit", "-qm", "init"], cwd=d, check=True)
+        serve.set_workspace(str(d))
+        serve.cur().write = True
+        serve.ALLOW_TOOLS = True
+        serve.run_tool("edit_file", {"path": "app.py", "old": "x = 0", "new": "x = 1"})
+        serve.run_tool("remember", {"note": "一條筆記"})
+        out = subprocess.run(["git", "status", "--short"], cwd=d,
+                             capture_output=True, text=True).stdout
+        assert out.strip() == "M app.py", out
+        # .gitignore 是使用者的檔案，我們寫的是 .git/info/exclude
+        assert not (d / ".gitignore").exists()
+    finally:
+        serve.cur().ws = None
+        serve.cur().write = False
+        serve.ALLOW_TOOLS = False
+        shutil.rmtree(d, ignore_errors=True)

@@ -77,8 +77,8 @@ from core.skills import (SKILL_CMD, SKILL_CMD_MAX, SKILL_DESC_MAX,
                          skills_list, skills_roots)
 from core.mcp import (MCP, MCP_CONFIG, mcp_call, mcp_config_path, mcp_load,
                       mcp_start, mcp_status, mcp_stop, mcp_tool_defs, mcps)
-from core.rules import (RULES_FILE, rule_match, rules_files, rules_load,
-                        rules_path, rules_save)
+from core.rules import (HOOKS_FILE, RULES_FILE, hooks, rule_match, rules_files,
+                        rules_load, rules_path, rules_save)
 from core.restore import (backup_file, checkpoint, journal_add, journal_for,
                           journal_path, journal_read, restore_backup,
                           rewind_to, ws_diff, ws_is_git)
@@ -119,6 +119,11 @@ AT_FILE_CAP = 3000                 # 輸入框打 @ 時最多列幾個檔案
 # 專案自己的說明檔。收常見的通用檔名，找到第一個就用。
 AGENT_FILES = ("AGENTS.md", "GROK.md", ".cursorrules")
 PROJECT_MD_LIMIT = 6000
+# 模型自己記下來的事。AGENTS.md 是使用者寫給它看的，只進不出 —— 少了這一份，
+# 「這個專案的測試要先 source .venv」每開一則新對話就得重新學一次。
+NOTES_FILE = ".zackllmgui-notes.md"
+NOTES_MAX = 60                     # 最多留幾條，滿了丟最舊的
+NOTES_LINE_MAX = 300
 
 
 # 計畫模式住在 Session.plan["on"]：工作區、修改權限、自動模式、待辦、MCP 都跟著
@@ -284,6 +289,16 @@ def project_md() -> tuple:
                 text = text[:PROJECT_MD_LIMIT] + "\n…（專案說明過長，已截斷）"
             return (name, text)
     return ("", "")
+
+
+def notes_text() -> str:
+    """模型自己記下來的那份。沒有工作區、沒有檔案都回空字串。"""
+    if cur().ws is None:
+        return ""
+    f = cur().ws / NOTES_FILE
+    if not f.is_file():
+        return ""
+    return f.read_text("utf-8", errors="replace").strip()[:PROJECT_MD_LIMIT]
 
 
 TODO_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s*\[([ xX])\]\s*(.+?)\s*$")
@@ -1292,6 +1307,9 @@ def agent_rules() -> str:
     name, text = project_md()
     if text:
         r.append(f"\n## 專案說明（來自 {name}，優先於上面的通則）\n{text}")
+    notes = notes_text()
+    if notes:
+        r.append(f"\n## 你之前記下來的（{NOTES_FILE}）\n{notes}")
     return "\n".join(r)
 
 
@@ -1461,6 +1479,23 @@ def _tool_submit_plan(plan: str) -> str:
     return "計畫已核准，可以開始執行。動手前再確認一次每一步都在計畫裡。"
 
 
+def _tool_remember(note: str = "") -> str:
+    """記一條，重複的不再記一次。整份是純文字，使用者自己編輯或刪光都可以。"""
+    note = " ".join(str(note or "").split())[:NOTES_LINE_MAX]
+    if not note:
+        raise ValueError("要記的內容不能是空的")
+    f = ws_root() / NOTES_FILE
+    lines = ([x for x in f.read_text("utf-8", errors="replace").splitlines() if x.strip()]
+             if f.is_file() else [])
+    line = "- " + note
+    if line in lines:
+        return "這條已經記過了，沒有重複記。"
+    lines = (lines + [line])[-NOTES_MAX:]
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    git_exclude(ws_root(), NOTES_FILE)
+    return f"記下來了，下一則對話開頭會看到（目前 {len(lines)} 條）。"
+
+
 TOOLS = {
     "read_file": _tool_read_file,
     "delete_file": _tool_delete_file,
@@ -1479,10 +1514,11 @@ TOOLS = {
     "view_image": _tool_view_image,
     "read_console": _tool_read_console,
     "load_skill": _tool_load_skill,
+    "remember": _tool_remember,
 }
 WRITE_TOOLS = {"write_file", "edit_file"}
 WS_TOOLS = {"read_file", "list_dir", "search_files", "run_shell", "run_tests",
-            "setup_env", "check_job", "view_image"} | WRITE_TOOLS
+            "setup_env", "check_job", "view_image", "remember"} | WRITE_TOOLS
 
 
 # ══════════════════════ git 整合 ══════════════════════ #
@@ -1704,6 +1740,48 @@ def lint_after_write(path: Path) -> str:
     return f"[{Path(cmd[0]).name}] 這是剛剛寫入的檔案的檢查結果，請修掉：\n{body}"
 
 
+# 內建的那三條寫死（ruff／eslint／-fsyntax-only）。這一支是使用者自己的入口：
+# mypy、shellcheck、clippy、gofmt -l 掛上來，輸出跟 linter 走同一條回灌路徑。
+# 跟內建那組同樣的三條規矩：只跑不改檔案的東西、跑不起來就安靜跳過、不進沙盒。
+HOOK_MAX = 4               # 一次寫檔最多跑幾條，多的不跑：這條路徑在每次寫檔上
+
+
+def run_hooks(path: Path) -> str:
+    """寫檔後跑使用者掛的檢查。回傳要接在工具結果後面的東西。"""
+    rel = ws_rel(path)
+    out = []
+    for h in hooks("write")[:HOOK_MAX]:
+        if not (fnmatch.fnmatch(rel, h["match"]) or fnmatch.fnmatch(path.name, h["match"])):
+            continue
+        try:
+            argv = shlex.split(h["run"], posix=CC_POSIX)
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        # 照 aider 的 --lint-cmd：沒寫 {file} 就把檔名接在後面
+        argv = ([a.replace("{file}", rel) for a in argv] if "{file}" in h["run"]
+                else argv + [rel])
+        # 這個檔跟著專案走，設成工作區的當下就讀到了。擋的跟 run_shell 同一份判斷。
+        level, why = command_risk(" ".join(argv))
+        if level == "block":
+            out.append(f"[hook] 沒有跑「{h['run']}」：{why}"
+                       f"（{h['scope']}的 {HOOKS_FILE}）")
+            continue
+        try:
+            r = subprocess.run(argv, cwd=str(ws_root()), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=LINT_TIMEOUT)
+        except Exception:
+            continue           # 沒裝、拼錯、逾時：加分項不該變成噪音
+        if not r.returncode:
+            continue
+        body = tail_of((r.stdout + r.stderr).strip(), 20).strip()
+        body = body.replace(str(ws_root()) + os.sep, "")
+        if body:
+            out.append(f"[hook {Path(argv[0]).name}] 這個檔案沒過，請修：\n{body}")
+    return "\n\n".join(out)
+
+
 def preview_risk(name: str, args: dict) -> str:
     """確認卡要不要標紅、自動模式能不能跳過。
 
@@ -1850,7 +1928,8 @@ def run_tool(name: str, args: dict) -> str:
     out = fn(**args)
     if name in WRITE_TOOLS:
         try:
-            note = lint_after_write(ws_path(str(args.get("path", ""))))
+            f = ws_path(str(args.get("path", "")))
+            note = "\n\n".join(x for x in (lint_after_write(f), run_hooks(f)) if x)
         except Exception:
             note = ""            # 檢查出事絕對不能把已經成功的寫檔變成錯誤
         if note:

@@ -121,6 +121,14 @@ TOOL_SCHEMAS = [
                                                      "（第一項是 1）。只能指向排在前面的項目"}},
                                   "required": ["text"]}}},
      "required": ["items"]},
+    {"name": "remember", "needs": "ws",
+     "description": ("把一件**下一則對話也該知道**的事記到工作區的筆記裡。"
+                     "只記從這個專案學到、而且讀原始碼看不出來的事："
+                     "測試要怎麼跑、哪個目錄是產生出來的、使用者講過的偏好。"
+                     "這一輪的進度用 todo_write，不要記到這裡"),
+     "properties": {"note": {"type": "string",
+                             "description": "一句話，寫成下次看到就懂的樣子"}},
+     "required": ["note"]},
     {"name": "ask_user_question", "needs": "client",
      "description": ("需要使用者決定時用這個問，不要自己猜。"
                      "例如：不確定要改哪一個檔案、有兩種做法要選、缺少必要資訊"),

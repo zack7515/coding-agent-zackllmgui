@@ -2027,6 +2027,72 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   console.log('ok   自動模式停住會自己接著跑（使用者按停止不算，有上限）');
 })();
 
+// ── 任務佇列：排一串讓它跑一晚 ──────────────────────────────
+// 這幾條錯了不會當場壞給人看，只會在真的排了五件放著跑那天發現它停在第二件，
+// 或者更糟 —— 第二件沒做完就開始做第三件。
+{
+  const split = new Function(grab('splitTasks') + '\nreturn splitTasks;')();
+  assert.deepStrictEqual(split('修 bug\n---\n寫測試\n---\n更新 README'),
+    ['修 bug', '寫測試', '更新 README']);
+  assert.deepStrictEqual(split('只有一件事'), ['只有一件事']);
+  // 句子中間的破折號與四個減號的分隔線都不算：那是內容不是指令，
+  // 誤判的代價是把一句話硬切成兩件任務送出去
+  assert.deepStrictEqual(split('a --- b'), ['a --- b']);
+  assert.strictEqual(split('前\n----\n後').length, 1, '四個減號被當成分隔線了');
+
+  const mk = function (cur) {
+    const out = { toasts: [], sent: 0, input: { value: '' } };
+    const go = new Function('S', 'current', 'saveChats', 'renderTasks', 'toast',
+                            '$', 'send', grab('nextTask') + '\nreturn nextTask;')(
+      { streaming: false }, function () { return cur; }, function () { },
+      function () { }, function (m) { out.toasts.push(m); },
+      function () { return out.input; }, function () { out.sent += 1; });
+    return { go: go, out: out };
+  };
+
+  let c = { tasks: ['寫測試', '更新 README'],
+            messages: [{ role: 'assistant', content: '好了' }] };
+  let t = mk(c);
+  assert.strictEqual(t.go(c), true);
+  assert.strictEqual(t.out.input.value, '寫測試');
+  assert.strictEqual(t.out.sent, 1);
+  assert.deepStrictEqual(c.tasks, ['更新 README'], '送出去的那件沒有從佇列拿掉');
+
+  // 使用者按停止的意思是「別跑了」，不是「這件做完了」
+  c = { tasks: ['寫測試'],
+        messages: [{ role: 'assistant', content: '一半', stats: '（已停止）' }] };
+  t = mk(c);
+  assert.strictEqual(t.go(c), false);
+  assert.deepStrictEqual(c.tasks, [], '按了停止後面還是照排照送');
+  assert.strictEqual(t.out.sent, 0);
+
+  // 人切去看別的對話了：send() 送的是「現在看著的那則」，硬送會塞錯地方
+  c = { tasks: ['寫測試'], messages: [{ role: 'assistant', content: '好了' }] };
+  t = mk({ id: 'another' });
+  assert.strictEqual(t.go(c), false);
+  assert.deepStrictEqual(c.tasks, ['寫測試'], '切走就該留著，不是丟掉');
+  assert.strictEqual(t.out.sent, 0);
+
+  assert.ok(/afterTurn\(c\)/.test(grab('endTurn')), '一輪結束沒有回頭看佇列');
+  assert.ok(/c\.tasks/.test(grab('send')), '佇列沒有存在對話上，重整就沒了');
+}
+
+(async function () {
+  const seq = [];
+  const mk = function (resumed) {
+    return new Function('maybeAutoResume', 'nextTask',
+                        grab('afterTurn') + '\nreturn afterTurn;')(
+      async function () { seq.push('resume'); return resumed; },
+      function () { seq.push('task'); });
+  };
+  await mk(true)({});
+  assert.deepStrictEqual(seq, ['resume'], '這一件還沒做完就先去做下一件了');
+  seq.length = 0;
+  await mk(false)({});
+  assert.deepStrictEqual(seq, ['resume', 'task'], '沒得續了卻不去做下一件');
+  console.log('ok   任務佇列（分隔線只認整行、按停止整串清掉、做完一件才送下一件）');
+})();
+
 // ── 收尾複查：做到了沒，不由做的人自己說 ──────────────────
 {
   const src = script.slice(script.indexOf('async function reviewGate'),

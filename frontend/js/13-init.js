@@ -383,6 +383,12 @@ async function init() {
   $('queueDrop').addEventListener('click', function () {
     S.queued = []; renderQueue(); toast('排隊的話取消了');
   });
+  $('taskDrop').addEventListener('click', function () {
+    const c = current();
+    if (c) { c.tasks = []; saveChats(); }
+    renderTasks(); toast('排著的任務清掉了');
+  });
+  $('taskGo').addEventListener('click', function () { nextTask(current()); });
   $('input').focus();
 
   // 給測試用

@@ -508,13 +508,13 @@ input[type=range]::-moz-range-thumb{
 }
 #resumeBar[hidden]{display:none;}
 #resumeWhy{flex:1; min-width:0;}
-#queueBar{
+#queueBar,#taskBar{
   display:flex; align-items:center; gap:8px; margin-bottom:6px;
   padding:4px 6px 4px 9px; border:1px solid var(--accent); border-radius:8px;
   background:var(--ground); font-size:11.5px; color:var(--ink2);
 }
-#queueBar[hidden]{display:none;}
-#queueWhy{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+#queueBar[hidden],#taskBar[hidden]{display:none;}
+#queueWhy,#taskWhy{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 
 #ctxRow{display:flex; align-items:center; gap:8px; padding:1px 2px 5px;}
 #ctxTrack{flex:1; height:4px; border-radius:2px; background:var(--hover); overflow:hidden;}
