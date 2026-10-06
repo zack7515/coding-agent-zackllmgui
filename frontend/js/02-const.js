@@ -394,10 +394,11 @@ function roundsNote(depth) {
 // 外部 API 是另一回事：那裡的 token 是錢，而且是自動模式下沒人看著燒的。
 // 所以護欄留在有代價的那一邊，用 token 不用時鐘（時鐘跟花費沒有關係，
 // 等對方 API 排隊也是時間）。撞到不是結束，是停下來給一顆「繼續」。
+// 預設關：外部 API 模式也常接本機的 llama.cpp，按量計費的才需要勾。
 const OA_TOKEN_BUDGET = 150000;
 
 function budgetStop(run) {
-  if (!run || S.provider !== 'openai') return '';
+  if (!run || S.provider !== 'openai' || !S.oa.budget) return '';
   if (run.tokens > OA_TOKEN_BUDGET) {
     return '這一輪已經用掉 ' + fmtTokens(run.tokens)
       + ' tokens（外部 API 是按量計費的），先停下來讓你看一眼';

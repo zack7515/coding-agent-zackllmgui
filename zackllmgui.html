@@ -1061,6 +1061,7 @@ body.resizing, body.resizing *{cursor:col-resize !important; user-select:none !i
       <input id="oaBase" placeholder="https://api.openai.com/v1" spellcheck="false">
       <input id="oaKey" type="password" placeholder="API 金鑰" spellcheck="false" style="margin-top:8px;">
       <label class="check" style="margin-top:8px;"><input type="checkbox" id="oaTools">送出工具定義（讀檔、跑指令…）</label>
+      <label class="check" style="margin-top:4px;"><input type="checkbox" id="oaBudget">每用掉 15 萬 token 停下來讓我看一眼（按量計費的 API 才需要）</label>
     </div>
     <div class="dialog-row">
       <button class="primary" id="hostTest">測試連線</button>
@@ -1749,10 +1750,11 @@ function roundsNote(depth) {
 // 外部 API 是另一回事：那裡的 token 是錢，而且是自動模式下沒人看著燒的。
 // 所以護欄留在有代價的那一邊，用 token 不用時鐘（時鐘跟花費沒有關係，
 // 等對方 API 排隊也是時間）。撞到不是結束，是停下來給一顆「繼續」。
+// 預設關：外部 API 模式也常接本機的 llama.cpp，按量計費的才需要勾。
 const OA_TOKEN_BUDGET = 150000;
 
 function budgetStop(run) {
-  if (!run || S.provider !== 'openai') return '';
+  if (!run || S.provider !== 'openai' || !S.oa.budget) return '';
   if (run.tokens > OA_TOKEN_BUDGET) {
     return '這一輪已經用掉 ' + fmtTokens(run.tokens)
       + ' tokens（外部 API 是按量計費的），先停下來讓你看一眼';
@@ -7437,6 +7439,7 @@ function openHostDialog(pick) {
   $('oaBase').value = S.oa.base;
   $('oaKey').value = S.oa.key;
   $('oaTools').checked = !!S.oa.tools;
+  $('oaBudget').checked = !!S.oa.budget;
   $('hostResult').textContent = '';
   renderProvSeg(mode);
   $('hostOverlay').classList.remove('hidden');
@@ -7458,7 +7461,7 @@ async function testHost() {
   S.provider = dialogMode();
   S.host = normalizeHost($('hostInput').value);
   S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
-           tools: $('oaTools').checked };
+           tools: $('oaTools').checked, budget: $('oaBudget').checked };
   try {
     if (S.provider === 'openai') {
       const data = await oaJson('/models', null, 20000);
@@ -7976,7 +7979,7 @@ async function init() {
     S.provider = dialogMode();
     S.host = normalizeHost($('hostInput').value);
     S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
-             tools: $('oaTools').checked };
+             tools: $('oaTools').checked, budget: $('oaBudget').checked };
     S.caps = {};
     S.model = '';                       // 換了後端，舊模型名多半不存在
     $('hostOverlay').classList.add('hidden');

@@ -332,7 +332,7 @@ async function init() {
     S.provider = dialogMode();
     S.host = normalizeHost($('hostInput').value);
     S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
-             tools: $('oaTools').checked };
+             tools: $('oaTools').checked, budget: $('oaBudget').checked };
     S.caps = {};
     S.model = '';                       // 換了後端，舊模型名多半不存在
     $('hostOverlay').classList.add('hidden');

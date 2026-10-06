@@ -341,6 +341,7 @@ function openHostDialog(pick) {
   $('oaBase').value = S.oa.base;
   $('oaKey').value = S.oa.key;
   $('oaTools').checked = !!S.oa.tools;
+  $('oaBudget').checked = !!S.oa.budget;
   $('hostResult').textContent = '';
   renderProvSeg(mode);
   $('hostOverlay').classList.remove('hidden');
@@ -362,7 +363,7 @@ async function testHost() {
   S.provider = dialogMode();
   S.host = normalizeHost($('hostInput').value);
   S.oa = { base: normalizeBase($('oaBase').value), key: $('oaKey').value.trim(),
-           tools: $('oaTools').checked };
+           tools: $('oaTools').checked, budget: $('oaBudget').checked };
   try {
     if (S.provider === 'openai') {
       const data = await oaJson('/models', null, 20000);

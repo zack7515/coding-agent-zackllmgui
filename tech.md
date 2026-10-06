@@ -1515,7 +1515,7 @@ function isSrvPath(path) {
 
 #### 停下來 ≠ 結束
 
-輪數用完（`MAX_TOOL_ROUNDS`）、外部 API 燒太多 token（`OA_TOKEN_BUDGET`）——
+輪數用完（`MAX_TOOL_ROUNDS`）、外部 API 燒太多 token（`OA_TOKEN_BUDGET`，連線設定勾了 `S.oa.budget` 才算）——
 兩種都不是結束，是**停下來讓人看一眼**。原因記在 `c.stopWhy`，
 續跑條就會冒出來，按「繼續」重新算一段。
 
@@ -2468,7 +2468,7 @@ code block 也換成乾淨的 `<pre><code>` —— 介面版帶著複製按鈕�
 | **背景指令沒有 `GET /job/{id}` 串流** | 看不到即時輸出，只能整段收 | 收結果走既有的 `/tool`，因為 `check_job` 是工具不是路由。要即時看再補一條 SSE |
 | **`check_job` 用輪詢 `time.sleep(0.2)` 等**（[serve.py](serve.py) `BG_WAIT`） | 一條指令佔住一條 HTTP 執行緒 | `ThreadingHTTPServer` 一條指令一條執行緒，上限 `BG_MAX = 8`。要更省就換 `threading.Event` |
 | **focus chain 靠 mtime 判斷「誰改的」**（[serve.py](serve.py) `Session.todo_mtime`） | 同一秒內連改兩次可能漏掉一次 | 人手動編輯不會有這種頻率。真的要準就存內容的 hash |
-| **外部 API 的預算是寫死的常數**（[02-const.js](frontend/js/02-const.js) `OA_TOKEN_BUDGET`） | 使用者改不了，而且是 token 數不是金額 | 撞到只是停下來給一顆「繼續」，不是失敗。要換算成錢得維護一張各家價目表，那個會過期得比程式碼快 |
+| **外部 API 的預算是寫死的常數**（[02-const.js](frontend/js/02-const.js) `OA_TOKEN_BUDGET`） | 只能開關、改不了數字，而且是 token 數不是金額；預設關 | 撞到只是停下來給一顆「繼續」，不是失敗。要換算成錢得維護一張各家價目表，那個會過期得比程式碼快 |
 | **背景先算的摘要一次只留一份**（`S.pre`） | 切對話就作廢 | 多留幾份要處理「哪一份對得上現在的訊息」，那個判斷比省下來的時間貴 |
 | **「＋資料夾」只會建，不會改名或刪除**（[serve.py](serve.py) `make_dir`） | 整理專案還是得回終端機 | 建資料夾是唯一「非做不可、而模型的 `write_file` 補不上」的那一個（它只補得出檔案的父層）。改名與刪除有還原點的問題要先想清楚 |
 | **「這則對話累計」只算跑過工具的那幾輪**（[02-const.js](frontend/js/02-const.js) `chatTotals`） | 純聊天的時間不計入 | 數字來自訊息上的 `turn`，而 `markTurnDone()` 只在有工具輪數時才記。要連純聊天一起算就得每一則都存一筆，那一行的意義也會變成別的東西 |

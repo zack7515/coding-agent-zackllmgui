@@ -1633,7 +1633,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     ${grab('fmtTokens')}
     ${grab('roundsNote')}
     ${grab('budgetStop')}
-    const S = { provider: 'ollama' };
+    const S = { provider: 'ollama', oa: {} };
     const performance = { now: () => nowMs };
     let nowMs = 0;
     return { roundsNote, budgetStop, MAX_TOOL_ROUNDS, ROUNDS_WARN, OA_TOKEN_BUDGET, S,
@@ -1658,6 +1658,9 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual(longRun.budgetStop(huge), '',
     '本機模式不該有預算 —— 目的就是放著讓它跑完，不是跑一半等人按繼續');
   longRun.S.provider = 'openai';
+  assert.strictEqual(longRun.budgetStop(huge), '',
+    '沒勾上限就不該停 —— 外部 API 模式也常接本機的 llama.cpp');
+  longRun.S.oa.budget = true;
   assert.strictEqual(longRun.budgetStop({ t0: 0, tokens: 0 }), '');
   assert.ok(/tokens/.test(longRun.budgetStop(huge)), '外部 API 燒太多沒有停');
   assert.ok(/計費|錢/.test(longRun.budgetStop(huge)), '要說得出為什麼只有這邊擋');
@@ -1665,7 +1668,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   longRun.S.provider = 'ollama';
   // 時鐘不該再出現在停下來的理由裡
   assert.ok(!/TURN_TIME_BUDGET/.test(script), '時間預算沒有清乾淨');
-  console.log('ok   預算只擋外部 API（本機放著跑）');
+  console.log('ok   預算只擋勾了上限的外部 API（本機放著跑）');
 
   // 撞到上限不能只丟一句 toast 就沒了：要留得下「怎麼接回去」
   assert.ok(/c\.stopWhy = over/.test(script), 'runTools 撞到上限沒有記下原因');
