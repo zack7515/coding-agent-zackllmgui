@@ -1304,6 +1304,10 @@ def agent_rules() -> str:
             r.append(f"- （還有 {len(usable) - SKILL_LIST_MAX} 個沒列出來，"
                      "用 load_skill 指名還是叫得到）")
 
+    # 不講的話模型只會回「讀不到路徑」，使用者會去查權限而不是去選資料夾
+    if cur().ws is None:
+        r.append("- 目前沒有選工作區，你看不到使用者的任何檔案。被要求看專案時，"
+                 "直接請使用者先在介面上選專案資料夾，不要猜內容。")
     name, text = project_md()
     if text:
         r.append(f"\n## 專案說明（來自 {name}，優先於上面的通則）\n{text}")

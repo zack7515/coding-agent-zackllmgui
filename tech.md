@@ -2501,7 +2501,7 @@ plan-agent 那些要決定做不做。混在一起的話，看的人會把「先
 ## 測試
 
 ```bash
-python tests/test_serve.py   # 122 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
+python tests/test_serve.py   # 123 項：工具閘門、工作區逃逸、指令風險、串流、背景指令、git、MCP、
                              #        多分頁隔離、子代理白名單與連根中斷、還原點改名、＋資料夾
 python tests/test_core.py    # 13 項：core/ 模組介面、系統用量、容器引擎健康檢查與工作區邊界
 node tests/test_gui.js       # 83 項：腳本可解析、token 估算、參數上限、$(id) 接線、長時間自動執行、

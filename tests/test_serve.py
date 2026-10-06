@@ -3486,6 +3486,19 @@ def test_remember_needs_a_workspace_and_counts_as_read_only():
         pass
 
 
+def test_no_workspace_is_said_out_loud():
+    """沒選工作區時要讓模型知道，否則它只會回「讀不到路徑」。選了就不該再出現。"""
+    serve.ALLOW_TOOLS = True
+    try:
+        serve.cur().ws = None
+        assert "沒有選工作區" in serve.agent_rules()
+        assert "list_dir" not in serve.agent_rules()   # 沒開的工具一個字都不提
+    finally:
+        serve.ALLOW_TOOLS = False
+    with Workspace():
+        assert "沒有選工作區" not in serve.agent_rules()
+
+
 def _hooks_file(ws: Path, rows: list) -> None:
     (ws / rules.HOOKS_FILE).write_text(
         json.dumps({"hooks": rows}, ensure_ascii=False), encoding="utf-8")

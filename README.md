@@ -321,7 +321,7 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 122 項
+python tests/test_serve.py    # 後端 123 項
 python tests/test_core.py     # core/ 各模組的介面 13 項
 node   tests/test_gui.js      # 網頁 83 項
 ```

@@ -1365,7 +1365,7 @@ ollamaGUI/
 │       └── 13-init.js        接線與啟動
 │
 ├── tests/                自我檢查（Python 兩支無額外相依；網頁測試需要 Node.js）
-│   ├── test_serve.py       後端 122 項： python tests/test_serve.py
+│   ├── test_serve.py       後端 123 項： python tests/test_serve.py
 │   ├── test_core.py        核心模組 13 項： python tests/test_core.py
 │   ├── test_gui.js         網頁 83 項： node tests/test_gui.js
 │   ├── test_agent.py       端到端試跑工具呼叫（需要 Ollama）
