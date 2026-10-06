@@ -25,6 +25,30 @@ python -m sandbox --json
 
 挑選順序寫在 `__init__.py` 的 `BACKENDS`：**核心層優先、容器墊底**。
 
+### Ubuntu 24.04：bwrap 裝了卻開不起來
+
+Ubuntu 23.10 起 AppArmor 預設擋沒有權限的 user namespace，bwrap 會報
+`loopback: Failed RTM_NEWADDR` 或 `setting up uid map: Permission denied`。
+從 VS Code 的終端機啟動會正常（它自帶放行的 profile），從一般終端機啟動就不行。
+`bwrap.available()` 會真的開一次來判斷，開不起來就不算可用，自動挑選會退到容器。
+
+要用 bwrap 的話，幫它加一份 profile：
+
+```bash
+sudo tee /etc/apparmor.d/bwrap <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+這只放行 `/usr/bin/bwrap` 建 namespace，其他程式照樣被擋。加完不用重開 `serve.py`。
+
 Windows 11 的實測環境是 Python 3.12.7、Docker 28.1.1、NVIDIA RTX 3080。
 `python -m sandbox` 的 8 項探測全部通過：容器啟動、工作區讀寫、一次性 rootfs、
 憑證隔離、斷網、C/C++ 工具鏈紀錄與 GPU 可見性；三種短指令量到約 0.5–0.6 秒容器開銷。

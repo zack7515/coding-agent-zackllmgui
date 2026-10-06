@@ -16,6 +16,7 @@ import glob
 import os
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,14 +39,40 @@ HIDE = ("~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker",
         "~/.config/gcloud", "~/.config/gh", "~/.azure")
 
 
+# 裝了不等於開得起來：Ubuntu 24.04 起 AppArmor 預設擋 user namespace，
+# 只看 which 的話沙盒照樣打開，然後每一條指令都失敗。
+_HEALTH = {"ok": "", "err": ""}
+
+
+def _probe(exe: str) -> str:
+    """真的開一次，回傳錯誤訊息；開得起來就是空字串。成功才快取，修好了不必重開。"""
+    if _HEALTH["ok"] == exe:
+        return ""
+    try:
+        proc = subprocess.run([exe, "--ro-bind", "/", "/", "--unshare-net", "true"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+        err = "" if proc.returncode == 0 else (
+            proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}")
+    except Exception as e:
+        err = str(e)
+    _HEALTH.update(ok="" if err else exe, err=err)
+    return err
+
+
 def available() -> str:
-    return shutil.which("bwrap") or "" if sys.platform.startswith("linux") else ""
+    exe = shutil.which("bwrap") or "" if sys.platform.startswith("linux") else ""
+    return exe if exe and not _probe(exe) else ""
 
 
 def why() -> str:
     if not sys.platform.startswith("linux"):
         return "bubblewrap 只有 Linux 有"
-    return "" if available() else "沒有裝 bubblewrap（sudo apt install bubblewrap）"
+    if not shutil.which("bwrap"):
+        return "沒有裝 bubblewrap（sudo apt install bubblewrap）"
+    if available():
+        return ""
+    return (f"bubblewrap 裝了但開不起來（{_HEALTH['err']}）。"
+            "多半是 AppArmor 擋了 user namespace，修法見 sandbox/README.md")
 
 
 # 各家 GPU 的裝置節點。只有 nvidia 那組實測過（RTX 4070 SUPER、

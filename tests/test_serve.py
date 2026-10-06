@@ -2303,6 +2303,31 @@ def test_container_health_check_is_cached():
         sb.container._HEALTH.update(keep)
 
 
+def test_bwrap_installed_but_blocked():
+    """Ubuntu 24.04 的 AppArmor 擋 user namespace 時，bwrap 裝了也不能算可用。
+
+    原本只看 which：介面讓人打開沙盒，然後每一條指令都回 RTM_NEWADDR。
+    """
+    import sandbox.bwrap as bw
+    keep = dict(bw._HEALTH)
+    bad = mock.Mock(returncode=1, stderr=b"bwrap: loopback: Failed RTM_NEWADDR")
+    try:
+        bw._HEALTH.update(ok="", err="")
+        with mock.patch("sys.platform", "linux"), \
+             mock.patch("shutil.which", return_value="/usr/bin/bwrap"), \
+             mock.patch("subprocess.run", return_value=bad) as run:
+            assert bw.available() == ""
+            assert "RTM_NEWADDR" in bw.why() and "AppArmor" in bw.why(), bw.why()
+            # 修好之後不必重開 serve.py：失敗不快取，成功才快取
+            run.return_value = mock.Mock(returncode=0, stderr=b"")
+            assert bw.available() == "/usr/bin/bwrap"
+            n = run.call_count
+            bw.available()
+            assert run.call_count == n, "開得起來之後還每次都試一遍"
+    finally:
+        bw._HEALTH.update(keep)
+
+
 @mock.patch("sandbox.bwrap.available", return_value="bwrap")
 @mock.patch("sandbox.container.runtime", return_value="docker")
 @mock.patch("sandbox.container.available", return_value="docker")
