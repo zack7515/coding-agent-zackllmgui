@@ -614,9 +614,9 @@ def rg_rows(pattern: str):
 def search_scope(glob: str):
     """glob 指名落地目錄時要掃的檔案，其餘回 None。點開頭的目錄 ws_walk 跟 rg 都不進去，
     平常也不該進去（舊的輸出會混進搜尋結果），所以只在指名時開門。"""
-    if not glob.removeprefix("./").startswith(OUT_DIR + "/"):
+    if not glob.startswith(OUT_DIR + "/"):
         return None
-    d = ws_root() / OUT_DIR
+    d = ws_root().resolve() / OUT_DIR
     return sorted(d.glob("*.txt")) if d.is_dir() else []
 
 
@@ -626,6 +626,10 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
     **只給 glob 不給 pattern＝照檔名找檔案。** 沒有這個的話「測試檔在哪」
     要走三四輪 list_dir，而每一輪都要模型重吃一次整份 context。
     """
+    # 模型常給 null 或在前面加 ./ —— 兩種都要當成一樣的東西，不然 glob_ok 一個都對不上
+    glob = str(glob or "")
+    if glob.startswith("./"):
+        glob = glob[2:]
     if not pattern:
         if not glob:
             raise ValueError("要給 pattern（找內容）或 glob（找檔名），至少一個")
@@ -659,6 +663,10 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
         return "\n".join(hits) if hits else f"沒有找到「{pattern}」"
     for f in ws_walk() if scope is None else scope:
         if not glob_ok(f, glob):
+            continue
+        try:
+            ws_path(ws_rel(f))       # symlink 指到外面或指到 .env：跟 rg 那條一樣在這裡擋
+        except PermissionError:
             continue
         try:
             if f.stat().st_size > (MAX_FILE_BYTES if scope is None else MAX_UPLOAD):
@@ -1891,8 +1899,10 @@ def spill(out: str, tool: str):
         git_exclude(ws_root(), OUT_DIR + "/")
         name = f"{tool}-{time.strftime('%H%M%S')}-{os.urandom(2).hex()}.txt"
         (d / name).write_text(out, encoding="utf-8", errors="replace")
-        # 留最近幾份就好。這是暫存不是日誌，長在使用者的專案裡更不該無限長
-        for old in sorted(d.glob("*.txt"), key=lambda x: x.stat().st_mtime)[:-OUT_KEEP]:
+        # 留最近幾份就好。這是暫存不是日誌，長在使用者的專案裡更不該無限長。
+        # 使用者的輸入跟工具輸出分開算：一輪跑出二十份 log 不該把任務原文擠掉
+        same = [x for x in d.glob("*.txt") if x.name.startswith("input-") == (tool == "input")]
+        for old in sorted(same, key=lambda x: x.stat().st_mtime)[:-OUT_KEEP]:
             old.unlink()
     except OSError:
         return None

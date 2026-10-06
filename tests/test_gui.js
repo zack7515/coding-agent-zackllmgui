@@ -577,7 +577,8 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 (function () {
   const mk = (limit, cap) => new Function(`
     const S = { model: 'm', ctxMax: ${JSON.stringify(cap ? { m: cap } : {})} };
-    const ctxLimit = () => ${limit};
+    const ctxFilled = () => ${limit};
+    const ctxLimit = () => Math.min(${limit}, ${cap || 'Infinity'});
     ${grab('fmtK')}
     ${grab('emptyReplyNote')}
     return emptyReplyNote;
@@ -2096,21 +2097,52 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
 // ── /clear 與塞不下的第一則 ────────────────────────────────
 {
   const noop = function () { };
-  const c = { messages: [{ role: 'user', content: '舊的' }], tasks: ['下一件'] };
-  new Function('S', 'current', 'saveChats', 'renderThread', 'updateCtx', 'toast',
-               grab('clearChat') + '\nreturn clearChat;')(
-    { streaming: false }, function () { return c; }, noop, noop, noop, noop)();
+  const RUNNING_HINT = 'r', REVIEW_HINT = 'v', COMPACT_HINT = 'c';
+  const mk = function (S, c) {
+    return new Function('S', 'current', 'saveChats', 'renderThread', 'updateCtx', 'toast',
+                        'renderCompactBtns', 'RUNNING_HINT', 'REVIEW_HINT', 'COMPACT_HINT',
+                        grab('turnBusy') + grab('fullHistory') + grab('clearChat') + grab('uncompact')
+                        + '\nreturn { clear: clearChat, undo: uncompact };')(
+      S, function () { return c; }, noop, noop, noop, noop, noop,
+      RUNNING_HINT, REVIEW_HINT, COMPACT_HINT);
+  };
+  const S = { streaming: false, blocked: '', pre: { id: 'A', n: 3 } };
+  const c = { id: 'A', messages: [{ role: 'user', content: '舊的' }], tasks: ['下一件'],
+              stopWhy: '輪數用完', lastCkpt: 'ck1' };
+  const f = mk(S, c);
+
+  // 跑工具、複查、壓縮的時候 S.streaming 都是 false，只看它會在半路把對話抽掉
+  for (const b of [RUNNING_HINT, REVIEW_HINT, COMPACT_HINT]) {
+    S.blocked = b;
+    f.clear();
+    assert.strictEqual(c.messages.length, 1, '忙的時候（' + b + '）還是清掉了');
+  }
+  S.blocked = '';
+  f.clear();
   assert.deepStrictEqual(c.messages, [], '沒清掉');
   assert.deepStrictEqual(c.tasks, [], '清空了卻還留著排隊的任務，下一輪會自己送出去');
-  assert.strictEqual(c.preCompact[0].content, '舊的', '清掉的沒留一份，按錯就拿不回來');
+  assert.strictEqual(S.pre, null, '背景算的是清掉那段的摘要，留著會拿來換掉新的訊息');
+  assert.ok(!c.stopWhy && !c.lastCkpt, '上一段的「繼續」與還原點還掛著');
+
+  // 清空之後又說了幾輪，還原要兩邊都在，不能把新的吃掉
+  c.messages.push({ role: 'user', content: '新的' });
+  f.undo();
+  assert.deepStrictEqual(c.messages.map(function (m) { return m.content; }), ['舊的', '新的']);
+  assert.ok(!c.preCompact && c.preCompactN === undefined);
+  assert.ok(/fullHistory\(c\)/.test(grab('compactChat')) && /preCompactN = 1 \+ tail\.length/
+    .test(grab('compactChat')), '清空之後再壓縮會蓋掉清空前的那份');
+  // 新對話與 /clear 之後畫面是空的，renderThread 提早 return —— 那幾條列得在那之前收
+  const rt = grab('renderThread');
+  assert.ok(rt.indexOf('renderTasks()') < rt.indexOf('return;'), '空對話時任務列、繼續列收不掉');
 }
 
 (async function () {
-  const mk = function (ready, fetched) {
-    const S = { ctxRatio: 1, ctxMax: { m: 1000 }, model: 'm', ws: { path: ready ? '/p' : '' } };
+  const mk = function (ready, fetched, limit) {
+    const S = { ctxRatio: 1, model: 'm', ws: { path: ready ? '/p' : '' } };
     return new Function('S', 'ctxLimit', 'toolsReady', 'toast', 'fetch', 'apiUrl',
-                        grab('estTokens') + grab('fmtK') + grab('fitInput') + '\nreturn fitInput;')(
-      S, function () { return 65536; }, function () { return ready; }, function () { },
+                        grab('estTokens') + grab('fmtK') + grab('oversize') + grab('fitInput')
+                        + '\nreturn fitInput;')(
+      S, function () { return limit || 1000; }, function () { return ready; }, function () { },
       async function (url, init) {
         fetched.push(JSON.parse(init.body).text);
         return { ok: true, json: async function () { return { path: '.zackllmgui-out/input-1.txt', lines: 3 }; } };
@@ -2121,7 +2153,6 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual(await mk(true, fetched)(small), true);
   assert.strictEqual(small.content, '短的', '塞得下的也被改寫了');
 
-  // num_ctx 填 64K，伺服器只開 1000：要照小的那個量
   const big = { role: 'user', content: '幫我整理\n' + 'x'.repeat(8000) + '\n重點是最後這句' };
   assert.strictEqual(await mk(false, fetched)(Object.assign({}, big)), false,
     '沒有工作區還照送，伺服器會截掉開頭或整個退回');
@@ -2133,11 +2164,21 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(msg.content.indexOf('.zackllmgui-out/input-1.txt') >= 0, '沒告訴模型全文在哪');
   assert.ok(msg.content.indexOf('幫我整理') >= 0 && msg.content.indexOf('重點是最後這句') >= 0,
     '頭尾要留：問題可能在最前面，也可能在最後面');
-  assert.ok(msg.content.length < 5000);
   assert.strictEqual(msg.text, big.content, '泡泡要顯示原文，不是那段說明');
-  assert.ok(/fitInput\(msg\)[\s\S]*c\.messages\.push\(msg\)/.test(grab('send')),
+
+  // 上限小的時候頭尾跟著縮：換上去的那則不能比原文還大、也不能自己就塞不下
+  const cjk = { role: 'user', content: '字'.repeat(3000) };
+  assert.strictEqual(await mk(true, fetched, 4096)(cjk), true);
+  assert.ok(cjk.content.length < 1500, '換上去的那則還是太大：' + cjk.content.length);
+
+  const send = grab('send');
+  assert.ok(/fitInput\(msg\)[\s\S]*c\.messages\.push\(msg\)/.test(send),
     '量長度要在推進對話之前，被擋下來時輸入框才還在');
-  console.log('ok   /clear 留得住還原、塞不下的那則落地成檔案');
+  assert.ok(/if \(fitting\) return/.test(send), '存檔案那一下再按一次 Enter 會送兩次');
+  assert.ok(/current\(\) !== c/.test(send), '存檔案那一下切了對話，會送進看不見的那則');
+  assert.ok(/oversize\(text\)/.test(grab('submitFromInput')), '插話沒量長度，整份 log 會直接併進去');
+  assert.ok(/S\.ctxMax/.test(grab('ctxLimit')), '用量條、自動壓縮還在照 num_ctx 算');
+  console.log('ok   /clear 忙的時候不動、還原不吃新訊息；塞不下的那則落地成檔案');
 })();
 
 // ── 收尾複查：做到了沒，不由做的人自己說 ──────────────────

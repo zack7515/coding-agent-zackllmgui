@@ -118,7 +118,7 @@ function normalizeBase(v) {
   return v;
 }
 
-function oaTarget(path) { return normalizeBase(S.oa.base) + path; }
+function oaTarget(path) { return /^https?:/i.test(path) ? path : normalizeBase(S.oa.base) + path; }
 
 // 有 serve.py 就走 /ext 轉送（瀏覽器直接打 api.openai.com 會被 CORS 擋，
 // 而且金鑰只在本機之間傳）；直接開檔時只好自己打，成不成看對方給不給 CORS。
@@ -391,11 +391,19 @@ async function refreshModels(quiet) {
       if (seq !== S.probeSeq) return;
       S.models = (data.data || []).map(function (m) { return { name: m.id }; })
         .filter(function (m) { return m.name; }).sort(byModelName);
-      // llama.cpp 系的服務會在 meta 給伺服器實際開的 context；
-      // 不接的話這邊照 num_ctx 當 64K 在算，伺服器其實只開 32K
+      // 伺服器實際開的 context。不接的話這邊照 num_ctx 當 64K 在算，伺服器其實只開 32K。
+      // 有些服務直接放在 meta.n_ctx；llama-server 的 meta 只有 n_ctx_train（訓練長度，
+      // 不是實際開的），要問 /props。兩種都問不到就照 num_ctx。
       (data.data || []).forEach(function (m) {
         if (m.id && m.meta && m.meta.n_ctx) S.ctxMax[m.id] = m.meta.n_ctx;
       });
+      if (S.models.length && !S.ctxMax[S.models[0].name]) {
+        try {
+          const p = await oaJson(normalizeBase(S.oa.base).replace(/\/v1$/, '') + '/props', null, 5000);
+          const n = ((p || {}).default_generation_settings || {}).n_ctx;
+          if (n) S.models.forEach(function (m) { S.ctxMax[m.name] = n; });
+        } catch (e) { /* 不是 llama-server 就沒有這支 */ }
+      }
       S.version = 'OpenAI 相容';
     } else {
       const tags = await apiJson('/api/tags');

@@ -180,7 +180,10 @@ function ctxTokens(raw) {
   return isNaN(k) || k <= 0 ? 0 : Math.round(k * 1024);
 }
 
-function ctxLimit() { return ctxTokens($('num_ctx').value) || 4096; }
+// 實際能用的：num_ctx 跟模型／伺服器上限取小的。填多了 Ollama 默默用上限，
+// 外部服務則是截掉或退回 —— 用量條、自動壓縮、送出前的量測都要照真的那個算。
+function ctxLimit() { return Math.min(ctxFilled(), S.ctxMax[S.model] || Infinity); }
+function ctxFilled() { return ctxTokens($('num_ctx').value) || 4096; }   // 欄位上填的
 
 function updateCtx() {
   const limit = ctxLimit();
@@ -198,7 +201,7 @@ function updateCtx() {
   // num_ctx 比模型支援的還大時，多出來的部分是假的：Ollama 會默默用模型的上限。
   // 不自動改小（那等於偷改使用者填的數字），但一定要講。
   const cap = S.ctxMax[S.model] || 0;
-  const over = cap && limit > cap
+  const over = cap && ctxFilled() > cap
     ? ' · ' + (S.model || '這個模型') + ' 最多 ' + Math.round(cap / 1024) + 'K，多填的沒有用'
     : '';
   $('ctxText').textContent = S.ctxLabel +

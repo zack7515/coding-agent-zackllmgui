@@ -13,15 +13,33 @@ function newChat(focus) {
   if (S.tab === 'hist') loadHistory();       // 新對話還沒改過任何檔案
   if (focus !== false) $('input').focus();
 }
+// 一輪還沒結束：串流、跑工具（含確認卡）、收尾複查、壓縮。
+// 只看 S.streaming 不夠 —— 跑工具的時候它是 false，輸入框也開著。
+function turnBusy() {
+  return S.streaming || [RUNNING_HINT, REVIEW_HINT, COMPACT_HINT].indexOf(S.blocked) >= 0;
+}
+
+// 壓縮或清空之前的完整對話：舊的備份接上那之後新說的。
+// 還原用它，下一次壓縮也用它 —— 不然還原會吃掉新的幾輪，再壓一次會蓋掉舊備份。
+function fullHistory(c) {
+  if (!c.preCompact) return c.messages;
+  // 舊版存的沒有 preCompactN：照舊整份換回去
+  const n = c.preCompactN === undefined ? c.messages.length : c.preCompactN;
+  return c.preCompact.concat(c.messages.slice(n));
+}
+
 // 就地清空：工作區、模型、標題都留著，只有 context 歸零。
 // 清掉的放進 preCompact，跟壓縮共用同一個「還原」，按錯了拿得回來。
 function clearChat() {
-  if (S.streaming) { toast('正在產生回覆，等一下再清'); return; }
+  if (turnBusy()) { toast('這一輪還在跑，停下來或等它跑完再清'); return; }
   const c = current();
   if (!c || !c.messages.length) { toast('這個對話本來就是空的'); return; }
-  c.preCompact = c.messages;
+  c.preCompact = fullHistory(c);
+  c.preCompactN = 0;
   c.messages = [];
   c.tasks = [];
+  delete c.stopWhy; delete c.verifyFailed; delete c.lastCkpt;   // 上一段的，不能拿來退這一段
+  if (S.pre && S.pre.id === c.id) S.pre = null;   // 背景算的是清掉的那段，拿來壓新的會換錯
   saveChats();
   renderThread();
   updateCtx();
@@ -518,6 +536,11 @@ function renderThread() {
   t.innerHTML = '';
   const c = current();
   renderRunBar();             // 累計那一行是跟著對話走的，換一則就要換一個數字
+  // 這幾條要在下面提早 return 之前：新對話、/clear 之後也得收起上一則留下的列
+  renderCompactBtns();
+  renderResumeBar();          // 換對話、重整頁面之後也要看得到
+  renderQueue();
+  renderTasks();              // 換對話、重整頁面之後要看得到還排著幾件
   if (!c || !c.messages.length) {
     t.innerHTML = '<div class="empty">開始新的對話<br>在下方輸入訊息，按 Enter 送出</div>';
     return;
@@ -528,10 +551,6 @@ function renderThread() {
     else { const el = buildAssistantMsg(m, i); fillAssistant(el, m); t.appendChild(el); }
   });
   S.stick = true;
-  renderCompactBtns();
-  renderResumeBar();          // 換對話、重整頁面之後也要看得到
-  renderQueue();
-  renderTasks();              // 換對話、重整頁面之後要看得到還排著幾件
   pin();
 }
 
@@ -704,7 +723,7 @@ async function reviewGate(c) {
   }
   if (!diff.trim()) return '';
   S.run.reviewed = 1;
-  blockComposer('收尾複查中…');
+  blockComposer(REVIEW_HINT);
   let verdict = '';
   try {
     verdict = (await once(REVIEW_PROMPT + '## 使用者的要求\n\n' + ask
@@ -745,6 +764,13 @@ function submitFromInput() {
   const text = $('input').value.trim();
   if (S.streaming || S.blocked === RUNNING_HINT) {
     if (!text) return;
+    // 插話會原封不動併進這一輪，沒有落地那一步 —— 太大的留在輸入框等這一輪結束再送
+    const big = oversize(text);
+    if (big) {
+      toast('這段大約 ' + fmtK(big[0]) + '，插話塞不下。等這一輪跑完再按 Enter，'
+        + '送的時候會存成檔案讓模型分段讀');
+      return;
+    }
     queueMessage(text);
     $('input').value = '';
     autoGrow();
@@ -753,8 +779,11 @@ function submitFromInput() {
   send();
 }
 
+let fitting = false;          // 正在把太長的輸入存成檔案：這段時間再按 Enter 不算
+
 async function send() {
   if (S.streaming) { stopStream(); return; }
+  if (fitting) return;
   const text = $('input').value.trim();
   // 「連不上」放行 —— 讓重試迴圈去處理，它會顯示倒數也可以按停止放棄
   if (!text || (S.blocked && S.blocked !== CONN_HINT)) return;
@@ -773,7 +802,14 @@ async function send() {
     msg.files = S.files.map(function (f) { return f.name + ' · ' + f.text.length + ' 字'; });
   }
   if (S.images.length) msg.images = S.images.map(function (i) { return i.data; });
-  if (!(await fitInput(msg))) return;
+  fitting = true;
+  try {
+    if (!(await fitInput(msg))) return;
+  } finally {
+    fitting = false;
+  }
+  // 存檔案那一下人可能切去別則了：硬送會塞進看不見的那則，泡泡卻畫在眼前這則
+  if (current() !== c) { toast('換了對話，這則沒有送出（還在輸入框裡）'); return; }
   if (parts.length > 1) {
     c.tasks = (c.tasks || []).concat(parts.slice(1));
     renderTasks();
@@ -812,13 +848,20 @@ async function send() {
 
 // 一則訊息自己就超過 context 一半：壓縮救不了（沒有更早的可以收），照送會被
 // 伺服器截掉開頭或整個退回。有工作區就落地成檔案讓模型分段讀，沒有就別送。
+// 這段一則就吃掉 context 一半以上？是的話回 [估計, 上限]，塞得下回 null。
+// ponytail: 一半是估的，系統提示、工具定義、回覆跟後面幾輪工具結果都要位子
+function oversize(text) {
+  const limit = ctxLimit();
+  const need = Math.round(estTokens(text) * S.ctxRatio);
+  return need > limit / 2 ? [need, limit] : null;
+}
+
 async function fitInput(msg) {
-  const limit = Math.min(ctxLimit(), S.ctxMax[S.model] || Infinity);
-  const need = Math.round(estTokens(msg.content) * S.ctxRatio);
-  // ponytail: 一半是估的，系統提示、工具定義、回覆跟後面幾輪工具結果都要位子
-  if (need <= limit / 2) return true;
+  const big = oversize(msg.content);
+  if (!big) return true;
+  const limit = big[1];
   if (!toolsReady() || !S.ws.path) {
-    toast('這則大約 ' + fmtK(need) + '，context 只有 ' + fmtK(limit) + '，送不進去。'
+    toast('這則大約 ' + fmtK(big[0]) + '，context 只有 ' + fmtK(limit) + '，送不進去。'
       + '開了工作區與工具會自動存成檔案讓模型分段讀；不然請拆開送，或調大 num_ctx');
     return false;
   }
@@ -831,10 +874,12 @@ async function fitInput(msg) {
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     const all = msg.content;
     if (msg.text === undefined) msg.text = all;           // 泡泡照樣顯示原文
-    // 頭尾都留：問題可能寫在最前面，也可能接在貼上的內容後面
+    // 頭尾都留：問題可能寫在最前面，也可能接在貼上的內容後面。
+    // 各留多少跟著上限縮（加起來不到四分之一），也不超過原文的一半 —— 不然會重疊
+    const keep = Math.min(2000, Math.floor(limit / 8), Math.floor(all.length / 4));
     msg.content = '（這則太長，塞不進 context。全文存在 ' + data.path + '，共 ' + data.lines
       + ' 行。用 search_files（glob 填這個路徑）找關鍵字、或 read_file 一段一段讀，不要整份讀進來。）\n\n'
-      + all.slice(0, 2000) + '\n\n…（中間省略）…\n\n' + all.slice(-2000);
+      + all.slice(0, keep) + '\n\n…（中間省略）…\n\n' + all.slice(-keep);
     toast('這則太長，存成 ' + data.path + ' 讓模型分段讀');
     return true;
   } catch (e) {
@@ -1269,7 +1314,7 @@ function emptyReplyNote(done) {
       + '調大 num_ctx，或用壓縮鍵把較早的訊息收成摘要。');
   }
   const cap = S.ctxMax[S.model] || 0;
-  if (cap && limit > cap) {
+  if (cap && ctxFilled() > cap) {
     bits.push('另外 num_ctx 填的比 ' + S.model + ' 支援的還大（最多 '
       + fmtK(cap) + '），多填的部分沒有作用。');
   }
@@ -1474,12 +1519,13 @@ async function compactChat() {
 
   const before = head.reduce(function (n, m) { return n + estTokens(m.content); }, 0);
 
-  blockComposer('壓縮中…');
+  blockComposer(COMPACT_HINT);
   if (!pre) toast('壓縮中，長對話可能要等一下…');
   try {
     const summary = (await (pre ? pre.p : once(COMPACT_PROMPT + transcriptOf(head)))).trim();
     if (!summary) throw new Error('模型沒有回傳內容');
-    c.preCompact = c.messages;              // 留一步可還原，摘要不理想時不會全毀
+    c.preCompact = fullHistory(c);          // 留一步可還原，摘要不理想時不會全毀
+    c.preCompactN = 1 + tail.length;        // 前面這幾則是替身，之後新說的接在後面
     c.messages = [{
       role: 'user', compacted: head.length,
       text: '（已壓縮先前 ' + head.length + ' 則訊息為摘要）',
@@ -1504,8 +1550,9 @@ async function compactChat() {
 function uncompact() {
   const c = current();
   if (!c.preCompact) { toast('沒有可以還原的壓縮或清空'); return; }
-  c.messages = c.preCompact;
+  c.messages = fullHistory(c);         // 壓縮或清空之後新說的幾輪也要留著
   delete c.preCompact;
+  delete c.preCompactN;
   saveChats();
   renderThread();
   updateCtx();

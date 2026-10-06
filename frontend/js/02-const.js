@@ -170,6 +170,8 @@ const WRITE_TOOLS = ['write_file', 'edit_file', 'delete_file'];
 // blockComposer 也用在「尚未連線」「沒有可用模型」，那兩種情況排隊沒有意義
 // （沒有東西會來收），所以認的是這一句而不是「有沒有被 block」。
 const RUNNING_HINT = '跑到一半也可以打字，Enter 會排隊，這一輪跑完就送出';
+const REVIEW_HINT = '收尾複查中…';
+const COMPACT_HINT = '壓縮中…';
 
 // 一輪跑完留在對話裡的那一行。per-message 的統計看不出這個 —— 那裡寫的是
 // 「這一次呼叫模型花了幾秒」，一輪十幾次呼叫加上工具時間是另一個數字。

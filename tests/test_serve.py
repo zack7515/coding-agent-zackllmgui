@@ -3442,14 +3442,6 @@ def test_agent_trace_finds_the_root():
                 serve.cur().agents.pop(i, None)
 
 
-if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for t in tests:
-        t()
-        print("ok  ", t.__name__)
-    print(f"\n{len(tests)} 項全過")
-
-
 def test_remember_survives_into_the_next_conversation():
     """記下來的東西要進系統提示，重複的不記第二次，多了丟最舊的。"""
     with Workspace() as ws:
@@ -3539,6 +3531,32 @@ def test_spilled_file_is_searchable_and_readable_in_pieces():
         except ValueError as e:
             assert "start/end" in str(e)
 
+        # 模型常給的兩種寫法：前面多一個 ./、選填參數填 null
+        assert "pool exhausted" in serve.run_tool(
+            "search_files", {"pattern": "ERROR", "glob": "./" + path})
+        assert "沒有找到" in serve.run_tool("search_files", {"pattern": "nope", "glob": None})
+
+
+def test_spill_dir_cannot_be_used_to_reach_outside():
+    """落地目錄裡放一個 symlink 指到 .env，搜尋不能把內容帶回來。"""
+    with Workspace() as ws:
+        d = ws / serve.OUT_DIR
+        d.mkdir()
+        (d / "k.txt").symlink_to(ws / ".env")
+        out = serve.run_tool("search_files", {"pattern": "TOKEN", "glob": serve.OUT_DIR + "/k.txt"})
+        assert "abc" not in out, out
+
+
+def test_tool_output_does_not_push_out_the_users_input():
+    """使用者的原文跟工具輸出分開輪替：跑出一堆 log 之後，原文還在。"""
+    with Workspace():
+        keep = serve.spill("任務原文", "input")
+        for i in range(serve.OUT_KEEP + 3):
+            serve.spill(f"log {i}", "run_shell")
+        assert "任務原文" in serve.run_tool("read_file", {"path": keep})
+        outs = list((serve.ws_root() / serve.OUT_DIR).glob("run_shell-*.txt"))
+        assert len(outs) == serve.OUT_KEEP, "工具輸出不輪替就會一直長"
+
 
 def _hooks_file(ws: Path, rows: list) -> None:
     (ws / rules.HOOKS_FILE).write_text(
@@ -3608,3 +3626,11 @@ def test_its_own_scratch_stays_out_of_git_status():
         serve.cur().write = False
         serve.ALLOW_TOOLS = False
         shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print("ok  ", t.__name__)
+    print(f"\n{len(tests)} 項全過")
