@@ -13,6 +13,20 @@ function newChat(focus) {
   if (S.tab === 'hist') loadHistory();       // 新對話還沒改過任何檔案
   if (focus !== false) $('input').focus();
 }
+// 就地清空：工作區、模型、標題都留著，只有 context 歸零。
+// 清掉的放進 preCompact，跟壓縮共用同一個「還原」，按錯了拿得回來。
+function clearChat() {
+  if (S.streaming) { toast('正在產生回覆，等一下再清'); return; }
+  const c = current();
+  if (!c || !c.messages.length) { toast('這個對話本來就是空的'); return; }
+  c.preCompact = c.messages;
+  c.messages = [];
+  c.tasks = [];
+  saveChats();
+  renderThread();
+  updateCtx();
+  toast('清空了。要拿回來：⋯ → 還原');
+}
 function autoTitle(c) {
   if (c.renamed) return;                 // 使用者取過名字就不要再蓋掉
   for (let i = 0; i < c.messages.length; i++) {
@@ -750,11 +764,6 @@ async function send() {
   // 單獨一行 --- 隔開就是一串任務：第一件現在送，其餘的排隊
   const parts = splitTasks(text);
   const first = parts[0] || text;
-  if (parts.length > 1) {
-    c.tasks = (c.tasks || []).concat(parts.slice(1));
-    renderTasks();
-    toast('排了 ' + parts.length + ' 件，前一件做完才送下一件');
-  }
   const msg = { role: 'user', content: first };
   if (S.files.length) {
     // 檔案內容放前面、問題放後面，模型比較不會忘記問題是什麼
@@ -764,6 +773,12 @@ async function send() {
     msg.files = S.files.map(function (f) { return f.name + ' · ' + f.text.length + ' 字'; });
   }
   if (S.images.length) msg.images = S.images.map(function (i) { return i.data; });
+  if (!(await fitInput(msg))) return;
+  if (parts.length > 1) {
+    c.tasks = (c.tasks || []).concat(parts.slice(1));
+    renderTasks();
+    toast('排了 ' + parts.length + ' 件，前一件做完才送下一件');
+  }
 
   // 空白提示還在的話得整個重畫（那次重畫已經包含剛推進去的訊息），
   // 否則只要接一則上去就好——兩邊都做會讓第一則訊息出現兩次。
@@ -793,6 +808,39 @@ async function send() {
   await checkpoint(first);
   await runStream(c);
   finishTurn();
+}
+
+// 一則訊息自己就超過 context 一半：壓縮救不了（沒有更早的可以收），照送會被
+// 伺服器截掉開頭或整個退回。有工作區就落地成檔案讓模型分段讀，沒有就別送。
+async function fitInput(msg) {
+  const limit = Math.min(ctxLimit(), S.ctxMax[S.model] || Infinity);
+  const need = Math.round(estTokens(msg.content) * S.ctxRatio);
+  // ponytail: 一半是估的，系統提示、工具定義、回覆跟後面幾輪工具結果都要位子
+  if (need <= limit / 2) return true;
+  if (!toolsReady() || !S.ws.path) {
+    toast('這則大約 ' + fmtK(need) + '，context 只有 ' + fmtK(limit) + '，送不進去。'
+      + '開了工作區與工具會自動存成檔案讓模型分段讀；不然請拆開送，或調大 num_ctx');
+    return false;
+  }
+  try {
+    const res = await fetch(apiUrl('/spill'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: msg.content })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    const all = msg.content;
+    if (msg.text === undefined) msg.text = all;           // 泡泡照樣顯示原文
+    // 頭尾都留：問題可能寫在最前面，也可能接在貼上的內容後面
+    msg.content = '（這則太長，塞不進 context。全文存在 ' + data.path + '，共 ' + data.lines
+      + ' 行。用 search_files（glob 填這個路徑）找關鍵字、或 read_file 一段一段讀，不要整份讀進來。）\n\n'
+      + all.slice(0, 2000) + '\n\n…（中間省略）…\n\n' + all.slice(-2000);
+    toast('這則太長，存成 ' + data.path + ' 讓模型分段讀');
+    return true;
+  } catch (e) {
+    toast('這則太長，存成檔案也失敗了：' + e.message);
+    return false;
+  }
 }
 
 // 每則提示先照一張相：一輪一個還原點，退得掉 run_shell 改的東西。
@@ -1455,14 +1503,14 @@ async function compactChat() {
 
 function uncompact() {
   const c = current();
-  if (!c.preCompact) { toast('沒有可以還原的壓縮'); return; }
+  if (!c.preCompact) { toast('沒有可以還原的壓縮或清空'); return; }
   c.messages = c.preCompact;
   delete c.preCompact;
   saveChats();
   renderThread();
   updateCtx();
   renderCompactBtns();
-  toast('已還原壓縮前的對話');
+  toast('已還原');
 }
 
 function renderCompactBtns() {

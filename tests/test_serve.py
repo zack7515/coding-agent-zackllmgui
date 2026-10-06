@@ -3499,6 +3499,47 @@ def test_no_workspace_is_said_out_loud():
         assert "沒有選工作區" not in serve.agent_rules()
 
 
+def test_spill_lands_long_input_where_read_file_can_reach():
+    """塞不下的那一則存進工作區，回來的路徑 read_file 讀得到。沒開工具或沒工作區就不寫。"""
+    server = serve.build_server("http://localhost:11434", "127.0.0.1", 0)
+    url = "http://127.0.0.1:%d/spill" % server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    body = json.dumps({"text": "第一行\n第二行\n第三行"}).encode()
+    hdr = {"Content-Type": "application/json"}
+    try:
+        assert post(url, body, hdr)[0] == 403
+        with Workspace():
+            status, data = post(url, body, hdr)
+            assert status == 200 and data["lines"] == 3
+            assert "第二行" in serve.run_tool("read_file", {"path": data["path"]})
+        serve.ALLOW_TOOLS = True
+        try:
+            assert post(url, body, hdr)[0] == 400
+        finally:
+            serve.ALLOW_TOOLS = False
+    finally:
+        server.shutdown()
+
+
+def test_spilled_file_is_searchable_and_readable_in_pieces():
+    """落地的檔案講了「用 search_files 找」就要找得到，大過 400KB 也要讀得到某幾行。
+    沒指名時不進去：舊的輸出混進一般搜尋只會是雜訊。"""
+    with Workspace():
+        body = "\n".join(f"INFO line {i}" for i in range(40000)) + "\nERROR pool exhausted\n"
+        assert len(body.encode()) > serve.MAX_FILE_BYTES
+        path = serve.spill(body, "input")
+        assert "ERROR pool exhausted" in serve.run_tool(
+            "search_files", {"pattern": "ERROR", "glob": path})
+        assert "pool exhausted" not in serve.run_tool("search_files", {"pattern": "ERROR"})
+        assert "INFO line 1234" in serve.run_tool(
+            "read_file", {"path": path, "start": 1235, "end": 1236})
+        try:
+            serve.run_tool("read_file", {"path": path})
+            raise AssertionError("沒給行範圍卻整份讀進來")
+        except ValueError as e:
+            assert "start/end" in str(e)
+
+
 def _hooks_file(ws: Path, rows: list) -> None:
     (ws / rules.HOOKS_FILE).write_text(
         json.dumps({"hooks": rows}, ensure_ascii=False), encoding="utf-8")

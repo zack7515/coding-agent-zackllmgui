@@ -2093,6 +2093,53 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   console.log('ok   任務佇列（分隔線只認整行、按停止整串清掉、做完一件才送下一件）');
 })();
 
+// ── /clear 與塞不下的第一則 ────────────────────────────────
+{
+  const noop = function () { };
+  const c = { messages: [{ role: 'user', content: '舊的' }], tasks: ['下一件'] };
+  new Function('S', 'current', 'saveChats', 'renderThread', 'updateCtx', 'toast',
+               grab('clearChat') + '\nreturn clearChat;')(
+    { streaming: false }, function () { return c; }, noop, noop, noop, noop)();
+  assert.deepStrictEqual(c.messages, [], '沒清掉');
+  assert.deepStrictEqual(c.tasks, [], '清空了卻還留著排隊的任務，下一輪會自己送出去');
+  assert.strictEqual(c.preCompact[0].content, '舊的', '清掉的沒留一份，按錯就拿不回來');
+}
+
+(async function () {
+  const mk = function (ready, fetched) {
+    const S = { ctxRatio: 1, ctxMax: { m: 1000 }, model: 'm', ws: { path: ready ? '/p' : '' } };
+    return new Function('S', 'ctxLimit', 'toolsReady', 'toast', 'fetch', 'apiUrl',
+                        grab('estTokens') + grab('fmtK') + grab('fitInput') + '\nreturn fitInput;')(
+      S, function () { return 65536; }, function () { return ready; }, function () { },
+      async function (url, init) {
+        fetched.push(JSON.parse(init.body).text);
+        return { ok: true, json: async function () { return { path: '.zackllmgui-out/input-1.txt', lines: 3 }; } };
+      }, function (p) { return p; });
+  };
+  const fetched = [];
+  const small = { role: 'user', content: '短的' };
+  assert.strictEqual(await mk(true, fetched)(small), true);
+  assert.strictEqual(small.content, '短的', '塞得下的也被改寫了');
+
+  // num_ctx 填 64K，伺服器只開 1000：要照小的那個量
+  const big = { role: 'user', content: '幫我整理\n' + 'x'.repeat(8000) + '\n重點是最後這句' };
+  assert.strictEqual(await mk(false, fetched)(Object.assign({}, big)), false,
+    '沒有工作區還照送，伺服器會截掉開頭或整個退回');
+  assert.strictEqual(fetched.length, 0);
+
+  const msg = Object.assign({}, big);
+  assert.strictEqual(await mk(true, fetched)(msg), true);
+  assert.strictEqual(fetched[0], big.content, '存進檔案的不是全文');
+  assert.ok(msg.content.indexOf('.zackllmgui-out/input-1.txt') >= 0, '沒告訴模型全文在哪');
+  assert.ok(msg.content.indexOf('幫我整理') >= 0 && msg.content.indexOf('重點是最後這句') >= 0,
+    '頭尾要留：問題可能在最前面，也可能在最後面');
+  assert.ok(msg.content.length < 5000);
+  assert.strictEqual(msg.text, big.content, '泡泡要顯示原文，不是那段說明');
+  assert.ok(/fitInput\(msg\)[\s\S]*c\.messages\.push\(msg\)/.test(grab('send')),
+    '量長度要在推進對話之前，被擋下來時輸入框才還在');
+  console.log('ok   /clear 留得住還原、塞不下的那則落地成檔案');
+})();
+
 // ── 收尾複查：做到了沒，不由做的人自己說 ──────────────────
 {
   const src = script.slice(script.indexOf('async function reviewGate'),

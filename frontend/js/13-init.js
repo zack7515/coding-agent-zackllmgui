@@ -115,7 +115,7 @@ async function init() {
     ];
     // 壓縮本身在輸入框旁邊有按鈕，這裡只留「還原」—— 那個沒有別的入口
     if (current() && current().preCompact) {
-      items.unshift({ label: '還原上次壓縮', action: uncompact });
+      items.unshift({ label: '還原（上次壓縮或清空之前）', action: uncompact });
     }
     showMenu($('moreBtn'), items);
   });

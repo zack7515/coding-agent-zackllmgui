@@ -391,6 +391,11 @@ async function refreshModels(quiet) {
       if (seq !== S.probeSeq) return;
       S.models = (data.data || []).map(function (m) { return { name: m.id }; })
         .filter(function (m) { return m.name; }).sort(byModelName);
+      // llama.cpp 系的服務會在 meta 給伺服器實際開的 context；
+      // 不接的話這邊照 num_ctx 當 64K 在算，伺服器其實只開 32K
+      (data.data || []).forEach(function (m) {
+        if (m.id && m.meta && m.meta.n_ctx) S.ctxMax[m.id] = m.meta.n_ctx;
+      });
       S.version = 'OpenAI 相容';
     } else {
       const tags = await apiJson('/api/tags');

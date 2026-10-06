@@ -321,9 +321,9 @@ RAG 真正的價值在**文件**，所以要先知道使用者到底都丟什麼
 ## 自我檢查
 
 ```bash
-python tests/test_serve.py    # 後端 123 項
+python tests/test_serve.py    # 後端 125 項
 python tests/test_core.py     # core/ 各模組的介面 13 項
-node   tests/test_gui.js      # 網頁 83 項
+node   tests/test_gui.js      # 網頁 84 項
 ```
 
 兩支 Python 測試只用專案本身與標準函式庫，三支都不需要 Ollama 在跑；網頁測試需要 Node.js。

@@ -22,6 +22,7 @@ CORS 就完全不存在了。
     POST /tools      開關工具與檔案修改
     POST /workspace  設定模型可以讀寫的專案資料夾
     POST /preview    算出寫入前的 diff（不寫入）
+    POST /spill      太長的輸入存成檔案，讓模型分段讀
     POST /restore    還原一份備份
     POST /view       讀一個檔案給介面顯示（可附上與備份的 diff）
     *    /ext        轉送到 X-Target 指定的外部 OpenAI 相容 API（只接受本機）
@@ -541,8 +542,10 @@ def stale_hint(p: Path) -> str:
 def _tool_read_file(path: str, start: int = 0, end: int = 0) -> str:
     """讀檔，可指定行範圍。回傳帶行號的內容，模型引用位置才不會亂猜。"""
     p = ws_path(path, must_exist=True)
-    if p.stat().st_size > MAX_FILE_BYTES:
-        raise ValueError(f"{ws_rel(p)} 超過 {MAX_FILE_BYTES // 1000}KB，請用 start/end 或 search_files")
+    # 給了行範圍就放寬：叫它「請用 start/end」卻照樣擋，大檔就永遠讀不到
+    if p.stat().st_size > (MAX_UPLOAD if start or end else MAX_FILE_BYTES):
+        raise ValueError(f"{ws_rel(p)} 太大了（{p.stat().st_size // 1000}KB），"
+                         "請用 start/end 讀某幾行，或 search_files 找關鍵字")
     lines = p.read_text("utf-8", errors="replace").splitlines()
     a = max(1, int(start or 1))
     b = min(len(lines), int(end) if end else len(lines))
@@ -608,6 +611,15 @@ def rg_rows(pattern: str):
     return rows
 
 
+def search_scope(glob: str):
+    """glob 指名落地目錄時要掃的檔案，其餘回 None。點開頭的目錄 ws_walk 跟 rg 都不進去，
+    平常也不該進去（舊的輸出會混進搜尋結果），所以只在指名時開門。"""
+    if not glob.removeprefix("./").startswith(OUT_DIR + "/"):
+        return None
+    d = ws_root() / OUT_DIR
+    return sorted(d.glob("*.txt")) if d.is_dir() else []
+
+
 def _tool_search_files(pattern: str = "", glob: str = "") -> str:
     """在工作區裡找字串，只回命中的那幾行 —— 整檔讀進去會把 context 吃光。
 
@@ -617,7 +629,8 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
     if not pattern:
         if not glob:
             raise ValueError("要給 pattern（找內容）或 glob（找檔名），至少一個")
-        names = [ws_rel(f) for f in ws_walk() if glob_ok(f, glob)]
+        scope = search_scope(glob)
+        names = [ws_rel(f) for f in (ws_walk() if scope is None else scope) if glob_ok(f, glob)]
         if not names:
             return f"沒有檔名符合「{glob}」的檔案"
         names.sort()
@@ -630,7 +643,8 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
     except re.error as e:
         raise ValueError(f"pattern 不是合法的正規表示式：{e}") from None
     hits, scanned = [], 0
-    rows = rg_rows(pattern)
+    scope = search_scope(glob)
+    rows = rg_rows(pattern) if scope is None else None
     if rows is not None:
         for rel, n, line in rows:
             try:
@@ -643,11 +657,11 @@ def _tool_search_files(pattern: str = "", glob: str = "") -> str:
             if len(hits) >= SEARCH_HITS:
                 return "\n".join(hits) + f"\n…（只顯示前 {SEARCH_HITS} 筆，請縮小範圍）"
         return "\n".join(hits) if hits else f"沒有找到「{pattern}」"
-    for f in ws_walk():
+    for f in ws_walk() if scope is None else scope:
         if not glob_ok(f, glob):
             continue
         try:
-            if f.stat().st_size > MAX_FILE_BYTES:
+            if f.stat().st_size > (MAX_FILE_BYTES if scope is None else MAX_UPLOAD):
                 continue
             text = f.read_text("utf-8", errors="replace")
         except OSError:
@@ -1894,7 +1908,7 @@ def clip(out: str, tool: str = "") -> str:
         return out[:TOOL_OUTPUT_LIMIT] + f"\n…（已截斷，原本 {len(out)} 個字元）"
     return (out[:OUT_HEAD]
             + f"\n\n…（中間 {len(out) - OUT_HEAD - OUT_TAIL} 個字元沒有貼進來。"
-              f"全文在 {path}，用 search_files 找關鍵字、或 read_file 讀某幾行。）\n\n"
+              f"全文在 {path}，用 search_files（glob 填這個路徑）找關鍵字、或 read_file 讀某幾行。）\n\n"
             + out[-OUT_TAIL:])
 
 
@@ -2297,6 +2311,8 @@ class Handler(BaseHTTPRequestHandler):
             self._do_workspace()
         elif self.path == "/preview":
             self._do_preview()
+        elif self.path == "/spill":
+            self._do_spill()
         elif self.path == "/restore":
             self._do_restore()
         elif self.path == "/view":
@@ -2718,6 +2734,22 @@ class Handler(BaseHTTPRequestHandler):
         info["agents"] = agent_types()      # 專案自己的 agents/ 會蓋掉內建的
         info["missing_tools"] = ws_missing_tools()
         self._json(info)
+
+    def _do_spill(self) -> None:
+        """一則訊息自己就塞不進 context：存成檔案，模型再分段讀。跟大輸出落地同一個地方。"""
+        if not ALLOW_TOOLS or not self._is_local():
+            self._json({"error": "工具未啟用"}, 403)
+            return
+        try:
+            req = json.loads(self._read_body() or b"{}")
+            text = str(req.get("text", "")) if isinstance(req, dict) else ""
+            path = spill(text, "input") if text else None
+            if not path:
+                self._json({"error": "沒有工作區，存不下來"}, 400)
+                return
+            self._json({"path": path, "lines": text.count("\n") + 1})
+        except Exception as e:
+            self._json({"error": f"{type(e).__name__}: {e}"}, 400)
 
     def _do_preview(self) -> None:
         """算 diff 給確認卡看，不會寫入任何東西。"""

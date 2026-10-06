@@ -17,6 +17,8 @@ const THINK_TOGGLE = [['關閉', false], ['開啟', true]];
 // 放在這裡而不是散在各處：使用者看得到的入口就這一份。
 const SLASH_CMDS = [
   ['compact', '壓縮對話，把較早的訊息濃縮成摘要', function () { compactChat(); }],
+  ['clear', '清空這個對話，從零開始（工作區與模型不變，⋯ 選單可還原）',
+   function () { clearChat(); }],
   ['files', '打開右側的檔案分頁', function () { openWorkspace(); }],
   ['workspace', '換一個工作區資料夾', function () { openBrowser(); }],
   ['write', '切換「模型可以修改檔案」', function () { toggleWrite(); }],
