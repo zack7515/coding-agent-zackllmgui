@@ -1818,14 +1818,17 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const THINK_LEVELS = [['關', false], ['低', 'low'], ['中', 'medium'],
                           ['高', 'high'], ['最高', 'max']];
     const THINK_TOGGLE = [['關閉', false], ['開啟', true]];
+    ${grab('OA_THINK', 'const')}
     const seg = { innerHTML: '', classList: { toggle() {} }, appendChild() {} };
     const note = {};
     const $ = (id) => (id === 'thinkSeg' ? seg : note);
     const saveConfig = () => {};
     const document = { createElement: () => ({ addEventListener() {} }) };
     ${grab('thinkOptions')}
+    ${grab('thinkKey')}
     ${grab('renderThinkSeg')}
-    return { render: renderThinkSeg, S: S };
+    ${grab('thinkValue')}
+    return { render: renderThinkSeg, value: thinkValue, S: S };
   `)();
   think.render();
   assert.strictEqual(think.S.think, 'high', '能力還沒問回來就把存好的等級洗掉了');
@@ -1835,6 +1838,17 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   think.S.think = '不存在的等級';
   think.render();
   assert.strictEqual(think.S.think, false, '支援分級時，認不得的值該退回第一個');
+  // 外部 API 另存一份，預設什麼都不送：Ollama 的「關」帶過來會蓋掉伺服器頁面上的設定
+  think.S.think = 'high';
+  think.S.provider = 'openai';
+  think.render();
+  assert.strictEqual(think.value(), 'auto', '外部 API 沒選過就該照伺服器的設定');
+  assert.strictEqual(think.S.think, 'high', '切到外部 API 把 Ollama 的等級洗掉了');
+  think.S.oaThink = 'low';
+  assert.strictEqual(think.value(), 'low');
+  const oaBody = grab('chatStream');
+  assert.ok(/body\.reasoning_effort = payload\.think/.test(oaBody), '選了等級沒有送 reasoning_effort');
+  assert.ok(/'low', 'medium', 'high'/.test(oaBody), '只有等級才送，auto 與 true 不該送');
   console.log('ok   思考等級活得過重新整理');
 
   // 背景先算好的摘要不能存進對話：Promise 進了 localStorage 會變成 {}，

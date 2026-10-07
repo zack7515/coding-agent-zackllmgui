@@ -23,6 +23,7 @@ async function init() {
   S.model = conf.model || '';
   S.theme = conf.theme === 'light' ? 'light' : 'dark';
   S.think = conf.think !== undefined ? conf.think : false;
+  S.oaThink = conf.oaThink !== undefined ? conf.oaThink : 'auto';
   S.showThink = conf.showThink !== false;
   S.params = Object.assign({}, DEFAULTS, conf.params || {});
   // 舊版的預設值是 4096，太容易爆；沒動過的人直接跟著升上來

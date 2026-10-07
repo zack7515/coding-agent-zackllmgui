@@ -162,7 +162,7 @@ function notifyBg(text) {
 }
 function saveConfig() {
   lsSet(LS_CONF, {
-    host: S.host, model: S.model, theme: S.theme, think: S.think, fontScale: S.fontScale,
+    host: S.host, model: S.model, theme: S.theme, think: S.think, oaThink: S.oaThink, fontScale: S.fontScale,
     userName: S.userName,
     showThink: S.showThink, params: S.params, tools: S.tools,
     provider: S.provider, oa: S.oa, paramsVersion: 3, tab: S.tab, auto: S.auto,
@@ -1391,6 +1391,7 @@ async function chatStream(payload, signal, on) {
   if (o.stop) body.stop = o.stop;
   if (o.num_predict !== undefined) body.max_tokens = o.num_predict;
   if (payload.think === false && oaLocal()) body.chat_template_kwargs = { enable_thinking: false };
+  if (['low', 'medium', 'high'].indexOf(payload.think) >= 0) body.reasoning_effort = payload.think;
 
   let info = null;
   // Ollama 的 NDJSON 一次給完整的 tool_calls，SSE 不是：一支工具的 arguments

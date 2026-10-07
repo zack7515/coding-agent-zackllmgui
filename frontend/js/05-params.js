@@ -1,9 +1,13 @@
 /* ══════════════════════ 思考模式 ══════════════════════ */
 function thinkOptions() {
+  if (S.provider === 'openai') return OA_THINK;
   const caps = S.caps[S.model] || [];
   if (caps.indexOf('thinking') < 0) return [];
   return THINK_LEVELS;
 }
+
+// 外部 API 另存一份：Ollama 那邊預設的「關」帶過來，會把伺服器自己的設定蓋掉
+function thinkKey() { return S.provider === 'openai' ? 'oaThink' : 'think'; }
 
 function renderThinkSeg() {
   const opts = thinkOptions();
@@ -15,7 +19,8 @@ function renderThinkSeg() {
   // **只在控制項真的能用的時候才正規化。** S.caps 是跟伺服器問回來的，第一次
   // render 時還是空的 —— 那時候 list 是 THINK_TOGGLE（值只有 true/false），
   // 存好的 'high' 不在裡面就被洗成 false，於是每次重新整理都跳回「關」。
-  if (enabled && values.indexOf(S.think) < 0) S.think = values[0];
+  const key = thinkKey();
+  if (enabled && values.indexOf(S[key]) < 0) S[key] = values[0];
 
   seg.innerHTML = '';
   seg.classList.toggle('disabled', !enabled);
@@ -23,9 +28,9 @@ function renderThinkSeg() {
     const b = document.createElement('button');
     b.textContent = opt[0];
     b.disabled = !enabled;
-    if (opt[1] === S.think) b.className = 'on';
+    if (opt[1] === S[key]) b.className = 'on';
     b.addEventListener('click', function () {
-      S.think = opt[1];
+      S[key] = opt[1];
       renderThinkSeg();
       saveConfig();
     });
@@ -47,11 +52,14 @@ function openThinkHelp() {
       + '**沒有**用 token 數設預算的介面。'],
     ['想硬性設上限', '用 num_predict —— 它算的是輸出總量，思考也計入。'],
     ['模型不支援分級', '會把任何一個等級當成「開啟」，不會報錯。'],
-    ['模型完全不支援', '控制項會停用，送出時整個 think 欄位省略，不會送出去。']
+    ['模型完全不支援', '控制項會停用，送出時整個 think 欄位省略，不會送出去。'],
+    ['外部 API', '「預設」什麼都不送，照伺服器自己的設定（例如它自己頁面上選的）。'
+      + '選了等級就每個請求帶 reasoning_effort，伺服器那邊的設定會被這個請求蓋過；'
+      + '「關」帶 enable_thinking=false，只送給本機與區網的服務。']
   ]);
 }
 
-function thinkValue() { return thinkOptions().length ? S.think : null; }
+function thinkValue() { return thinkOptions().length ? S[thinkKey()] : null; }
 
 // --fs 宣告在 :root，這裡也設在同一個節點上。設在 body 或宣告在 body
 // 都會踩到「body 自己的宣告贏過繼承值」，那次的症狀是設定完全沒反應。
