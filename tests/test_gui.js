@@ -1301,6 +1301,50 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   });
 })();
 
+// 子代理清單：跑工具算活著，等模型太久沒輸出要標黃，秒數要自己走
+{
+  const node = () => ({ textContent: '', className: '', hidden: false, title: '',
+                        addEventListener() {}, appendChild() {}, remove() {} });
+  const els = {};
+  const bar = new Function('S', 'els', 'node', `
+    const $ = (id) => (els[id] = els[id] || node());
+    const parts = {};
+    const document = { createElement: () => {
+      const r = node();
+      r.querySelector = (q) => (parts[q] = parts[q] || node());
+      return r;
+    } };
+    let ticks = 0;
+    const setInterval = () => ++ticks;
+    const clearInterval = () => {};
+    const performance = { now: () => 100000 };
+    ${grab('fmtElapsed')}
+    ${grab('SUB_QUIET', 'const')}
+    let agentTick = null;
+    ${grab('agentRow')}
+    ${grab('renderAgentBar')}
+    return { render: renderAgentBar, parts, ticks: () => ticks };`);
+  const S = { live: {} };
+  const f = bar(S, els, node);
+  f.render();
+  assert.strictEqual(els.agentBar.hidden, true, '沒有子代理在跑還顯示清單');
+  S.live.a1 = { id: 'a1', type: 'explore', task: '找出所有呼叫 foo 的地方', st: '第 2/60 輪',
+                t0: 0, since: 95000, beat: 95000, phase: 'read_file', el: node(), stop() {} };
+  f.render();
+  assert.strictEqual(els.agentBar.hidden, false);
+  assert.ok(/1 個子代理在跑/.test(els.agentSum.textContent), els.agentSum.textContent);
+  assert.strictEqual(f.parts['.t'].textContent, '找出所有呼叫 foo 的地方', '看不到它負責什麼');
+  assert.ok(/正在跑 read_file/.test(f.parts['.s'].textContent), f.parts['.s'].textContent);
+  assert.strictEqual(f.parts['.dot'].className, 'dot ok', '跑工具時要算活著');
+  S.live.a1.phase = 'model';
+  S.live.a1.beat = 100000 - 45000;
+  f.render();
+  assert.strictEqual(f.parts['.dot'].className, 'dot connecting', '等模型 45 秒沒輸出要標出來');
+  assert.ok(/45 秒 沒有輸出/.test(f.parts['.s'].textContent), f.parts['.s'].textContent);
+  assert.strictEqual(f.ticks(), 1, '秒數要自己走，而且計時器只開一個');
+  console.log('ok   子代理清單：看得到任務、跑工具算活著、等太久會標出來');
+}
+
 // 子代理：型別來自 agents/*.md、唯讀靠工具清單擋、停得住、輪數有底、
 // 會寫檔案的要有自己的 worktree 才准平行 —— 這幾件事錯了都會靜靜弄壞檔案。
 (async function () {
@@ -1384,9 +1428,12 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const ico = () => '';
     const $ = () => ({ appendChild() {} });
     const pin = () => {};
+    const bars = [];        // 每次重畫時有幾個在跑
+    const renderAgentBar = () => bars.push(Object.keys(S.live || {}).length);
+    const fmtElapsed = () => '';
     ${src}
     return { runSubagent, subTools, subWrites, agentType, startSubagents, callArgs,
-             calls, agentOps, clicks, tools, models, S,
+             calls, agentOps, clicks, tools, models, S, bars,
              rounds: SUB_ROUNDS, depthMax: SUB_DEPTH_MAX };
   `)();
 
@@ -1441,6 +1488,10 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     '子代理沒有登記或沒有收');
   assert.deepStrictEqual(wt.calls, [['read_file', 'a1']],
     '工具沒有標上是哪個子代理在叫，伺服器就擋不了它的白名單');
+  // 輸入框上方的清單：跑的時候列得出來，結束就收掉，不然會一直顯示「1 個在跑」
+  assert.ok(wt.bars.indexOf(1) >= 0, '子代理在跑卻沒列進清單');
+  assert.strictEqual(wt.bars[wt.bars.length - 1], 0, '子代理結束了還留在清單上');
+  assert.deepStrictEqual(Object.keys(wt.S.live), []);
   assert.ok(clean.indexOf('看完了') === 0 && clean.indexOf('[worktree]') < 0,
     '沒改動就不該留 worktree：' + clean);
 

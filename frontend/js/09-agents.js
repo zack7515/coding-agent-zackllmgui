@@ -79,6 +79,11 @@ async function runSubagent(args, depth, parent) {
   $('thread').appendChild(el);
   pin();
   const log = function (line) { out.textContent += '\n' + line; pin(); };
+  let live = null;          // 輸入框上方那一列的這一筆，登記成功之後才有
+  const st = function (text) {
+    el.querySelector('.st').textContent = text;
+    if (live) { live.st = text; renderAgentBar(); }
+  };
 
   // **每一種子代理都要在伺服器登記**，不只需要 worktree 的那些。工具白名單如果只靠
   // 網頁「不送那幾支定義」，模型幻覺出一個工具名就繞過去了 —— 送到 /tool 的只是一個
@@ -101,7 +106,7 @@ async function runSubagent(args, depth, parent) {
       + (info.linked && info.linked.length ? '，借用 ' + info.linked.join('、') : '')
       + '）');
   } catch (e) {
-    el.querySelector('.st').textContent = '開不起來';
+    st('開不起來');
     return '子代理失敗：登記不了（' + e.message + '）';
   }
   const sid = box.sid;
@@ -112,14 +117,21 @@ async function runSubagent(args, depth, parent) {
   if (keys.length > SUB_KEEP) delete S.subs[keys[0]];
   // 中斷是伺服器那一端的事：標記之後連它的後代與背景指令一起停，
   // 而且任何綁在這個 id 上的工具呼叫都會被拒絕 —— 網頁不理也叫不動。
-  el.querySelector('[data-stop]').addEventListener('click', async function () {
+  const stop = async function () {
     box.stopped = true;
     try {
       const r = await agentCall({ action: 'stop', id: sid, why: '使用者在卡片上按了中斷' });
       log('· 已中斷 ' + r.stopped.join('、')
         + (r.jobs.length ? '（順手殺掉背景指令 ' + r.jobs.join('、') + '）' : ''));
     } catch (e) { log('· 中斷失敗：' + e.message); }
-  });
+  };
+  el.querySelector('[data-stop]').addEventListener('click', stop);
+  const now = performance.now();
+  live = { id: box.id, type: type.name, task: task, st: '進行中', el: el, stop: stop,
+           t0: now, since: now, beat: now, phase: 'model' };
+  S.live = S.live || {};
+  S.live[sid] = live;
+  renderAgentBar();
   const stopped = function () { return box.stopped || (signal && signal.aborted); };
 
   box.msgs = box.msgs || [{ role: 'system', content:
@@ -134,6 +146,9 @@ async function runSubagent(args, depth, parent) {
   let wrap = false;                 // 收工具了嗎（context 快滿的時候）
 
   const finish = async function (text) {
+    if (live.row) live.row.remove();
+    delete S.live[sid];
+    renderAgentBar();
     // 有改動就留著 worktree 並且講清楚改在哪個分支 —— 子代理跑了十分鐘的結果，
     // 不能因為主代理沒接住就靜靜刪掉。沒改動的才自動清掉（照它們的規則）。
     let note = '';
@@ -155,17 +170,17 @@ async function runSubagent(args, depth, parent) {
       // 停止鍵與卡片上的「中斷」都要停得住。子代理原本自己開 AbortController，
       // 按停止只停得了主迴圈，它會一路跑到輪數用完。
       if (stopped()) {
-        el.querySelector('.st').textContent = '已中斷';
+        st('已中斷');
         return await finish('（子代理被中斷了，任務沒有完成）');
       }
       // 預算是整輪共用的，所以子代理自己也要看 —— 只在主迴圈看的話，三個平行子代理
       // 會各自燒完 60 輪，主迴圈要等它們全部回來才發現超支。
       const over = budgetStop(S.run);
       if (over) {
-        el.querySelector('.st').textContent = '超出預算';
+        st('超出預算');
         return await finish('（停在這裡：' + over + '）');
       }
-      el.querySelector('.st').textContent = '第 ' + i + '/' + SUB_ROUNDS + ' 輪';
+      st('第 ' + i + '/' + SUB_ROUNDS + ' 輪');
 
       // 子代理沒有壓縮，它的 context 只會一路長；60 輪跑到一半就會超過 num_ctx，
       // 而超過不會報錯 —— 最前面被丟掉的正好是它的任務。所以在滿之前**把工具收走**：
@@ -180,6 +195,8 @@ async function runSubagent(args, depth, parent) {
 
       let text = '';
       let calls = null;
+      live.phase = 'model';
+      live.since = live.beat = performance.now();
       const payload = { model: type.model || S.subModel || S.model, messages: msgs,
                         tools: wrap ? [] : subTools(type, at), stream: true };
       const opts = buildOptions();
@@ -189,7 +206,7 @@ async function runSubagent(args, depth, parent) {
       await chatStream(payload, signal, {
         think: function () { },
         images: function () { },
-        content: function (t) { text += t; },
+        content: function (t) { text += t; live.beat = performance.now(); },
         tools: function (tc) { calls = (calls || []).concat(tc); },
         // 子代理的 token 也要算進同一本帳：不算的話三個平行子代理各跑 60 輪，
         // budgetStop() 完全看不到，外部 API 的帳單就沒有任何上限擋著。
@@ -207,7 +224,7 @@ async function runSubagent(args, depth, parent) {
       if (!calls || !calls.length) {
         const done = text.trim();
         el.querySelector('.tool-card').classList.add('done');
-        el.querySelector('.st').textContent = '完成（' + i + ' 輪）';
+        st('完成（' + i + ' 輪）');
         log('→ ' + (done || '（沒有結論）'));
         return await finish(done || '（子代理沒有給出結論）');
       }
@@ -216,6 +233,9 @@ async function runSubagent(args, depth, parent) {
         const fn = calls[k].function || {};
         const a = callArgs(calls[k]);
         log('· ' + fn.name + ' ' + JSON.stringify(a).slice(0, 120));
+        live.phase = fn.name || '工具';
+        live.since = performance.now();
+        renderAgentBar();
         const r = fn.name === 'task'
           ? { content: await runSubagent(a, at + 1, sid) }
           : await execTool(fn.name || '', a, { role: 'tool', tool_name: fn.name, content: '' },
@@ -226,14 +246,14 @@ async function runSubagent(args, depth, parent) {
         msgs.push({ role: 'tool', tool_name: fn.name, content: String(r.content || '') });
       }
     }
-    el.querySelector('.st').textContent = '輪數用完';
+    st('輪數用完');
     return await finish('（子代理跑了 ' + SUB_ROUNDS + ' 輪還沒有結論，任務可能太大，拆小一點再交辦）');
   } catch (e) {
     if (stopped()) {
-      el.querySelector('.st').textContent = '已中斷';
+      st('已中斷');
       return await finish('（子代理被中斷了，任務沒有完成）');
     }
-    el.querySelector('.st').textContent = '失敗';
+    st('失敗');
     log('→ ' + e.message);
     return await finish('子代理失敗：' + e.message);
   }
@@ -342,6 +362,49 @@ async function runTools(c, calls, depth) {
   if (await autoCompact(c)) toast('context 快滿了，已經自動壓縮先前的訊息');
   flushQueue(c);          // 使用者在這一輪打的字，跟工具結果一起送過去
   await runStream(c, depth);
+}
+
+/* ══════════════════════ 子代理：輸入框上方的即時清單 ══════════════════════ */
+// 迴圈跑在這個分頁裡，「活著」看的是這裡多久沒收到它的輸出：跑工具算活著，等模型
+// 超過這麼久沒輸出就標黃（伺服器一次只服務一個時，平行的子代理就是在排隊）。
+const SUB_QUIET = 30000;
+let agentTick = null;
+
+function agentRow(a) {
+  const row = document.createElement('div');
+  row.className = 'agent-live';
+  row.innerHTML = '<span class="dot"></span><div class="a"><b></b> <span class="s"></span>'
+    + '<div class="t"></div></div><button class="mini">中斷</button>';
+  // textContent：任務是模型寫的字，型別名字來自 agents/*.md
+  row.querySelector('b').textContent = a.type + ' ' + a.id;
+  row.querySelector('.t').textContent = row.querySelector('.t').title = a.task;
+  row.querySelector('.a').addEventListener('click', function () {
+    a.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
+  row.querySelector('button').addEventListener('click', function (e) {
+    e.target.disabled = true;
+    a.stop();
+  });
+  $('agentList').appendChild(row);
+  return row;
+}
+
+function renderAgentBar() {
+  const live = Object.keys(S.live || {}).map(function (k) { return S.live[k]; });
+  $('agentBar').hidden = !live.length;
+  if (!live.length) { clearInterval(agentTick); agentTick = null; return; }
+  if (!agentTick) agentTick = setInterval(renderAgentBar, 1000);    // 秒數要自己走
+  $('agentSum').textContent = live.length + ' 個子代理在跑';
+  const now = performance.now();
+  live.forEach(function (a) {
+    if (!a.row) a.row = agentRow(a);
+    const quiet = now - a.beat;
+    const tool = a.phase !== 'model';
+    const doing = tool ? '正在跑 ' + a.phase + ' ' + fmtElapsed(now - a.since)
+      : (quiet < SUB_QUIET ? '模型處理中' : '等模型 ' + fmtElapsed(quiet) + ' 沒有輸出');
+    a.row.querySelector('.dot').className = 'dot ' + (tool || quiet < SUB_QUIET ? 'ok' : 'connecting');
+    a.row.querySelector('.s').textContent = a.st + ' · ' + doing + ' · 共 ' + fmtElapsed(now - a.t0);
+  });
 }
 
 /* ══════════════════════ 子代理：定位、追溯、中斷 ══════════════════════ */
