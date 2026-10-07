@@ -402,6 +402,19 @@ function fmtTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n || 0);
 }
 
+// 模型不一定照格式給選項：JSON 字串、{label} 物件都會出現。原本前者整張卡丟錯畫不出來，
+// 後者按鈕上是 [object Object]。
+function askOptions(raw) {
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch (e) { raw = raw.split(/\n|、|，|,/); }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.map(function (o) {
+    return (typeof o === 'string' ? o
+      : String((o && (o.label || o.text || o.value)) || JSON.stringify(o))).trim();
+  }).filter(Boolean).slice(0, 6);
+}
+
 // 模型要問問題時不送到 /tool（伺服器沒有人可以答），直接在對話裡問。
 function askUser(args) {
   return new Promise(function (resolve) {
@@ -435,11 +448,13 @@ function askUser(args) {
       });
       if (picked) input.value = '';               // 選項與自己打的是二選一，不要曖昧
       refresh();
+      if (picked) send.focus();     // 焦點留在選項上的話，按 Enter 等於再點一次＝取消
     }
     function answer() { return picked || input.value.trim(); }
     function refresh() { send.disabled = !answer(); }
 
-    (args.options || []).slice(0, 6).forEach(function (o) {
+    const list = askOptions(args.options);
+    list.forEach(function (o) {
       const b = document.createElement('button');
       b.className = 'mini';
       b.type = 'button';
@@ -448,7 +463,7 @@ function askUser(args) {
       b.addEventListener('click', function () { pick(o, b); });
       opts.appendChild(b);
     });
-    opts.hidden = !(args.options || []).length;
+    opts.hidden = !list.length;
     $('thread').appendChild(el);
     S.stick = true;
     pin();
@@ -474,8 +489,19 @@ function askUser(args) {
       }, ASK_WAIT_MS);
     }
 
+    // 等回答的時候下面那顆送出鍵與 Enter 也拿來回答這張卡：原本前者停用、後者進排隊，
+    // 而排隊要等這一輪結束 —— 這一輪正在等這張卡，按了等於沒反應。
+    S.asking = function (typed) {
+      const a = typed || answer();
+      if (a) done(a);
+      return !!a;
+    };
+    $('sendBtn').disabled = false;
+
     const done = function (text, timedOut) {
       clearTimeout(timer);
+      S.asking = null;
+      blockComposer(S.blocked);     // 送出鍵回到這一輪原本的樣子
       waitBadge(false);
       el.querySelector('.ta:last-child').innerHTML = '';
       opts.innerHTML = '';

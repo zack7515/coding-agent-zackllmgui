@@ -760,7 +760,16 @@ function apiMessages(c) {
 
 // Enter 走這裡：跑到一半就排隊，沒在跑就正常送出。
 // **不能直接呼叫 send()** —— send() 在串流中是「停止」，Enter 會變成按停止鍵。
+// 模型在問問題：輸入框裡的字（或卡片上選好的選項）就是答案，不進排隊
+function answerAsk() {
+  if (!S.asking) return false;
+  if (S.asking($('input').value.trim())) { $('input').value = ''; autoGrow(); }
+  else toast('先在上面選一個選項，或在這裡打字回答');
+  return true;
+}
+
 function submitFromInput() {
+  if (answerAsk()) return;
   const text = $('input').value.trim();
   if (S.streaming || S.blocked === RUNNING_HINT) {
     if (!text) return;
@@ -782,6 +791,7 @@ function submitFromInput() {
 let fitting = false;          // 正在把太長的輸入存成檔案：這段時間再按 Enter 不算
 
 async function send() {
+  if (answerAsk()) return;
   if (S.streaming) { stopStream(); return; }
   if (fitting) return;
   const text = $('input').value.trim();

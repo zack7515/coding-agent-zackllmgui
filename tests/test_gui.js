@@ -1042,7 +1042,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(src.length > 200, '切不到 askUser');
 
   // 選項按鈕的 click 只能呼叫 pick，不能直接 done
-  const loop = src.slice(src.indexOf("(args.options || [])"), src.indexOf("opts.hidden"));
+  const loop = src.slice(src.indexOf("list.forEach"), src.indexOf("opts.hidden"));
   assert.ok(/pick\(o, b\)/.test(loop), '選項按鈕沒有接到 pick');
   assert.ok(!/done\(/.test(loop), '選項按鈕又變成點下去就直接送出了：' + loop.slice(0, 160));
 
@@ -1054,6 +1054,41 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(/send\.disabled = !answer\(\)/.test(src), '送出鍵沒有跟著有沒有答案開關');
   // 選項與自己打字是二選一，不能兩邊都留著讓人猜送出哪個
   assert.ok(/if \(picked\) input\.value = ''/.test(src), '選了選項沒有清掉輸入框');
+  // 選完按 Enter：焦點還在選項上的話，Enter 等於再點一次，選項反而被取消
+  assert.ok(/if \(picked\) send\.focus\(\)/.test(src), '選完選項焦點沒移到送出鍵');
+
+  // 模型給的選項格式不一定對：JSON 字串原本讓整張卡丟錯，物件變成 [object Object]
+  const opt = new Function(`${grab('askOptions')} return askOptions;`)();
+  assert.deepStrictEqual(opt(['A', 'B']), ['A', 'B']);
+  assert.deepStrictEqual(opt('["A","B"]'), ['A', 'B'], 'JSON 字串沒解開');
+  assert.deepStrictEqual(opt([{ label: 'A', description: '快' }, { text: 'B' }]), ['A', 'B']);
+  assert.deepStrictEqual(opt('A、B'), ['A', 'B']);
+  assert.deepStrictEqual(opt(undefined), []);
+  assert.strictEqual(opt(Array(9).fill('x')).length, 6);
+
+  // 等回答時，下面的送出鍵與 Enter 是拿來回答這張卡的：原本前者停用、後者進排隊，
+  // 而排隊要等這一輪結束 —— 這一輪正卡在等這張卡
+  const ask = new Function('S', 'input', `
+    const $ = () => input;
+    const autoGrow = () => {};
+    const toasts = [];
+    const toast = (m) => toasts.push(m);
+    ${grab('answerAsk')}
+    return { answerAsk, toasts };`);
+  const got = [];
+  const S1 = { asking: (t) => { const a = t || '卡片上選的'; got.push(a); return true; } };
+  const box1 = { value: '  我自己打的  ' };
+  assert.strictEqual(ask(S1, box1).answerAsk(), true);
+  assert.deepStrictEqual(got, ['我自己打的'], '輸入框的字沒有拿去回答');
+  assert.strictEqual(box1.value, '', '回答完輸入框沒清掉');
+  ask(S1, { value: '' }).answerAsk();
+  assert.deepStrictEqual(got[1], '卡片上選的', '輸入框沒字時要用卡片上選好的');
+  const none = ask({ asking: () => false }, { value: '' });
+  assert.strictEqual(none.answerAsk(), true, '沒選也沒打時也不能掉進排隊');
+  assert.ok(/選一個選項/.test(none.toasts[0]), '什麼都沒選要講');
+  assert.strictEqual(ask({}, { value: 'x' }).answerAsk(), false, '沒在問問題時不能攔');
+  assert.ok(/answerAsk\(\)/.test(grab('submitFromInput')) && /answerAsk\(\)/.test(grab('send')),
+    'Enter 或送出鍵沒有接到回答');
   console.log('ok   問問題的選項要按送出才算數');
 })();
 
@@ -2417,7 +2452,9 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const timers = [];
     const fn = new Function('S', 'document', 'setTimeout', 'clearTimeout', 'stub', `
       const { $, msgEl, ico, waitBadge, notifyBg, pin } = stub;
+      const blockComposer = () => {};
       ${grab('ASK_WAIT_MS', 'const')}
+      ${grab('askOptions')}
       ${grab('askUser')}
       return askUser;`);
     const dom = fakeDom();
