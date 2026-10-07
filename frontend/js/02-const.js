@@ -15,6 +15,9 @@ const THINK_LEVELS = [['關', false], ['低', 'low'], ['中', 'medium'], ['高',
 const THINK_TOGGLE = [['關閉', false], ['開啟', true]];
 // 外部 API：'auto' 什麼都不送，照伺服器自己的設定（例如它自己頁面上選的）
 const OA_THINK = [['預設', 'auto'], ['關', false], ['低', 'low'], ['中', 'medium'], ['高', 'high']];
+// 這些在外部 API 是伺服器啟動時就定好的，請求裡帶了也沒用
+const OLLAMA_ONLY = ['num_ctx', 'keep_alive', 'num_keep', 'num_batch', 'num_gpu', 'num_thread', 'draft_num_predict'];
+const OA_SKIP = '外部 API 由伺服器決定，這裡填了不會送出';
 // 對話框打 / 就會出現的功能清單。skills 會接在這後面（那是資料，不是寫死的）。
 // 放在這裡而不是散在各處：使用者看得到的入口就這一份。
 const SLASH_CMDS = [

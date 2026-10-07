@@ -439,16 +439,25 @@ const lab = new Function(
   "const document = { querySelector: (sel) => {\n" +
   "  const id = sel.match(/for=\"(\\w+)\"/)[1];\n" +
   "  return labels[id] || (labels[id] = { textContent: '' }); } };\n" +
-  grab('PARAM_HELP', 'const') + '\n' +
+  grab('PARAM_HELP', 'const') + '\n' + grab('OLLAMA_ONLY', 'const') + '\n' + grab('OA_SKIP', 'const') + '\n' +
   script.slice(script.indexOf('function applyParamLimits'),
                script.indexOf('// 超過上限就夾回去')) +
-  "\nreturn function (max) { S.ctxMax = max ? { m: max } : {};\n" +
+  "\nconst f = function (max, provider) { S.ctxMax = max ? { m: max } : {}; S.provider = provider;\n" +
   "  applyParamLimits();\n" +
-  "  return [labels.num_ctx.textContent, String(els.num_ctx.max)]; };")();
+  "  return [labels.num_ctx.textContent, String(els.num_ctx.max)]; };\nf.els = els; return f;")();
 assert.deepStrictEqual(lab(262144), ['num_ctx（K，≤ 256）', '256'],
   '上限沒有接進原本的括號裡');
 assert.deepStrictEqual(lab(0), ['num_ctx（K）', '(removed)'],
   '問不到上限時，標籤與 max 屬性都要乾淨');
+// 外部 API 的 context、常駐、GPU 層數是伺服器啟動時定的，欄位要鎖起來講明不會送
+lab(0, 'openai');
+assert.ok(lab.els.keep_alive.disabled && /伺服器決定/.test(lab.els.keep_alive.title),
+  '外部 API 模式下 Ollama 專用的欄位還能填，使用者會以為有送出');
+assert.ok(!lab.els.temperature, '取樣參數會送出，不該被鎖');
+lab(0, 'ollama');
+assert.ok(!lab.els.keep_alive.disabled && lab.els.keep_alive.title === '(removed)',
+  '切回 Ollama 之後欄位還鎖著');
+assert.ok(!/伺服器決定/.test(lab.els.num_ctx.title), 'num_ctx 的上限說明被蓋掉了');
 const remote = new Function(
   'const S = { model: "m", layers: { m: 65 }, cpus: 32, upstream: "http://gpu:11434" };\n' +
   'function ollamaIsLocal() { return false; }\n' + grab('PARAM_HELP', 'const') +
@@ -1954,6 +1963,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     const run = new Function('GOT', `
       const S = { provider: 'openai' };
       const oaMsgs = (x) => x;
+      const oaLocal = () => GOT.local;
       const streamSse = async (path, body, sig, onObj) => {
         GOT.body = body;
         ${JSON.stringify(chunks)}.forEach(onObj);
@@ -1974,6 +1984,17 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
     assert.strictEqual(got.tools[0].id, 'call_x');
     assert.strictEqual(got.done.eval_count, 3);
     console.log('ok   SSE 的 tool_calls 片段拼得回來');
+    // top_k、min_p、repeat penalty 不在 OpenAI 規格裡：本機要送，官方 API 會回 400
+    const opts = { temperature: 0.8, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 };
+    const cb = { think() {}, content() {}, images() {}, tools() {}, done() {} };
+    await run({ model: 'gpt-x', messages: [], options: opts }, null, cb);
+    assert.strictEqual(got.body.temperature, 0.8);
+    assert.ok(!('top_k' in got.body) && !('repeat_penalty' in got.body), '遠端也送了非標準欄位');
+    got.local = true;
+    await run({ model: 'gpt-x', messages: [], options: opts }, null, cb);
+    assert.deepStrictEqual([got.body.top_k, got.body.min_p, got.body.repeat_penalty, got.body.repetition_penalty],
+      [40, 0.05, 1.1, 1.1], '本機的外部 API 沒帶齊進階取樣參數');
+    console.log('ok   本機的外部 API 帶得到 top_k / min_p / repeat penalty');
   }
 
   // 外部 API 問不到模型能力，所以改成手動開關

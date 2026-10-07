@@ -1400,6 +1400,13 @@ async function chatStream(payload, signal, on) {
   if (o.seed !== undefined) body.seed = o.seed;
   if (o.stop) body.stop = o.stop;
   if (o.num_predict !== undefined) body.max_tokens = o.num_predict;
+  // 不在 OpenAI 規格裡的取樣參數只送本機與區網，官方 API 看到會回 400
+  if (oaLocal()) {
+    if (o.top_k !== undefined) body.top_k = o.top_k;
+    if (o.min_p !== undefined) body.min_p = o.min_p;
+    // llama.cpp 叫 repeat_penalty，vLLM 一系叫 repetition_penalty，兩個都送
+    if (o.repeat_penalty !== undefined) body.repeat_penalty = body.repetition_penalty = o.repeat_penalty;
+  }
   if (payload.think === false && oaLocal()) body.chat_template_kwargs = { enable_thinking: false };
   if (['low', 'medium', 'high'].indexOf(payload.think) >= 0) body.reasoning_effort = payload.think;
 

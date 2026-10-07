@@ -189,6 +189,13 @@ function applyParamLimits() {
           : base + '（≤ ' + lim.max + unit + '）');
     }
   });
+  const oa = S.provider === 'openai';
+  OLLAMA_ONLY.forEach(function (id) {
+    const el = $(id);
+    el.disabled = oa;
+    if (oa) el.title = OA_SKIP;
+    else if (el.title === OA_SKIP) el.removeAttribute('title');
+  });
 }
 
 // 超過上限就夾回去。不擋輸入、只在離開欄位時修正 —— 打字打到一半被搶走游標很難用。

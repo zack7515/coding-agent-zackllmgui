@@ -221,6 +221,12 @@ API 進來的請求要嘛吃模板預設（多半是最高），要嘛要在那�
 `num_ctx`、`num_predict`、`seed`、`stop`、`keep_alive` 用輸入框；另有系統提示。
 `num_predict` / `seed` 填 `-1` 代表不送出該參數。
 
+外部 API 模式送出的是：`temperature`、`top_p`、`seed`、`stop`、`num_predict`（改名為 `max_tokens`）。
+`top_k`、`min_p`、`repeat_penalty` 不在 OpenAI 規格裡，只送給本機與區網的服務
+（`repeat_penalty` 另外以 `repetition_penalty` 再送一次，兩種寫法的伺服器都吃得到）。
+`num_ctx`、`keep_alive`、`num_keep`、`num_batch`、`num_gpu`、`num_thread`、`draft_num_predict`
+是伺服器啟動時決定的，這幾格會反灰、不送出。
+
 **連線防呆**
 
 | 狀態 | 指示 | 行為 |

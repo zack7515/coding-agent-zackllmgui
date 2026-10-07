@@ -372,6 +372,7 @@ textarea.field{
   padding:9px 11px; font-size:12.5px; line-height:1.6; resize:vertical; min-height:68px; outline:none; width:100%;
 }
 textarea.field:focus,input.field:focus{border-color:var(--accent);}
+input.field:disabled{opacity:.45; cursor:not-allowed;}
 input.field{
   height:30px; background:var(--ground); border:1px solid var(--line); border-radius:8px;
   padding:0 10px; font-family:var(--mono); font-size:12px; outline:none; width:100%;
