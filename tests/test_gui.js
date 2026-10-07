@@ -1698,15 +1698,38 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.strictEqual(empty, '', '什麼都沒有時不該多塞一段');
   console.log('ok   壓縮之後待辦與背景指令還在');
 
-  // 切點不能落在一組工具呼叫中間：tool 訊息離開它的 assistant 之後，外部 API 直接
-  // 回「tool_call_id 找不到」。工具迴圈裡最後幾則幾乎都是一組呼叫，所以這很常發生
-  const cut = new Function(`${grab('safeCut')} return safeCut;`)();
-  const conv = [{ role: 'user' }, { role: 'assistant' },
-                { role: 'assistant' }, { role: 'tool' }, { role: 'tool' }];
-  assert.strictEqual(cut(conv, 4), 2, '切在工具結果中間了');
-  assert.strictEqual(cut(conv, 2), 2, '安全的切點被往前推了');
-  assert.strictEqual(cut([{ role: 'tool' }, { role: 'tool' }], 1), 0,
-    '整段都是工具結果時要回 0，讓呼叫端知道切不開');
+  // 原文只留 context 的一小段，其餘進摘要。原本固定留 4 則，一組 read_file
+  // 就佔掉幾萬 token，壓完還剩一半。切點也不能落在工具呼叫中間（tool_call_id 找不到）
+  const cut = new Function(`const S = { ctxRatio: 1 };
+    const ctxLimit = () => 1000;
+    const estTokens = (s) => String(s || '').length;
+    ${grab('COMPACT_TAIL', 'const')}
+    ${grab('compactCut')} return compactCut;`)();
+  const x = (n) => 'x'.repeat(n);
+  const conv = [{ role: 'user', content: x(500) }, { role: 'assistant', content: x(500) },
+                { role: 'assistant', content: '' }, { role: 'tool', content: x(300) },
+                { role: 'tool', content: x(10) }];
+  assert.strictEqual(cut(conv), 5, '大的工具輸出要進摘要，而且整組一起，不能切在中間');
+  const chat = [{ role: 'user', content: x(500) }, { role: 'assistant', content: x(500) },
+                { role: 'user', content: x(20) }, { role: 'assistant', content: x(30) }];
+  assert.strictEqual(cut(chat), 2, '預算內的最近幾則要留原文');
+  assert.strictEqual(cut([{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }]), 0,
+    '整段都在預算內時要回 0，讓呼叫端知道不必壓');
+
+  // 摘要那一次呼叫：逾時看「多久沒動」不看總時間，本機的服務要關掉思考
+  const onceSrc = grab('once');
+  assert.ok(/chatStream\(/.test(onceSrc) && !/oaJson|apiJson/.test(onceSrc),
+    '摘要不是串流，慢的機器會撞總時間逾時：' + onceSrc);
+  assert.ok(/think = false/.test(onceSrc), '摘要沒關思考，日誌裡一次就產生一萬多 token');
+  assert.ok(/payload\.think === false && oaLocal\(\)/.test(grab('chatStream')),
+    '外部 API 那條路沒把 think:false 轉成 enable_thinking');
+  const local = new Function('S', `${grab('oaLocal')} return oaLocal();`);
+  assert.ok(local({ oa: { base: 'http://127.0.0.1:8080/v1' } }));
+  assert.ok(local({ oa: { base: 'http://192.168.1.20:8000/v1' } }));
+  assert.ok(!local({ oa: { base: 'https://api.openai.com/v1' } }), '官方 API 收到不認得的欄位會回 400');
+  assert.ok(/S\.preFail/.test(grab('preCompact')), '背景摘要失敗之後會一直自己重試');
+  assert.ok(/\$\('hint'\)\.textContent = outcome/.test(grab('compactChat')),
+    '壓縮結果只閃一下 toast，跑了幾分鐘的事看不到結果');
 
   // 自動壓縮只在工具迴圈裡做：那時候沒有人在旁邊，而 context 滿了不會報錯 ——
   // Ollama 會默默把最前面的訊息丟掉，連系統提示一起
@@ -1799,7 +1822,7 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   // SSE 把一支工具的 arguments 切成好幾片，要按 index 拼回去
   {
     const src = script.slice(script.indexOf('async function chatStream'),
-                             script.indexOf('// 單次、不串流的呼叫'));
+                             script.indexOf('// 單次呼叫，壓縮摘要'));
     const chunks = [
       { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x',
           function: { name: 'edit_', arguments: '{"pa' } }] } }] },

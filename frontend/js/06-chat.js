@@ -1386,6 +1386,7 @@ async function chatStream(payload, signal, on) {
   if (o.seed !== undefined) body.seed = o.seed;
   if (o.stop) body.stop = o.stop;
   if (o.num_predict !== undefined) body.max_tokens = o.num_predict;
+  if (payload.think === false && oaLocal()) body.chat_template_kwargs = { enable_thinking: false };
 
   let info = null;
   // Ollama 的 NDJSON 一次給完整的 tool_calls，SSE 不是：一支工具的 arguments
@@ -1420,22 +1421,38 @@ async function chatStream(payload, signal, on) {
   on.done(info || {});
 }
 
-// 單次、不串流的呼叫，壓縮摘要用
-async function once(prompt, timeoutMs) {
-  if (S.provider === 'openai') {
-    const data = await oaJson('/chat/completions', {
-      model: S.model, messages: [{ role: 'user', content: prompt }], stream: false
-    }, timeoutMs || 300000);
-    return (((data.choices || [])[0] || {}).message || {}).content || '';
+// 單次呼叫，壓縮摘要與收尾複查用。走串流是為了逾時看「多久沒動」而不是總時間：
+// 本機模型摘要一份長對話要好幾分鐘，總時間一刀切的話慢一點的機器一定撞到。
+async function once(prompt, idleMs, onProgress) {
+  const idle = idleMs || 300000;
+  const ctrl = new AbortController();
+  let timer = setTimeout(function () { ctrl.abort(); }, idle);
+  let out = '', n = 0;
+  const tick = function (s) {
+    n += s.length;
+    clearTimeout(timer);
+    timer = setTimeout(function () { ctrl.abort(); }, idle);
+    if (onProgress) onProgress(n);
+  };
+  const payload = { model: S.model, messages: [{ role: 'user', content: prompt }], stream: true };
+  // 摘要不需要思考，省時間。Ollama 只有支援思考的模型收得下 think 這個欄位
+  if (S.provider === 'openai' || thinkValue() !== null) payload.think = false;
+  try {
+    await chatStream(payload, ctrl.signal, {
+      think: tick, content: function (s) { out += s; tick(s); },
+      tools: function () {}, images: function () {}, done: function () {}
+    });
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new Error('超過 ' + Math.round(idle / 1000) + ' 秒沒有新的輸出');
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  const body = { model: S.model, messages: [{ role: 'user', content: prompt }], stream: false };
-  if (thinkValue() !== null) body.think = false;         // 摘要不需要思考，省時間
-  const data = await apiJson('/api/chat', body, timeoutMs || 300000);
-  return (data.message || {}).content || '';
+  return out;
 }
 
 /* ══════════════════════ 壓縮對話 ══════════════════════ */
-const COMPACT_KEEP = 4;         // 最後幾則保留原文
+const COMPACT_TAIL = 0.08;      // 原文最多留這個比例的 context，其餘都進摘要
 
 function transcriptOf(msgs) {
   return msgs.map(function (m) {
@@ -1467,13 +1484,25 @@ function carryOver() {
 // 壓縮是一次完整的模型呼叫，長對話要等幾十秒。用量過門檻就先在背景算好。
 // 存在 S 而不是對話物件上：Promise 進了 localStorage 會變成 {}，
 // 而那個 {} 是 truthy 的，重整之後會被當成「算好了」然後炸掉。
-// 切點不能落在一組工具呼叫中間：`tool` 訊息要跟著發出它的那則 assistant 訊息，
-// 拆開之後外部 API 直接回「tool_call_id 找不到」，本機模型則是看到一段沒頭沒尾的
-// 工具結果。往前退到下一個安全的位置 —— 工具迴圈裡最後幾則幾乎都是一組呼叫，
-// 所以 length - COMPACT_KEEP 剛好經常切在中間。
-function safeCut(msgs, cut) {
-  while (cut > 0 && (msgs[cut] || {}).role === 'tool') cut--;
+// 從最後往前留原文，留到預算用完為止（固定留 4 則的話，一組 read_file 就讓壓完還剩一半）。
+// 碰到工具結果往後推、整組進摘要：切在中間外部 API 會回 tool_call_id 找不到。
+function compactCut(msgs) {
+  const budget = ctxLimit() * COMPACT_TAIL / (S.ctxRatio || 1);
+  let cut = msgs.length, used = 0;
+  while (cut > 0 && used + estTokens(msgs[cut - 1].content) <= budget) {
+    used += estTokens(msgs[--cut].content);
+  }
+  while (cut < msgs.length && msgs[cut].role === 'tool') cut++;
   return cut;
+}
+
+// 壓縮要等好幾分鐘時至少看得到它在動。背景預先算的時候不寫，不打擾人
+function compactProgress(t0) {
+  return function (n) {
+    if (S.blocked !== COMPACT_HINT) return;
+    $('hint').textContent = COMPACT_HINT + ' 已產生 ' + n + ' 字 · '
+      + Math.round((performance.now() - t0) / 1000) + ' 秒';
+  };
 }
 
 function preCompact() {
@@ -1481,12 +1510,13 @@ function preCompact() {
   // 不在產生中才算：本機通常只有一張顯示卡，兩個生成搶同一張卡
   // 只會讓正在跑的那個變慢。工具跑指令的空檔就夠算完了。
   if (!c || !S.model || S.streaming || S.pre) return;
-  if (c.messages.length <= COMPACT_KEEP + 1) return;
-  const n = safeCut(c.messages, c.messages.length - COMPACT_KEEP);
-  if (n <= 0) return;
-  const p = once(COMPACT_PROMPT + transcriptOf(c.messages.slice(0, n)));
+  const n = compactCut(c.messages);
+  // 同一段算失敗過就不再自己重試：每次都是好幾分鐘的 GPU，點下去才再算
+  if (n <= 0 || S.preFail === c.id + ':' + n) return;
+  const p = once(COMPACT_PROMPT + transcriptOf(c.messages.slice(0, n)), 0,
+                 compactProgress(performance.now()));
   S.pre = { id: c.id, n: n, p: p };
-  p.catch(function () { S.pre = null; });     // 算失敗就當作沒算過，點下去再算一次
+  p.catch(function () { S.pre = null; S.preFail = c.id + ':' + n; });
 }
 
 // 放著讓它自己跑的時候沒有人會去點那顆壓縮鍵，而 context 滿了**不會報錯** ——
@@ -1496,7 +1526,7 @@ function preCompact() {
 const AUTO_COMPACT_AT = 0.85;      // preCompact 在 0.75 就先算好了，這裡拿現成的
 
 async function autoCompact(c) {
-  if (!c || S.streaming || c.messages.length <= COMPACT_KEEP + 1) return false;
+  if (!c || S.streaming || c.messages.length < 2) return false;
   if (rawEstimate('') * S.ctxRatio < ctxLimit() * AUTO_COMPACT_AT) return false;
   const before = c.messages.length;
   await compactChat();
@@ -1507,22 +1537,21 @@ async function compactChat() {
   if (S.streaming) { toast('正在產生回覆，等一下再壓縮'); return; }
   if (!S.model) { toast('請先連線並選擇模型'); return; }
   const c = current();
-  if (c.messages.length <= COMPACT_KEEP + 1) { toast('對話還太短，不需要壓縮'); return; }
-
   // 背景算好的那一份只有在「算的時候是這場對話、而且訊息只增沒減」時才作數
-  const pre = S.pre && S.pre.id === c.id && c.messages.length >= S.pre.n + COMPACT_KEEP
-    ? S.pre : null;
-  const cut = pre ? pre.n : safeCut(c.messages, c.messages.length - COMPACT_KEEP);
-  if (cut <= 0) { toast('這一段沒辦法切開壓縮（都在同一組工具呼叫裡）'); return; }
+  const pre = S.pre && S.pre.id === c.id && c.messages.length >= S.pre.n ? S.pre : null;
+  const cut = pre ? pre.n : compactCut(c.messages);
+  if (cut <= 0) { toast('對話還太短，不需要壓縮'); return; }
   const head = c.messages.slice(0, cut);
   const tail = c.messages.slice(cut);
 
   const before = head.reduce(function (n, m) { return n + estTokens(m.content); }, 0);
 
   blockComposer(COMPACT_HINT);
-  if (!pre) toast('壓縮中，長對話可能要等一下…');
+  toast('壓縮中，長對話可能要等一下…');
+  let outcome = '';
   try {
-    const summary = (await (pre ? pre.p : once(COMPACT_PROMPT + transcriptOf(head)))).trim();
+    const summary = (await (pre ? pre.p : once(COMPACT_PROMPT + transcriptOf(head), 0,
+                                               compactProgress(performance.now())))).trim();
     if (!summary) throw new Error('模型沒有回傳內容');
     c.preCompact = fullHistory(c);          // 留一步可還原，摘要不理想時不會全毀
     c.preCompactN = 1 + tail.length;        // 前面這幾則是替身，之後新說的接在後面
@@ -1537,14 +1566,17 @@ async function compactChat() {
     updateCtx();
     // 省了多少才是使用者關心的事：壓縮要等、也會丟掉細節，值不值得看這個數字
     const saved = Math.round((before - estTokens(summary)) * S.ctxRatio);
-    toast('已把 ' + head.length + ' 則訊息壓成摘要，省下 ' + fmtK(saved) + ' tokens');
+    outcome = '已把 ' + head.length + ' 則訊息壓成摘要，省下 ' + fmtK(saved) + ' tokens';
   } catch (e) {
-    toast('壓縮失敗：' + friendlyError(e).msg);
+    outcome = '壓縮失敗：' + friendlyError(e).msg;
   } finally {
     S.pre = null;               // 用掉了或壞掉了，都不能再拿來壓第二次
     blockComposer('');
     renderCompactBtns();
   }
+  // 壓縮動輒幾分鐘，toast 兩秒就消失。結果留在輸入框下面，等下一次送出才換掉
+  toast(outcome);
+  $('hint').textContent = outcome;
 }
 
 function uncompact() {
@@ -1563,7 +1595,7 @@ function uncompact() {
 function renderCompactBtns() {
   const c = current();
   const btn = $('compactBtn');
-  btn.disabled = !c || c.messages.length <= COMPACT_KEEP + 1;
+  btn.disabled = !c || c.messages.length < 2;
   btn.classList.toggle('on', !!(c && c.preCompact));
   btn.title = '壓縮對話 · ' + (S.ctxLabel || '') +
     (c && c.preCompact ? '（壓縮過了，⋯ 選單可還原）' : '');

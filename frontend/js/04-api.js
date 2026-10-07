@@ -139,6 +139,12 @@ function oaError(data) {
   return (data.error && (data.error.message || data.error.type)) || '';
 }
 
+// 官方 OpenAI 看到不認得的欄位會回 400，擴充欄位只送給本機與區網的服務（llama.cpp、vLLM…）
+function oaLocal() {
+  return /^https?:\/\/(localhost|127\.|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i
+    .test(S.oa.base || '');
+}
+
 async function oaJson(path, body, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 20000);
