@@ -180,14 +180,31 @@ function ctxTokens(raw) {
   return isNaN(k) || k <= 0 ? 0 : Math.round(k * 1024);
 }
 
-// 實際能用的：num_ctx 跟模型／伺服器上限取小的。填多了 Ollama 默默用上限，
-// 外部服務則是截掉或退回 —— 用量條、自動壓縮、送出前的量測都要照真的那個算。
-function ctxLimit() { return Math.min(ctxFilled(), S.ctxMax[S.model] || Infinity); }
+// 實際能用的：num_ctx 跟模型／伺服器上限取小的，填多了 Ollama 默默用上限。
+// 外部 API 不收 num_ctx，伺服器回報了上限就以它為準。
+function ctxLimit() {
+  const cap = S.ctxMax[S.model] || 0;
+  if (cap && S.provider === 'openai') return cap;
+  return Math.min(ctxFilled(), cap || Infinity);
+}
+
+// 外部 API 以伺服器回報的實數為底（上一則回覆的 prompt + 產生），之後才加進來的再用估算補。
+// 實數只在那則回覆還在原位時作數：壓縮、刪改過就退回估算。
+function ctxUsed(extra) {
+  const c = current(), r = S.ctxReal;
+  if (!c || !r || c.messages[r.i] !== r.msg) return Math.round(rawEstimate(extra) * S.ctxRatio);
+  let n = estTokens(extra || '');
+  c.messages.slice(r.i + 1).forEach(function (m) {
+    n += estTokens(m.content) + (m.images ? 800 * m.images.length : 0);
+  });
+  S.files.forEach(function (f) { n += estTokens(fenceFor(f.name, f.text)); });
+  return r.tokens + Math.round(n * S.ctxRatio);
+}
 function ctxFilled() { return ctxTokens($('num_ctx').value) || 4096; }   // 欄位上填的
 
 function updateCtx() {
   const limit = ctxLimit();
-  const used = Math.round(rawEstimate($('input').value) * S.ctxRatio);
+  const used = ctxUsed($('input').value);
   const pct = Math.min(100, used / limit * 100);
   const tight = used >= limit * 0.75;
   // 「12.3k / 64k（19%）」：用量條與壓縮鍵的提示共用同一份字串
@@ -201,11 +218,11 @@ function updateCtx() {
   // num_ctx 比模型支援的還大時，多出來的部分是假的：Ollama 會默默用模型的上限。
   // 不自動改小（那等於偷改使用者填的數字），但一定要講。
   const cap = S.ctxMax[S.model] || 0;
-  const over = cap && ctxFilled() > cap
+  const over = cap && S.provider !== 'openai' && ctxFilled() > cap
     ? ' · ' + (S.model || '這個模型') + ' 最多 ' + Math.round(cap / 1024) + 'K，多填的沒有用'
     : '';
   $('ctxText').textContent = S.ctxLabel +
-    (used >= limit ? ' 已超出 num_ctx' : '') + (tight ? ' · 點這裡壓縮' : '') + over;
+    (used >= limit ? (S.provider === 'openai' ? ' 已超出伺服器的 context' : ' 已超出 num_ctx') : '') + (tight ? ' · 點這裡壓縮' : '') + over;
   $('ctxRow').hidden = $('ctxRow').hidden && !over;      // 只有這個警告時也要看得到
   if (tight) preCompact();      // 快滿了就先在背景把摘要算起來放著
   renderCompactBtns();

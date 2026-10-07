@@ -1340,6 +1340,10 @@ function finishStream(c, el, content, thinking, stats, t0, toolCalls, images, do
   if (content || thinking || record.tool_calls) {
     c.messages.push(record);
     saveChats();
+    if (S.provider === 'openai' && done && done.prompt_eval_count) {
+      S.ctxReal = { msg: record, i: c.messages.length - 1,
+                    tokens: done.prompt_eval_count + (done.eval_count || 0) };
+    }
   } else {
     // 什麼都沒有：講清楚發生什麼事，但**不要寫進對話** ——
     // 那是介面的說明，不是模型說的話，塞進去只會污染下一輪的 context。
@@ -1527,7 +1531,7 @@ const AUTO_COMPACT_AT = 0.85;      // preCompact 在 0.75 就先算好了，這�
 
 async function autoCompact(c) {
   if (!c || S.streaming || c.messages.length < 2) return false;
-  if (rawEstimate('') * S.ctxRatio < ctxLimit() * AUTO_COMPACT_AT) return false;
+  if (ctxUsed('') < ctxLimit() * AUTO_COMPACT_AT) return false;
   const before = c.messages.length;
   await compactChat();
   return c.messages.length < before;

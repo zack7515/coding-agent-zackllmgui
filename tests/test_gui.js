@@ -2222,6 +2222,28 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(/current\(\) !== c/.test(send), '存檔案那一下切了對話，會送進看不見的那則');
   assert.ok(/oversize\(text\)/.test(grab('submitFromInput')), '插話沒量長度，整份 log 會直接併進去');
   assert.ok(/S\.ctxMax/.test(grab('ctxLimit')), '用量條、自動壓縮還在照 num_ctx 算');
+  // 外部 API 以伺服器為準：num_ctx 根本沒送出去，用量也有伺服器回的實數
+  {
+    const ctx = new Function('S', 'C', `
+      const current = () => C;
+      const $ = () => ({ value: '64' });
+      const estTokens = (s) => String(s || '').length;
+      const fenceFor = (n, t) => t;
+      ${grab('rawEstimate')} ${grab('ctxTokens')} ${grab('ctxLimit')} ${grab('ctxFilled')} ${grab('ctxUsed')}
+      return { limit: ctxLimit, used: ctxUsed };`);
+    const reply = { role: 'assistant', content: 'x'.repeat(10) };
+    const C = { messages: [{ role: 'user', content: 'x'.repeat(100) }, reply,
+                           { role: 'tool', content: 'y'.repeat(30) }] };
+    const S = { provider: 'openai', model: 'm', ctxMax: { m: 131072 }, ctxRatio: 1, files: [],
+                ctxReal: { msg: reply, i: 1, tokens: 5000 } };
+    const f = ctx(S, C);
+    assert.strictEqual(f.limit(), 131072, '外部 API 還在照 num_ctx 的 64K 算上限');
+    assert.strictEqual(f.used('zz'), 5000 + 30 + 2, '用量沒有以伺服器的實數為底');
+    C.messages.shift();                       // 前面的訊息少了一則（壓縮、刪除）
+    assert.strictEqual(f.used(''), 2 + 10 + 30, '那則回覆不在原位了還拿舊的實數');
+    S.provider = 'ollama';
+    assert.strictEqual(f.limit(), 64 * 1024, 'Ollama 照樣是 num_ctx 跟模型上限取小的');
+  }
   console.log('ok   /clear 忙的時候不動、還原不吃新訊息；塞不下的那則落地成檔案');
 })();
 

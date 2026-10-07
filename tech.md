@@ -1808,8 +1808,12 @@ ponytail：五件跑在同一則對話裡，所以第五件扛著前四件的 co
 落地了模型也讀不回來。實測 51K tokens 的 log 丟進 32K 的服務，模型三輪內
 用 `search_files` 找到藏在中間的那一行。
 
-上限要量對才有用。`ctxLimit()` 回的是 `num_ctx` 跟 `S.ctxMax`（Ollama 是模型的
-上限，外部服務是伺服器實際開的）取小的那個，用量條、自動壓縮、子代理收工都吃這一份；
+上限要量對才有用。`ctxLimit()` 在 Ollama 回的是 `num_ctx` 跟模型上限取小的那個；
+外部 API 不收 `num_ctx`，所以伺服器回報了就只看伺服器的（原本也取小，預設 64K
+對上開了 131K 的服務，百分比整整多一倍，自動壓縮也提早觸發）。
+用量條、自動壓縮、子代理收工都吃這一份；
+用量在外部 API 也以伺服器為準：`ctxUsed()` 拿上一則回覆的 `prompt_tokens + completion_tokens`
+當底（`S.ctxReal`），之後加進來的才估算。那則回覆不在原位（壓縮、刪改）就退回估算；
 「填多了沒用」的提醒才看欄位上填的（`ctxFilled()`）。外部服務的值先看
 `/v1/models` 的 `meta.n_ctx`，llama-server 的 meta 只有 `n_ctx_train`（訓練長度），
 所以再問一次 `/props`。
