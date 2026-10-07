@@ -244,6 +244,8 @@ function setConn(state, extra) {
   dot.className = 'dot ' + (state === 'empty' ? 'ok' : state);
   pill.classList.toggle('error', state === 'error');
 
+  // 跑工具、複查、壓縮的鎖是那一輪自己的：30 秒一次的輪詢解開它，進度提示就不見了，/clear 也擋不住
+  const lock = function (why) { if (!turnBusy()) blockComposer(why); };
   const set = function (text, host, hostColor) {
     $('statusText').textContent = text;
     $('statusHost').textContent = host || '';
@@ -254,18 +256,18 @@ function setConn(state, extra) {
   if (state === 'ok') {
     set('已連線', shortHost);
     $('footInfo').textContent = S.models.length + ' 個模型 · v' + S.version;
-    blockComposer('');
+    lock('');
   } else if (state === 'empty') {
     set('已連線', '無可用模型', 'var(--warn)');
     $('footInfo').textContent = '沒有已下載的模型';
-    blockComposer('沒有可用模型，請先執行 ollama pull');
+    lock('沒有可用模型，請先執行 ollama pull');
   } else if (state === 'connecting') {
     set('連線中…', shortHost);
     $('footInfo').textContent = '連線中…';
   } else if (state === 'error') {
     set('無法連線', '');
     $('footInfo').textContent = '連線失敗';
-    blockComposer(CONN_HINT);
+    lock(CONN_HINT);
   } else {
     set('尚未連線', shortHost);
   }

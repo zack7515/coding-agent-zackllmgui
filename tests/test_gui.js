@@ -1728,6 +1728,24 @@ console.log('ok   context 快滿時自動省略較早的工具輸出');
   assert.ok(local({ oa: { base: 'http://192.168.1.20:8000/v1' } }));
   assert.ok(!local({ oa: { base: 'https://api.openai.com/v1' } }), '官方 API 收到不認得的欄位會回 400');
   assert.ok(/S\.preFail/.test(grab('preCompact')), '背景摘要失敗之後會一直自己重試');
+  // 每 30 秒的連線輪詢不能解開這一輪的鎖：壓縮跑到一千多字時提示整個消失過
+  {
+    const blocked = [];
+    const conn = new Function('S', 'busy', 'blocked', `
+      const turnBusy = () => busy;
+      const blockComposer = (r) => blocked.push(r);
+      const displayHost = () => '';
+      const el = { classList: { toggle() {} }, style: {} };
+      const $ = () => el;
+      const CONN_HINT = '連不上';
+      ${grab('setConn')}
+      return setConn;`);
+    conn({ models: [] }, true, blocked)('ok');
+    conn({ models: [] }, true, blocked)('error');
+    assert.deepStrictEqual(blocked, [], '輪詢把壓縮或跑工具的鎖解開了');
+    conn({ models: [] }, false, blocked)('ok');
+    assert.deepStrictEqual(blocked, [''], '沒在忙的時候連線恢復要解鎖');
+  }
   assert.ok(/\$\('hint'\)\.textContent = outcome/.test(grab('compactChat')),
     '壓縮結果只閃一下 toast，跑了幾分鐘的事看不到結果');
 
